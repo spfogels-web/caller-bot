@@ -3981,7 +3981,14 @@ app.get('/api/candidates/by-ca/:ca', (req, res) => {
       if (!arch) return res.status(404).json({ ok: false, error: 'Not found' });
       return res.json({ ok: true, candidate: arch, source: 'archive' });
     }
+    // Try sub_scores (where db.js writes) first, then pulse_sub_scores legacy
     const sub = (() => {
+      try {
+        const a = dbInstance.prepare(
+          `SELECT * FROM sub_scores WHERE candidate_id = ? ORDER BY id DESC LIMIT 1`
+        ).get(cand.id);
+        if (a && a.launch_quality != null) return a;
+      } catch {}
       try {
         return dbInstance.prepare(
           `SELECT * FROM pulse_sub_scores WHERE candidate_id = ? ORDER BY id DESC LIMIT 1`
@@ -4052,7 +4059,49 @@ app.get('/api/candidates/:id', (req, res) => {
     }
 
     if (!candidate.subScores || !Object.keys(candidate.subScores).length) {
-      // Source 1: score_sub_scores table
+      // Source 0.5: sub_scores table — this is where db.js insertSubScores
+      // actually writes (was a table-name mismatch with the older fallbacks below).
+      try {
+        const ssRow = dbInstance.prepare(
+          'SELECT * FROM sub_scores WHERE candidate_id=? OR contract_address=? ORDER BY id DESC LIMIT 1'
+        ).get(row.id, candidate.contract_address || row.contract_address);
+        if (ssRow && (ssRow.launch_quality != null || ssRow.wallet_structure != null)) {
+          candidate.subScores = {
+            launchQuality:   ssRow.launch_quality,
+            walletStructure: ssRow.wallet_structure,
+            marketBehavior:  ssRow.market_behavior,
+            socialNarrative: ssRow.social_narrative,
+          };
+          // Also surface signals/penalties from this row if not already set
+          if (!candidate.signals || !Object.keys(candidate.signals).length) {
+            try {
+              candidate.signals = {
+                launch: JSON.parse(ssRow.launch_signals || '[]'),
+                wallet: JSON.parse(ssRow.wallet_signals || '[]'),
+                market: JSON.parse(ssRow.market_signals || '[]'),
+                social: JSON.parse(ssRow.social_signals || '[]'),
+              };
+            } catch {}
+          }
+          if (!candidate.penalties || !Object.keys(candidate.penalties).length) {
+            try {
+              candidate.penalties = {
+                launch: JSON.parse(ssRow.launch_penalties || '[]'),
+                wallet: JSON.parse(ssRow.wallet_penalties || '[]'),
+                market: JSON.parse(ssRow.market_penalties || '[]'),
+                social: JSON.parse(ssRow.social_penalties || '[]'),
+              };
+            } catch {}
+          }
+          if (!candidate.structureGrade && ssRow.structure_grade) {
+            candidate.structureGrade = ssRow.structure_grade;
+          }
+        }
+      } catch {}
+    }
+
+    if (!candidate.subScores || !Object.keys(candidate.subScores).length) {
+      // Source 1: score_sub_scores table (legacy)
       try {
         // score_sub_scores may store data as columns OR as rows (one per dimension)
         // Try column format first (SELECT * returns one row with all 4 scores)
