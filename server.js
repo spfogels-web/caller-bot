@@ -93,7 +93,7 @@ const {
   ADMIN_TELEGRAM_ID,
   PORT              = 3000,
   NODE_ENV          = 'development',
-  MIN_SCORE_TO_POST = 52,
+  MIN_SCORE_TO_POST = 45,
   SCAN_INTERVAL_MS  = 90 * 1000,
 } = process.env;
 
@@ -1179,16 +1179,20 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   const setupCheck = candidate.setupType ?? candidate.claudeSetupType ?? '';
   if (setupCheck === 'EXTENDED_AVOID') return 'IGNORE';
 
-  // CHANGED: Threshold floor lowered 48 → 38 to allow more new coins through
-  const adjustedThreshold = Math.max(38, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
+  // Threshold floor lowered again (38 → 34) so more coins flow through to
+  // AUTO_POST and get Claude/GPT-4o final verdicts. The Auditor was starving;
+  // the AI layer provides precision on top of this wider recall gate.
+  const adjustedThreshold = Math.max(34, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
 
   if (scorerDecision === 'RETEST')    return 'RETEST';
   if (scorerDecision === 'WATCHLIST') return 'WATCHLIST';
 
   const allowedRisks = ['LOW', 'MEDIUM', 'HIGH'];
   if (finalScore >= adjustedThreshold && allowedRisks.includes(risk)) return 'AUTO_POST';
-  if (finalScore >= adjustedThreshold - 10) return 'WATCHLIST';
-  if (finalScore >= adjustedThreshold - 20) return 'HOLD_FOR_REVIEW';
+  // Widened WATCHLIST band from -10 to -14 so borderline gems stay on the list
+  // and accumulate rescan cycles instead of falling straight to IGNORE.
+  if (finalScore >= adjustedThreshold - 14) return 'WATCHLIST';
+  if (finalScore >= adjustedThreshold - 24) return 'HOLD_FOR_REVIEW';
   return 'IGNORE';
 }
 
@@ -2170,8 +2174,8 @@ async function processCandidate(candidate, isRescan = false) {
     let verdict = null;
     const aiShouldEvaluate = CLAUDE_API_KEY && (
       finalDecision !== 'BLOCKLIST' &&           // Blocklisted = instant skip, no AI needed
-      scoreResult.score >= 25 &&                  // Don't waste API on obvious noise
-      (enrichedCandidate.marketCap ?? 0) <= 200_000 // Only micro-caps (our target range)
+      scoreResult.score >= 20 &&                  // Loosened 25→20 so bot makes MORE decisions (learning)
+      (enrichedCandidate.marketCap ?? 0) <= 300_000 // Widened 200K→300K to catch gems just above
     );
 
     if (aiShouldEvaluate) {
@@ -2228,7 +2232,8 @@ async function processCandidate(candidate, isRescan = false) {
       finalDecision === 'AUTO_POST' ||
       finalDecision === 'WATCHLIST' ||
       finalDecision === 'RETEST' ||
-      (scoreResult.score >= 45 && finalDecision !== 'BLOCKLIST')
+      finalDecision === 'HOLD_FOR_REVIEW' ||
+      (scoreResult.score >= 38 && finalDecision !== 'BLOCKLIST') // Loosened 45→38: more final verdicts = more training data
     );
 
     if (shouldRunOpenAI) {
@@ -2509,6 +2514,70 @@ async function processCandidate(candidate, isRescan = false) {
       recordSeen(ca, true);
 
       } // end AUTO_POST block
+
+      // ── ARCHIVE non-AUTO_POST decisions too ─────────────────────────
+      // The Auditor was empty because only AUTO_POST rows ever landed in
+      // audit_archive. Expanding to include WATCHLIST / HOLD_FOR_REVIEW /
+      // RETEST (and IGNOREs with score >= 25) gives the Auditor real
+      // decision flow and lets the bot learn from every judgment call —
+      // not just the ones that crossed the post threshold.
+      const shouldArchiveNonPost =
+        finalDecision === 'WATCHLIST' ||
+        finalDecision === 'HOLD_FOR_REVIEW' ||
+        finalDecision === 'RETEST' ||
+        (finalDecision === 'IGNORE' && (scoreResult.score ?? 0) >= 25);
+
+      if (shouldArchiveNonPost) {
+        try {
+          const etTimestamp = new Date().toLocaleString('en-US', {
+            timeZone: 'America/New_York', month: 'short', day: 'numeric',
+            year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'short',
+          });
+          const claudeV = verdict?.verdict ?? enrichedCandidate.claudeVerdict ?? null;
+          const openaiV = enrichedCandidate.openaiVerdict ?? null;
+          dbInstance.prepare(`
+            INSERT INTO audit_archive (
+              contract_address,token,token_name,final_decision,composite_score,quick_score,
+              market_cap,liquidity,volume_1h,volume_24h,pair_age_hours,stage,
+              buy_ratio_1h,buys_1h,sells_1h,volume_velocity,bundle_risk,sniper_count,
+              top10_holder_pct,dev_wallet_pct,mint_authority,freeze_authority,lp_locked,
+              deployer_verdict,wallet_verdict,smart_money_score,winner_wallets,
+              claude_verdict,claude_risk,claude_setup_type,openai_decision,openai_conviction,
+              narrative_tags,twitter,website,telegram,holder_count,structure_grade,
+              trap_severity,bonding_curve_pct,sub_scores,called_at_et
+            ) VALUES (
+              ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+            )
+            ON CONFLICT(contract_address) DO UPDATE SET
+              final_decision=excluded.final_decision,
+              composite_score=excluded.composite_score,
+              called_at_et=excluded.called_at_et,
+              created_at=datetime('now')
+          `).run(
+            ca, enrichedCandidate.token, enrichedCandidate.tokenName,
+            finalDecision, scoreResult.score, enrichedCandidate.quickScore,
+            enrichedCandidate.marketCap, enrichedCandidate.liquidity,
+            enrichedCandidate.volume1h, enrichedCandidate.volume24h,
+            enrichedCandidate.pairAgeHours, scoreResult.stage ?? enrichedCandidate.stage,
+            enrichedCandidate.buySellRatio1h, enrichedCandidate.buys1h, enrichedCandidate.sells1h,
+            enrichedCandidate.volumeVelocity, enrichedCandidate.bundleRisk,
+            enrichedCandidate.sniperWalletCount, enrichedCandidate.top10HolderPct,
+            enrichedCandidate.devWalletPct, enrichedCandidate.mintAuthority,
+            enrichedCandidate.freezeAuthority, enrichedCandidate.lpLocked,
+            enrichedCandidate.deployerVerdict, enrichedCandidate.walletVerdict,
+            enrichedCandidate.smartMoneyScore, enrichedCandidate.knownWinnerWalletCount,
+            claudeV, scoreResult.risk ?? enrichedCandidate.claudeRisk,
+            scoreResult.setupType ?? enrichedCandidate.claudeSetupType,
+            enrichedCandidate.openaiDecision, enrichedCandidate.openaiConviction,
+            JSON.stringify(enrichedCandidate.narrativeTags ?? []),
+            enrichedCandidate.twitter, enrichedCandidate.website, enrichedCandidate.telegram,
+            enrichedCandidate.holders, scoreResult.structureGrade, scoreResult.trapDetector?.severity,
+            enrichedCandidate.bondingCurvePct,
+            JSON.stringify(scoreResult.subScores ?? {}),
+            etTimestamp,
+          );
+        } catch (err) { console.warn('[archive-nonpost] failed:', err.message); }
+      }
 
       insertCall({
         candidateId,

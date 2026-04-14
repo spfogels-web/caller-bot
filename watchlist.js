@@ -35,10 +35,10 @@ import { logEvent } from './db.js';
 
 const RETEST_DELAY_MS       = 3  * 60 * 1000;  // 3 min — quick re-check
 const WATCHLIST_DELAY_MS    = 10 * 60 * 1000;  // 10 min — next full cycle
-const MAX_RESCANS           = 3;               // max full re-enrichments
-const MAX_WATCHLIST_SIZE    = 150;             // cap to prevent bloat
-const MAX_RETEST_SIZE       = 50;
-const STALE_WATCHLIST_MS    = 2  * 60 * 60 * 1000; // drop after 2hr
+const MAX_RESCANS           = 6;               // bumped 3→6 — coins get more chances to upgrade
+const MAX_WATCHLIST_SIZE    = 300;             // bumped 150→300 so borderline coins stay visible longer
+const MAX_RETEST_SIZE       = 100;             // bumped 50→100
+const STALE_WATCHLIST_MS    = 4  * 60 * 60 * 1000; // bumped 2h→4h — coins stay on list longer before dropping
 const STALE_RETEST_MS       = 30 * 60 * 1000;      // drop after 30min
 
 // ─── In-Memory State (rebuilt from DB on startup) ─────────────────────────────
