@@ -1214,45 +1214,62 @@ body::before {
 /* Mobile-only buttons — hidden by default on desktop */
 
 
-/* ── AUDIT DETAIL MODAL (works on all screen sizes) ────────────────────── */
+/* ── AUDIT DETAIL MODAL — compact centered popup ───────────────────────── */
 .audit-modal-overlay {
   display:none;
   position:fixed;
-  top:0;left:0;right:0;bottom:0;
-  width:100%;height:100%;
-  background:rgba(0,0,0,0.9);
+  inset:0;
+  background:rgba(0,0,0,0.82);
+  backdrop-filter:blur(6px);
+  -webkit-backdrop-filter:blur(6px);
   z-index:8000;
+  padding:24px;
   overflow-y:auto;
   -webkit-overflow-scrolling:touch;
 }
 .audit-modal-overlay.open {
-  display:block !important;
+  display:flex !important;
+  align-items:flex-start;
+  justify-content:center;
 }
 .audit-modal-inner {
   background:var(--surface);
-  min-height:100vh;
-  padding:0 0 60px 0;
+  border:1px solid var(--border);
+  border-radius:14px;
+  box-shadow:0 20px 60px rgba(0,0,0,0.7);
+  width:100%;
+  max-width:780px;
+  padding:0 0 24px 0;
   position:relative;
-  max-width:100%;
+  margin:auto;
+  overflow:hidden;
 }
 .audit-modal-close {
-  position:sticky;
-  top:0;left:0;right:0;
-  display:flex;align-items:center;justify-content:space-between;
-  background:var(--base);
-  border-bottom:1px solid var(--border);
-  padding:10px 14px;
-  z-index:10;
+  position:absolute;
+  top:12px;right:12px;
+  z-index:20;
 }
-.audit-modal-close-title {
-  font-family:var(--mono);font-size:10px;color:var(--cyan);letter-spacing:1px;
-}
+.audit-modal-close-title { display:none; }
 .audit-modal-close-btn {
-  background:rgba(255,23,68,0.1);border:1px solid rgba(255,23,68,0.3);
-  color:var(--red);border-radius:5px;padding:6px 16px;
-  font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:1px;
+  background:rgba(0,0,0,0.65);
+  border:1px solid rgba(255,255,255,0.15);
+  color:#fff;
+  border-radius:50%;
+  width:32px;height:32px;
+  padding:0;
+  font-family:var(--mono);font-size:14px;
+  cursor:pointer;
+  letter-spacing:0;
+  display:flex;align-items:center;justify-content:center;
+  transition:all 0.15s;
 }
-.audit-modal-content { padding:14px; overflow-y:auto; }
+.audit-modal-close-btn:hover { background:rgba(255,23,68,0.3); border-color:rgba(255,23,68,0.5); }
+.audit-modal-content { padding:0; overflow-y:visible; }
+
+@media (max-width: 900px) {
+  .audit-modal-overlay { padding:0; }
+  .audit-modal-inner { max-width:100%; border-radius:0; min-height:100vh; }
+}
 
 @media (max-width: 900px) {
   :root { --sidebar-w: 0px; --chat-w: 100vw; --header-h: 48px; }
@@ -1550,6 +1567,7 @@ body::before {
   <nav class="header-tabs">
     <button class="htab active" onclick="switchTab('overview')"><span class="dot"></span>OVERVIEW</button>
     <button class="htab" onclick="switchTab('candidates')"><span class="dot"></span>CANDIDATES <span class="badge" id="tb-candidates-badge"></span></button>
+    <button class="htab" onclick="switchTab('auditor')"><span class="dot"></span>AUDITOR <span class="badge" id="tb-auditor-badge"></span></button>
     <button class="htab" onclick="switchTab('smart')"><span class="dot"></span>SMART MONEY</button>
     <button class="htab" onclick="switchTab('ai')"><span class="dot"></span>AI BRAIN</button>
     <button class="htab" onclick="switchTab('analytics')"><span class="dot"></span>ANALYTICS</button>
@@ -2411,6 +2429,76 @@ body::before {
       </div>
     </div><!-- /smart -->
 
+    <!-- AUDITOR TAB -->
+    <div class="tab-panel" id="tab-auditor">
+      <div style="padding:16px">
+
+        <!-- Header -->
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+          <div>
+            <div style="font-family:'Orbitron',var(--mono),monospace;font-size:18px;font-weight:900;background:linear-gradient(90deg,#18ffff,#00e676);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:2px">
+              AUDITOR
+            </div>
+            <div style="font-family:var(--mono);font-size:9px;color:rgba(136,153,187,0.7);letter-spacing:2px;margin-top:4px">
+              EVERY PROMOTED COIN · CLAUDE + GPT-4o DECISION TRAIL
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button onclick="loadAuditor()" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:5px;padding:6px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">↻ REFRESH</button>
+          </div>
+        </div>
+
+        <!-- Decision summary tiles -->
+        <div class="g5" style="margin-bottom:14px" id="auditorStats">
+          <div class="tile"><div class="tile-label">TOTAL</div><div class="tile-val" id="auTotal">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">AUTO POST</div><div class="tile-val" style="color:var(--green)" id="auAutoPost">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">WATCHLIST</div><div class="tile-val" style="color:var(--gold)" id="auWatchlist">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--orange)">RETEST</div><div class="tile-val" style="color:var(--orange)" id="auRetest">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">BLOCKED</div><div class="tile-val" style="color:var(--red)" id="auBlocklist">—</div></div>
+        </div>
+
+        <!-- Filters -->
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="auSearch" oninput="filterAuditor()" placeholder="Search token or CA..." style="flex:1;min-width:180px;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:5px;padding:6px 10px;color:var(--text1);font-family:var(--mono);font-size:10px;outline:none">
+          <select id="auDecision" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
+            <option value="">ALL DECISIONS</option>
+            <option value="AUTO_POST">AUTO POST</option>
+            <option value="WATCHLIST">WATCHLIST</option>
+            <option value="RETEST">RETEST</option>
+            <option value="IGNORE">IGNORE</option>
+            <option value="BLOCKLIST">BLOCKLIST</option>
+            <option value="HOLD_FOR_REVIEW">HOLD</option>
+          </select>
+          <select id="auMinScore" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
+            <option value="">ANY SCORE</option>
+            <option value="80">≥ 80</option>
+            <option value="65">≥ 65</option>
+            <option value="50">≥ 50</option>
+            <option value="38">≥ 38</option>
+          </select>
+          <select id="auMcap" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
+            <option value="">ANY MCAP</option>
+            <option value="gem">$5K–$40K (GEM WINDOW)</option>
+            <option value="micro">&lt; $100K</option>
+            <option value="small">$100K–$500K</option>
+            <option value="mid">&gt; $500K</option>
+          </select>
+        </div>
+
+        <!-- Audit rows -->
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+          <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:80px 1fr 80px 60px 1fr 90px 110px;gap:8px;font-family:var(--mono);font-size:7px;letter-spacing:2px;color:rgba(136,153,187,0.55);text-transform:uppercase">
+            <div>TIME</div><div>TOKEN</div><div>MCAP</div><div>SCORE</div><div>CLAUDE / GPT-4o</div><div>DECISION</div><div>SETUP</div>
+          </div>
+          <div id="auRows" style="max-height:600px;overflow-y:auto">
+            <div style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:rgba(136,153,187,0.5)">Loading audit archive...</div>
+          </div>
+          <div id="auPager" style="padding:8px 14px;border-top:1px solid var(--border);font-family:var(--mono);font-size:8px;color:var(--text3);text-align:center"></div>
+        </div>
+
+      </div>
+    </div><!-- /auditor -->
+
     <!-- SYSTEM TAB -->
     <div class="tab-panel" id="tab-system">
       <div class="g3" style="margin-bottom:12px">
@@ -2574,12 +2662,14 @@ function switchTab(name){
   if(sel) sel.value=name;
 
   if(name==='smart')loadSmartMoneyTab();
+  if(name==='auditor')loadAuditor();
 }
 
 function refreshTabData(name){
   switch(name){
     case 'overview':    loadOverview();      break;
     case 'candidates':  loadAudit();         break;
+    case 'auditor':     loadAuditor();       break;
     case 'analytics':   loadAnalytics();     break;
     case 'ai':          loadAI();            break;
     case 'smart':       loadSmartMoneyTab(); break;
@@ -3135,6 +3225,38 @@ function buildAuditDetail(c){
     </div>`;
   }
 
+  // Compact 2x2 card with mini radial ring
+  function subCard(label,icon,pct,color,weightPct,detail){
+    const v = pct!=null?Math.min(Math.max(pct,0),100):null;
+    const CIRC = 157; // 2*PI*r where r=25
+    const offset = v!=null ? CIRC*(1-(v/100)) : CIRC;
+    const col = v!=null?color:'#3d4f70';
+    return`<div style="background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="position:relative;width:56px;height:56px;flex-shrink:0">
+          <svg viewBox="0 0 60 60" width="56" height="56" style="transform:rotate(-90deg)">
+            <circle cx="30" cy="30" r="25" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="5"/>
+            <circle cx="30" cy="30" r="25" fill="none" stroke="${col}" stroke-width="5" stroke-linecap="round"
+              stroke-dasharray="${CIRC}" stroke-dashoffset="${offset}"
+              style="transition:stroke-dashoffset 0.8s cubic-bezier(0.4,0,0.2,1);filter:drop-shadow(0 0 4px ${col}66)"/>
+          </svg>
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+            <div style="font-family:var(--mono);font-size:16px;font-weight:900;color:${col};line-height:1">${v!=null?Math.round(v):'—'}</div>
+            <div style="font-family:var(--mono);font-size:6px;color:var(--text3);letter-spacing:0.5px">/ 100</div>
+          </div>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:5px">
+            <span style="font-size:13px">${icon}</span>
+            <div style="font-family:var(--mono);font-size:10px;font-weight:700;color:var(--text1);letter-spacing:0.5px">${label}</div>
+          </div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:2px;letter-spacing:1px">WEIGHT ${weightPct}%</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:3px">${detail}</div>
+    </div>`;
+  }
+
   function dataPoint(label,val,col,good){
     const c2 = col||(good?'var(--green)':'var(--text2)');
     return`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:rgba(0,0,0,0.2);border-radius:5px;margin-bottom:4px">
@@ -3202,39 +3324,59 @@ function buildAuditDetail(c){
   const pens = c.penalties||{};
   const allPens = [...(pens.launch||[]),(pens.wallet||[]),(pens.market||[]),(pens.social||[])].flat().filter(Boolean);
 
-  return`<div style="padding-bottom:30px">
+  return`<div style="padding-bottom:20px">
 
-    <!-- ═══ BANNER ═══ -->
-    <div style="width:100%;height:100px;overflow:hidden;background:rgba(0,0,0,0.5);position:relative">
-      <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${ca}/header.png"
-           onerror="this.style.display='none'"
-           style="width:100%;height:100%;object-fit:cover;display:block">
-      <div style="position:absolute;inset:0;background:linear-gradient(to bottom,transparent 40%,rgba(0,0,0,0.8))"></div>
-    </div>
-
-    <div style="padding:0 14px">
-
-    <!-- ═══ AVATAR + SCORE ROW ═══ -->
-    <div style="display:flex;align-items:flex-end;gap:12px;margin-top:-24px;margin-bottom:14px">
-      <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${ca}.png"
-           onerror="this.style.display='none'"
-           style="width:54px;height:54px;border-radius:50%;border:3px solid var(--surface);flex-shrink:0;background:var(--surface)">
-      <div style="flex:1;min-width:0;padding-bottom:4px">
-        <div style="font-family:var(--mono);font-size:19px;font-weight:900;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-          $${esc(c.token||'?')} <span style="font-size:11px;font-weight:400;color:var(--text3)">${esc(c.tokenName||'')}</span>
+    <!-- ═══ HERO: BANNER + LOGO + NAME + SCORE ═══ -->
+    <div style="position:relative;background:linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,12,24,0.9));overflow:hidden">
+      <!-- Banner (contained, not stretched) -->
+      <div style="width:100%;height:120px;overflow:hidden;background:rgba(0,0,0,0.5);position:relative">
+        <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${ca}/header.png"
+             onerror="this.style.display='none'"
+             style="width:100%;height:100%;object-fit:cover;display:block;opacity:0.85">
+        <div style="position:absolute;inset:0;background:linear-gradient(to bottom,rgba(0,0,0,0.25) 0%,rgba(0,0,0,0.55) 60%,rgba(0,0,0,0.9) 100%)"></div>
+      </div>
+      <!-- Info row overlapping banner bottom -->
+      <div style="display:flex;align-items:flex-end;gap:10px;padding:0 14px;margin-top:-36px;position:relative;z-index:2">
+        <!-- Logo -->
+        <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${ca}.png"
+             onerror="this.style.display='none'"
+             style="width:58px;height:58px;border-radius:50%;border:3px solid var(--surface);flex-shrink:0;background:var(--surface);box-shadow:0 4px 14px rgba(0,0,0,0.6);object-fit:cover">
+        <!-- Name + chips -->
+        <div style="flex:1;min-width:0;padding-bottom:4px">
+          <div style="font-family:var(--mono);font-size:17px;font-weight:900;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 2px 8px rgba(0,0,0,0.8)">
+            $${esc(c.token||'?')} <span style="font-size:10px;font-weight:400;color:var(--text3)">${esc(c.tokenName||'')}</span>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+            ${chip(dec,decColor(dec))}
+            ${chip(c.stage||'?',stageCol(c.stage))}
+            ${isBrandNew(c.pairAgeHours)?chip('⚡ BRAND NEW','var(--red)'):''}
+          </div>
         </div>
-        <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
-          ${chip(dec,decColor(dec))}
-          ${chip(c.stage||'?',stageCol(c.stage))}
-          ${isBrandNew(c.pairAgeHours)?chip('⚡ BRAND NEW','var(--red)'):''}
-          ${oaiD?chip('GPT-4o: '+oaiD+(oaiC?' '+oaiC+'%':''),oaiD==='AUTO_POST'?'var(--green)':oaiD==='IGNORE'?'var(--red)':'var(--gold)'):''}
+        <!-- Score top right -->
+        <div style="text-align:center;flex-shrink:0;padding-bottom:2px">
+          <div style="font-family:var(--mono);font-size:42px;font-weight:900;line-height:1;color:${scoreColor};text-shadow:0 0 18px ${scoreColor}77,0 2px 8px rgba(0,0,0,0.8)">${score}</div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-top:2px">COMPOSITE</div>
         </div>
       </div>
-      <div style="text-align:center;flex-shrink:0;padding-bottom:6px">
-        <div style="font-family:var(--mono);font-size:54px;font-weight:900;line-height:1;color:${scoreColor};text-shadow:0 0 24px ${scoreColor}66">${score}</div>
-        <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px">COMPOSITE</div>
-      </div>
     </div>
+
+    <div style="padding:14px 14px 0 14px">
+
+    <!-- ═══ AI VERDICT SUMMARY (at the very top) ═══ -->
+    ${(c.claudeVerdict||oaiD)?`<div style="background:linear-gradient(135deg,rgba(68,138,255,0.08),rgba(0,230,118,0.05));border:1px solid rgba(68,138,255,0.25);border-radius:10px;padding:12px;margin-bottom:12px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
+        <span style="font-family:var(--mono);font-size:9px;font-weight:700;color:var(--cyan);letter-spacing:1.5px">🤖 AI VERDICT</span>
+        ${c.claudeRisk?chip('Claude: '+c.claudeRisk,c.claudeRisk==='LOW'?'var(--green)':c.claudeRisk==='EXTREME'?'var(--red)':'var(--gold)'):''}
+        ${oaiD?chip('GPT-4o: '+oaiD+(oaiC?' '+oaiC+'%':''),oaiD==='AUTO_POST'?'var(--green)':oaiD==='IGNORE'?'var(--red)':'var(--gold)'):''}
+        ${!c.openaiAgreesWithClaude&&oaiD&&c.claudeVerdict?chip('⚠ Disagreement','var(--orange)'):''}
+        ${chip((c.claudeSetupType||c.setupType||'STANDARD').replace(/_/g,' '),'var(--blue)')}
+      </div>
+      ${c.claudeVerdict?`<p style="font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.55;margin:0 0 ${c.openaiVerdict?'8px':'0'} 0">"${esc(c.claudeVerdict)}"</p>`:''}
+      ${c.openaiVerdict?`<div style="padding-top:8px;border-top:1px solid rgba(255,255,255,0.06)">
+        <div style="font-family:var(--mono);font-size:8px;color:var(--green);letter-spacing:1px;margin-bottom:4px">🧠 GPT-4o FINAL</div>
+        <p style="font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.55;margin:0">"${esc(c.openaiVerdict)}"</p>
+      </div>`:''}
+    </div>`:''}
 
     <!-- ═══ LINKS ═══ -->
     ${ca?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
@@ -3329,16 +3471,16 @@ function buildAuditDetail(c){
       </div>
     </div>`:''}
 
-    <!-- ═══ 4 CORE SUB-SCORES ═══ -->
+    <!-- ═══ 4 CORE SUB-SCORES — 2x2 GRID WITH MINI RINGS ═══ -->
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden">
       <div style="padding:8px 14px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2)">
         <span style="font-family:var(--mono);font-size:9px;font-weight:700;color:var(--cyan);letter-spacing:1px">🎯 SCORING BREAKDOWN — 4 Core Dimensions</span>
       </div>
-      <div style="padding:12px">
-        ${subBar('Launch Quality','🚀',sub.launchQuality,'var(--green)',0.30,lqDetail)}
-        ${subBar('Wallet Structure','👥',sub.walletStructure,'var(--purple)',0.35,wsDetail)}
-        ${subBar('Market Behavior','📈',sub.marketBehavior,'var(--cyan)',0.20,mbDetail)}
-        ${subBar('Social Narrative','💬',sub.socialNarrative,'var(--gold)',0.15,snDetail)}
+      <div style="padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${subCard('Launch Quality','🚀',sub.launchQuality,'#00e676',30,lqDetail)}
+        ${subCard('Wallet Structure','👥',sub.walletStructure,'#e040fb',35,wsDetail)}
+        ${subCard('Market Behavior','📈',sub.marketBehavior,'#18ffff',20,mbDetail)}
+        ${subCard('Social Narrative','💬',sub.socialNarrative,'#ffd740',15,snDetail)}
       </div>
     </div>
 
@@ -3408,25 +3550,17 @@ function buildAuditDetail(c){
       </div>
     `)}
 
-    <!-- ═══ CLAUDE AI ═══ -->
-    ${c.claudeVerdict?section('🤖 CLAUDE FORENSIC ANALYSIS','var(--blue)',`
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-        ${chip('Risk: '+(c.claudeRisk||'?'),c.claudeRisk==='LOW'?'var(--green)':c.claudeRisk==='EXTREME'?'var(--red)':'var(--gold)')}
-        ${chip((c.claudeSetupType||c.setupType||'STANDARD').replace(/_/g,' '),'var(--blue)')}
-        ${c.structureGrade?chip('Grade: '+c.structureGrade,c.structureGrade==='CLEAN'?'var(--green)':c.structureGrade==='DIRTY'?'var(--red)':'var(--gold)'):''}
-      </div>
-      <div style="background:rgba(68,138,255,0.06);border:1px solid rgba(68,138,255,0.2);border-radius:8px;padding:12px;margin-bottom:8px">
-        <p style="font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.6;margin:0">"${esc(c.claudeVerdict)}"</p>
-      </div>
-      ${(()=>{
-        // Try to extract bull_case/red_flags from claudeRaw if available
-        const raw=c.claudeRaw||c.claude_raw;
-        let parsed=null;
-        if(raw){try{parsed=typeof raw==='string'?JSON.parse(raw):raw;}catch{}}
-        if(!parsed||(!parsed.bull_case&&!parsed.red_flags))return'';
-        const bull=Array.isArray(parsed.bull_case)?parsed.bull_case:[];
-        const flags=Array.isArray(parsed.red_flags)?parsed.red_flags:[];
-        return`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+    <!-- ═══ CLAUDE BULL/FLAGS (if claudeRaw arrays present) ═══ -->
+    ${(()=>{
+      const raw=c.claudeRaw||c.claude_raw;
+      let parsed=null;
+      if(raw){try{parsed=typeof raw==='string'?JSON.parse(raw):raw;}catch{}}
+      if(!parsed||(!parsed.bull_case&&!parsed.red_flags))return'';
+      const bull=Array.isArray(parsed.bull_case)?parsed.bull_case:[];
+      const flags=Array.isArray(parsed.red_flags)?parsed.red_flags:[];
+      if(!bull.length&&!flags.length)return'';
+      return section('🧠 CLAUDE — BULL CASE / RED FLAGS','var(--blue)',`
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
           ${bull.length?`<div style="background:rgba(0,230,118,0.06);border:1px solid rgba(0,230,118,0.2);border-radius:6px;padding:10px">
             <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:var(--green);letter-spacing:1.5px;margin-bottom:6px">🟢 BULL CASE</div>
             ${bull.map(b=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5;padding:3px 0">• ${esc(String(b))}</div>`).join('')}
@@ -3435,21 +3569,9 @@ function buildAuditDetail(c){
             <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:var(--red);letter-spacing:1.5px;margin-bottom:6px">🔴 RED FLAGS</div>
             ${flags.map(f=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5;padding:3px 0">• ${esc(String(f))}</div>`).join('')}
           </div>`:''}
-        </div>`;
-      })()}
-    `):''}
-
-    <!-- ═══ GPT-4o ═══ -->
-    ${oaiD?section('🧠 GPT-4o FINAL DECISION','var(--green)',`
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-        ${chip(oaiD,oaiD==='AUTO_POST'?'var(--green)':oaiD==='IGNORE'?'var(--red)':'var(--gold)')}
-        ${oaiC?chip('Conviction: '+oaiC+'%','var(--cyan)'):''}
-        ${!c.openaiAgreesWithClaude?chip('⚠ Disagrees with Claude','var(--orange)'):''}
-      </div>
-      ${c.openaiVerdict?`<div style="background:rgba(0,230,118,0.06);border:1px solid rgba(0,230,118,0.2);border-radius:8px;padding:12px">
-        <p style="font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.6;margin:0">"${esc(c.openaiVerdict)}"</p>
-      </div>`:''}
-    `):''}
+        </div>
+      `);
+    })()}
 
     <!-- ═══ WALLET INTELLIGENCE ═══ -->
     ${section('👥 WALLET INTELLIGENCE','var(--purple)',`
@@ -6062,6 +6184,112 @@ window.addEventListener('load', function() {
   }, 2500);
 });
 
+/* ═══════════════════════════════════════════════════════════
+   AUDITOR TAB — promoted coins + Claude/GPT-4o decision trail
+   ═══════════════════════════════════════════════════════════ */
+var _auRows = [];
+var _auFiltered = [];
+
+async function loadAuditor() {
+  var rowsEl = document.getElementById('auRows');
+  if (rowsEl) rowsEl.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:rgba(136,153,187,0.5)">Loading audit archive...</div>';
+  try {
+    var data = await apiFetch('/api/archive?limit=500');
+    if (!data || !data.ok) {
+      if (rowsEl) rowsEl.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Failed to load audit archive.</div>';
+      return;
+    }
+    _auRows = data.rows || [];
+    // Summary stats
+    var by = data.byDecision || {};
+    setText('auTotal', (data.total || _auRows.length).toLocaleString());
+    setText('auAutoPost', (by.AUTO_POST || 0).toLocaleString());
+    setText('auWatchlist', (by.WATCHLIST || 0).toLocaleString());
+    setText('auRetest', (by.RETEST || 0).toLocaleString());
+    setText('auBlocklist', ((by.BLOCKLIST || 0) + (by.IGNORE || 0)).toLocaleString());
+    // Tab badge
+    var badge = document.getElementById('tb-auditor-badge');
+    if (badge) badge.textContent = (data.total || _auRows.length) || '';
+    filterAuditor();
+  } catch (e) {
+    if (rowsEl) rowsEl.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Error: ' + (e.message || e) + '</div>';
+  }
+}
+
+function filterAuditor() {
+  var search = (document.getElementById('auSearch')?.value || '').toLowerCase().trim();
+  var dec    = document.getElementById('auDecision')?.value || '';
+  var minSc  = parseInt(document.getElementById('auMinScore')?.value || '0', 10);
+  var mcap   = document.getElementById('auMcap')?.value || '';
+
+  _auFiltered = _auRows.filter(function(r) {
+    if (dec && r.final_decision !== dec) return false;
+    if (minSc && (r.composite_score || 0) < minSc) return false;
+    if (search) {
+      var hay = ((r.token || '') + ' ' + (r.contract_address || '')).toLowerCase();
+      if (hay.indexOf(search) === -1) return false;
+    }
+    var mc = r.market_cap || 0;
+    if (mcap === 'gem'   && !(mc >= 5000 && mc <= 40000)) return false;
+    if (mcap === 'micro' && !(mc < 100000)) return false;
+    if (mcap === 'small' && !(mc >= 100000 && mc <= 500000)) return false;
+    if (mcap === 'mid'   && !(mc > 500000)) return false;
+    return true;
+  });
+  renderAuditor();
+}
+
+function renderAuditor() {
+  var rowsEl = document.getElementById('auRows');
+  var pager  = document.getElementById('auPager');
+  if (!rowsEl) return;
+  if (!_auFiltered.length) {
+    rowsEl.innerHTML = '<div style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:rgba(136,153,187,0.5)">No audited coins match these filters.</div>';
+    if (pager) pager.textContent = '';
+    return;
+  }
+
+  var rows = _auFiltered.slice(0, 200);
+  rowsEl.innerHTML = rows.map(function(r) {
+    var mc       = r.market_cap || 0;
+    var gemWindow = mc >= 5000 && mc <= 40000;
+    var score    = r.composite_score || 0;
+    var scCol    = scoreCol(score);
+    var dec      = r.final_decision || '—';
+    var decCol   = decColor(dec);
+    var oaiD     = r.openai_decision;
+    var oaiC     = r.openai_conviction;
+    var clRisk   = r.claude_risk;
+    var setup    = (r.claude_setup_type || '').replace(/_/g,' ');
+    var ca       = r.contract_address || '';
+    var token    = r.token || '?';
+    var ts       = r.called_at_et || r.created_at;
+    var timeTxt  = ts ? timeAgo(ts) : '—';
+
+    return '<div onclick="openAuditorRow(\'' + esc(ca) + '\')" style="display:grid;grid-template-columns:80px 1fr 80px 60px 1fr 90px 110px;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.04);cursor:pointer;transition:background 0.1s" onmouseenter="this.style.background=\'rgba(255,255,255,0.03)\'" onmouseleave="this.style.background=\'transparent\'">' +
+      '<div style="font-family:var(--mono);font-size:8px;color:var(--text3)">' + timeTxt + '</div>' +
+      '<div style="min-width:0"><div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">$' + esc(token) + '</div>' +
+        '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(ca.slice(0,10) + '…' + ca.slice(-4)) + '</div></div>' +
+      '<div style="font-family:var(--mono);font-size:10px;font-weight:700;color:' + (gemWindow ? 'var(--gold)' : 'var(--text2)') + '">' + fmt(mc,'$') + (gemWindow ? ' 💎' : '') + '</div>' +
+      '<div style="font-family:var(--mono);font-size:14px;font-weight:900;color:' + scCol + '">' + score + '</div>' +
+      '<div style="display:flex;gap:3px;flex-wrap:wrap;min-width:0">' +
+        (clRisk ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:' + (clRisk==='LOW'?'rgba(0,230,118,0.1)':clRisk==='EXTREME'?'rgba(255,23,68,0.1)':'rgba(255,215,64,0.1)') + ';color:' + (clRisk==='LOW'?'var(--green)':clRisk==='EXTREME'?'var(--red)':'var(--gold)') + '">C:' + clRisk + '</span>' : '') +
+        (oaiD ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:' + (oaiD==='AUTO_POST'?'rgba(0,230,118,0.1)':oaiD==='IGNORE'?'rgba(255,23,68,0.1)':'rgba(255,215,64,0.1)') + ';color:' + (oaiD==='AUTO_POST'?'var(--green)':oaiD==='IGNORE'?'var(--red)':'var(--gold)') + '">G:' + oaiD.replace('AUTO_POST','POST') + (oaiC?' ' + oaiC + '%':'') + '</span>' : '') +
+      '</div>' +
+      '<div style="font-family:var(--mono);font-size:9px;font-weight:700;color:' + decCol + '">' + dec + '</div>' +
+      '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(setup) + '</div>' +
+    '</div>';
+  }).join('');
+
+  if (pager) pager.textContent = 'Showing ' + rows.length + ' of ' + _auFiltered.length + ' filtered · ' + _auRows.length + ' total';
+}
+
+function openAuditorRow(ca) {
+  if (!ca) return;
+  if (typeof openArchiveDetail === 'function') { openArchiveDetail(ca); return; }
+  if (typeof openAuditModal === 'function') openAuditModal(ca);
+}
+
 </script>
 
 
@@ -6069,8 +6297,7 @@ window.addEventListener('load', function() {
   <div class="audit-modal-overlay" id="auditMobileModal">
     <div class="audit-modal-inner">
       <div class="audit-modal-close">
-        <div class="audit-modal-close-title">📊 FULL ANALYSIS</div>
-        <button class="audit-modal-close-btn" onclick="closeAuditModal()">✕ CLOSE</button>
+        <button class="audit-modal-close-btn" onclick="closeAuditModal()" aria-label="Close">✕</button>
       </div>
       <div class="audit-modal-content" id="auditMobileContent">
         <div class="spinner"><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--green)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>
