@@ -1590,6 +1590,299 @@ body::before {
   cursor: pointer;
 }
 .wi-heatmap-cell:hover { transform: scale(1.3); z-index: 10; position: relative; }
+
+/* ═══════════════════════════════════════════════════
+   🧠 BRAIN ANALYZER — futuristic wallet intel scanner
+   ═══════════════════════════════════════════════════ */
+.brain-analyzer {
+  position: relative;
+  background:
+    radial-gradient(ellipse at top left, rgba(224,64,251,0.10) 0%, transparent 55%),
+    radial-gradient(ellipse at bottom right, rgba(24,255,255,0.08) 0%, transparent 50%),
+    linear-gradient(135deg, rgba(4,6,11,0.97) 0%, rgba(8,12,28,0.95) 100%);
+  border: 1px solid rgba(224,64,251,0.3);
+  border-radius: 14px;
+  padding: 18px;
+  margin-bottom: 16px;
+  overflow: hidden;
+  box-shadow: 0 0 40px rgba(224,64,251,0.08);
+}
+.brain-analyzer::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(224,64,251,0.8), rgba(24,255,255,0.6), rgba(0,230,118,0.6), transparent);
+  animation: brainScanLine 4s ease-in-out infinite;
+}
+@keyframes brainScanLine {
+  0%,100% { opacity: 0.4; transform: scaleX(0.8); }
+  50%     { opacity: 1;   transform: scaleX(1); }
+}
+
+.brain-top {
+  display: flex;
+  gap: 18px;
+  align-items: stretch;
+  margin-bottom: 14px;
+}
+
+/* The brain visual — pulsating orb with concentric rings */
+.brain-visual {
+  position: relative;
+  width: 110px; height: 110px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.brain-orb {
+  width: 70px; height: 70px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 30% 30%, #ff79e8, #e040fb 35%, #6a1b9a 75%, #1a0033);
+  box-shadow:
+    0 0 0 2px rgba(224,64,251,0.4),
+    0 0 24px rgba(224,64,251,0.6),
+    0 0 60px rgba(224,64,251,0.3),
+    inset 0 0 20px rgba(255,121,232,0.4);
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: brainPulse 2.6s ease-in-out infinite;
+}
+.brain-emoji {
+  font-size: 36px;
+  filter: drop-shadow(0 0 6px rgba(0,0,0,0.6));
+  animation: brainFloat 3s ease-in-out infinite;
+}
+.brain-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(224,64,251,0.3);
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.brain-ring-1 { width: 88px;  height: 88px;  animation: brainRingPulse 2.6s ease-in-out infinite; }
+.brain-ring-2 { width: 100px; height: 100px; border-color: rgba(24,255,255,0.18); animation: brainRingPulse 2.6s ease-in-out infinite 0.4s; }
+.brain-ring-3 { width: 110px; height: 110px; border-color: rgba(0,230,118,0.10);  animation: brainRingPulse 2.6s ease-in-out infinite 0.8s; }
+@keyframes brainPulse {
+  0%,100% { transform: scale(1);    box-shadow: 0 0 0 2px rgba(224,64,251,0.4), 0 0 24px rgba(224,64,251,0.6), 0 0 60px rgba(224,64,251,0.3), inset 0 0 20px rgba(255,121,232,0.4); }
+  50%     { transform: scale(1.06); box-shadow: 0 0 0 3px rgba(224,64,251,0.6), 0 0 36px rgba(224,64,251,0.8), 0 0 80px rgba(224,64,251,0.4), inset 0 0 30px rgba(255,121,232,0.5); }
+}
+@keyframes brainFloat {
+  0%,100% { transform: translateY(0); }
+  50%     { transform: translateY(-2px); }
+}
+@keyframes brainRingPulse {
+  0%   { opacity: 0.85; transform: translate(-50%, -50%) scale(0.95); }
+  100% { opacity: 0;    transform: translate(-50%, -50%) scale(1.25); }
+}
+.brain-analyzer.scanning .brain-orb { animation: brainPulse 0.8s ease-in-out infinite; }
+.brain-analyzer.scanning .brain-emoji { animation: brainFloat 0.8s ease-in-out infinite; }
+
+/* Right-side input block */
+.brain-input-block { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.brain-title {
+  display: flex; align-items: center; gap: 10px;
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 16px; font-weight: 900; letter-spacing: 3px;
+  line-height: 1;
+}
+.brain-title-glow {
+  background: linear-gradient(90deg, #ff79e8, #18ffff, #00e676);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 10px rgba(224,64,251,0.4));
+}
+.brain-status-pill {
+  font-family: var(--mono);
+  font-size: 8px; font-weight: 700; letter-spacing: 2px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  background: rgba(136,153,187,0.12);
+  border: 1px solid rgba(136,153,187,0.35);
+  color: var(--text3);
+}
+.brain-status-pill.scanning {
+  background: rgba(0,230,118,0.12);
+  border-color: rgba(0,230,118,0.5);
+  color: var(--green);
+  animation: brainStatusPulse 1.2s ease-in-out infinite;
+}
+.brain-status-pill.done {
+  background: rgba(24,255,255,0.12);
+  border-color: rgba(24,255,255,0.5);
+  color: var(--cyan);
+}
+.brain-status-pill.error {
+  background: rgba(255,23,68,0.12);
+  border-color: rgba(255,23,68,0.5);
+  color: var(--red);
+}
+@keyframes brainStatusPulse {
+  0%,100% { opacity: 0.9; box-shadow: 0 0 0 0 rgba(0,230,118,0); }
+  50%     { opacity: 1;   box-shadow: 0 0 12px rgba(0,230,118,0.4); }
+}
+.brain-subtitle {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text3);
+  line-height: 1.5;
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+.brain-input-row { display: flex; gap: 6px; }
+.brain-input {
+  flex: 1; min-width: 0;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid rgba(224,64,251,0.25);
+  border-radius: 7px;
+  padding: 9px 14px;
+  color: var(--text1);
+  font-family: var(--mono);
+  font-size: 10px;
+  outline: none;
+  transition: all 0.2s;
+}
+.brain-input:focus {
+  border-color: rgba(224,64,251,0.6);
+  box-shadow: 0 0 14px rgba(224,64,251,0.2);
+}
+.brain-input::placeholder { color: rgba(136,153,187,0.5); }
+.brain-analyze-btn {
+  background: linear-gradient(135deg, rgba(224,64,251,0.25), rgba(24,255,255,0.15));
+  border: 1px solid rgba(224,64,251,0.5);
+  color: #fff;
+  border-radius: 7px;
+  padding: 9px 18px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+  text-shadow: 0 0 6px rgba(224,64,251,0.6);
+}
+.brain-analyze-btn:hover {
+  background: linear-gradient(135deg, rgba(224,64,251,0.4), rgba(24,255,255,0.25));
+  box-shadow: 0 0 16px rgba(224,64,251,0.4);
+  transform: translateY(-1px);
+}
+.brain-analyze-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.brain-quick-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
+.brain-quick-label {
+  font-family: var(--mono);
+  font-size: 7px; letter-spacing: 1.5px;
+  color: var(--text3);
+}
+.brain-quick-chip {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text2);
+  border-radius: 4px;
+  padding: 3px 9px;
+  font-family: var(--mono);
+  font-size: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.brain-quick-chip:hover { background: rgba(224,64,251,0.1); border-color: rgba(224,64,251,0.3); color: var(--text1); }
+.brain-quick-chip-clear { color: var(--red); border-color: rgba(255,23,68,0.2); }
+
+/* Live progress bar */
+.brain-progress { margin: 10px 0 14px 0; }
+.brain-progress-track {
+  height: 4px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.brain-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #e040fb, #18ffff, #00e676);
+  border-radius: 2px;
+  transition: width 0.5s cubic-bezier(0.4,0,0.2,1);
+  box-shadow: 0 0 8px rgba(224,64,251,0.6);
+}
+.brain-progress-text {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 8px;
+  color: var(--text3);
+  letter-spacing: 1.5px;
+  text-align: center;
+}
+
+/* Stage counters grid */
+.brain-stages {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin-bottom: 14px;
+}
+@media(max-width:900px){ .brain-stages { grid-template-columns: repeat(4, 1fr); } }
+@media(max-width:520px){ .brain-stages { grid-template-columns: repeat(2, 1fr); } }
+
+.brain-stage {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 10px 6px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.25s;
+}
+.brain-stage.active {
+  border-color: rgba(0,230,118,0.4);
+  box-shadow: 0 0 14px rgba(0,230,118,0.18);
+  background: rgba(0,230,118,0.05);
+}
+.brain-stage.done {
+  border-color: rgba(24,255,255,0.3);
+  background: rgba(24,255,255,0.04);
+}
+.brain-stage-pnl {
+  background: rgba(255,215,64,0.05);
+  border-color: rgba(255,215,64,0.25);
+}
+.brain-stage-pnl.done {
+  background: linear-gradient(135deg, rgba(255,215,64,0.12), rgba(255,109,0,0.06));
+  border-color: rgba(255,215,64,0.5);
+  box-shadow: 0 0 16px rgba(255,215,64,0.2);
+}
+.bs-icon { font-size: 18px; line-height: 1; margin-bottom: 4px; }
+.bs-label {
+  font-family: var(--mono);
+  font-size: 7px;
+  color: var(--text3);
+  letter-spacing: 1.5px;
+  margin-bottom: 4px;
+}
+.bs-count {
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 18px;
+  font-weight: 900;
+  color: var(--text1);
+  line-height: 1;
+}
+.brain-stage.active .bs-count { color: var(--green); animation: bsCountPulse 1s ease-in-out infinite; }
+.brain-stage.done .bs-count { color: var(--cyan); }
+.brain-stage-pnl.done .bs-count { color: var(--gold); }
+@keyframes bsCountPulse {
+  0%,100% { opacity: 0.7; }
+  50%     { opacity: 1; }
+}
+
+.brain-recent-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.brain-results { margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -2311,20 +2604,91 @@ body::before {
           <span id="smScanStatus" style="font-family:var(--mono);font-size:9px;color:var(--text3)"></span>
         </div>
 
-        <!-- TOKEN ANALYZER / SEED CONTRACTS (preserved — independent feature) -->
-        <div class="card" id="seedContractsCard" style="margin-bottom:14px">
-          <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
-            <span>🔬 TOKEN ANALYZER — Paste contract addresses to find early wallets</span>
-            <button onclick="addSeedContract()" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:4px;padding:4px 12px;font-family:var(--mono);font-size:9px;cursor:pointer">+ ADD TOKEN</button>
-          </div>
-          <div class="card-body">
-            <div style="display:flex;gap:6px;margin-bottom:10px">
-              <input id="seedContractInput" placeholder="Paste contract address (CA)..." style="flex:1;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:5px;padding:7px 10px;color:var(--text1);font-family:var(--mono);font-size:10px;outline:none" onkeydown="if(event.key==='Enter')addSeedContract()">
-              <button onclick="addSeedContract()" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:5px;padding:7px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700">ANALYZE</button>
+        <!-- ═══════════════════════════════════════════════════════════════
+             🧠 BRAIN ANALYZER — futuristic wallet intel scanner
+             For the big winners ($500M, $3M+ historic). Feed it a CA, the
+             brain scans every holder, classifies them, and harvests PnL.
+             ═══════════════════════════════════════════════════════════════ -->
+        <div id="brainAnalyzerCard" class="brain-analyzer">
+          <!-- Top: brain visual + input -->
+          <div class="brain-top">
+            <div class="brain-visual">
+              <div class="brain-ring brain-ring-1"></div>
+              <div class="brain-ring brain-ring-2"></div>
+              <div class="brain-ring brain-ring-3"></div>
+              <div class="brain-orb">
+                <div class="brain-emoji">🧠</div>
+              </div>
             </div>
-            <div id="seedContractsList" style="display:flex;flex-direction:column;gap:6px"></div>
-            <div id="seedWalletSections" style="margin-top:12px"></div>
+            <div class="brain-input-block">
+              <div class="brain-title">
+                <span class="brain-title-glow">BRAIN ANALYZER</span>
+                <span class="brain-status-pill" id="brainStatusPill">IDLE</span>
+              </div>
+              <div class="brain-subtitle">Drop a contract address. The brain dissects every holder — whales · smart money · snipers · clusters · exits — and harvests their cross-token PnL via Solscan.</div>
+              <div class="brain-input-row">
+                <input id="seedContractInput" class="brain-input" placeholder="Paste contract address (CA) — works on any market cap, optimized for $3M+ historic gems"
+                       onkeydown="if(event.key==='Enter')triggerBrainAnalysis()">
+                <button class="brain-analyze-btn" onclick="triggerBrainAnalysis()">⚡ ANALYZE</button>
+              </div>
+              <div class="brain-quick-row">
+                <span class="brain-quick-label">QUICK LOAD:</span>
+                <button class="brain-quick-chip" onclick="document.getElementById('seedContractInput').value='';triggerBrainAnalysis()" title="Use last analyzed contract">♻ RECENT</button>
+                <button class="brain-quick-chip brain-quick-chip-clear" onclick="clearBrainAnalysis()">✕ CLEAR</button>
+              </div>
+            </div>
           </div>
+
+          <!-- Live scan progress bar -->
+          <div class="brain-progress" id="brainProgress" style="display:none">
+            <div class="brain-progress-track"><div class="brain-progress-fill" id="brainProgressFill"></div></div>
+            <div class="brain-progress-text" id="brainProgressText">Initializing scan...</div>
+          </div>
+
+          <!-- Live scan stage indicators -->
+          <div class="brain-stages" id="brainStages">
+            <div class="brain-stage" data-stage="holders">
+              <div class="bs-icon">📋</div>
+              <div class="bs-label">HOLDERS</div>
+              <div class="bs-count" id="bsHolders">—</div>
+            </div>
+            <div class="brain-stage" data-stage="whales">
+              <div class="bs-icon">🐋</div>
+              <div class="bs-label">WHALES</div>
+              <div class="bs-count" id="bsWhales">—</div>
+            </div>
+            <div class="brain-stage" data-stage="smart">
+              <div class="bs-icon">💎</div>
+              <div class="bs-label">SMART $</div>
+              <div class="bs-count" id="bsSmart">—</div>
+            </div>
+            <div class="brain-stage" data-stage="snipers">
+              <div class="bs-icon">🎯</div>
+              <div class="bs-label">SNIPERS</div>
+              <div class="bs-count" id="bsSnipers">—</div>
+            </div>
+            <div class="brain-stage" data-stage="clusters">
+              <div class="bs-icon">🕸</div>
+              <div class="bs-label">CLUSTERS</div>
+              <div class="bs-count" id="bsClusters">—</div>
+            </div>
+            <div class="brain-stage" data-stage="exits">
+              <div class="bs-icon">🚪</div>
+              <div class="bs-label">EXITS</div>
+              <div class="bs-count" id="bsExits">—</div>
+            </div>
+            <div class="brain-stage brain-stage-pnl" data-stage="pnl">
+              <div class="bs-icon">💰</div>
+              <div class="bs-label">TOP PnL</div>
+              <div class="bs-count" id="bsPnl">—</div>
+            </div>
+          </div>
+
+          <!-- Recent CAs analyzed -->
+          <div id="seedContractsList" class="brain-recent-list"></div>
+
+          <!-- Per-token wallet drilldowns -->
+          <div id="seedWalletSections" class="brain-results"></div>
         </div>
 
         <!-- WALLET CATEGORY CARDS -->
@@ -6339,6 +6703,163 @@ async function analyzeSeedContract(ca){
 
 
 startAutoRefresh();
+
+/* ═══════════════════════════════════════════════════════════
+   🧠 BRAIN ANALYZER — orchestrates the futuristic scan UI
+   ═══════════════════════════════════════════════════════════ */
+const BRAIN_STAGES_ORDER = ['holders','whales','smart','snipers','clusters','exits','pnl'];
+const BRAIN_STAGE_LABELS = {
+  holders:  '📋 Pulling holder list...',
+  whales:   '🐋 Identifying whales...',
+  smart:    '💎 Cross-referencing smart money database...',
+  snipers:  '🎯 Detecting first-block snipers...',
+  clusters: '🕸 Mapping wallet clusters...',
+  exits:    '🚪 Tracing exit patterns...',
+  pnl:      '💰 Harvesting PnL via Solscan...',
+};
+let _brainBusy = false;
+
+function _setBrainStage(stage, state, count) {
+  const el = document.querySelector(`.brain-stage[data-stage="${stage}"]`);
+  if (!el) return;
+  el.classList.remove('active','done');
+  if (state) el.classList.add(state);
+  if (count != null) {
+    const cEl = el.querySelector('.bs-count');
+    if (cEl) cEl.textContent = count;
+  }
+}
+
+function _setBrainStatus(label, cls) {
+  const pill = document.getElementById('brainStatusPill');
+  if (!pill) return;
+  pill.textContent = label;
+  pill.classList.remove('scanning','done','error');
+  if (cls) pill.classList.add(cls);
+}
+
+function _setBrainProgress(pct, text) {
+  const p   = document.getElementById('brainProgress');
+  const f   = document.getElementById('brainProgressFill');
+  const t   = document.getElementById('brainProgressText');
+  if (p) p.style.display = 'block';
+  if (f) f.style.width = Math.min(100, pct) + '%';
+  if (t && text) t.textContent = text;
+}
+
+function _hideBrainProgress() {
+  const p = document.getElementById('brainProgress');
+  if (p) p.style.display = 'none';
+}
+
+function clearBrainAnalysis() {
+  _brainBusy = false;
+  _seedContracts = [];
+  document.getElementById('seedContractsList').innerHTML = '';
+  document.getElementById('seedWalletSections').innerHTML = '';
+  BRAIN_STAGES_ORDER.forEach(s => _setBrainStage(s, null, '—'));
+  _setBrainStatus('IDLE', null);
+  _hideBrainProgress();
+  document.getElementById('brainAnalyzerCard')?.classList.remove('scanning');
+  const inp = document.getElementById('seedContractInput');
+  if (inp) inp.value = '';
+}
+
+async function triggerBrainAnalysis() {
+  if (_brainBusy) return;
+  const input = document.getElementById('seedContractInput');
+  let ca = (input?.value || '').trim();
+  // RECENT button: re-use the most recent contract if the input is empty
+  if (!ca && _seedContracts.length) ca = _seedContracts[_seedContracts.length - 1];
+  if (!ca) {
+    _setBrainStatus('NEED CA', 'error');
+    setTimeout(() => _setBrainStatus('IDLE', null), 1500);
+    return;
+  }
+  _brainBusy = true;
+  document.getElementById('brainAnalyzerCard')?.classList.add('scanning');
+  _setBrainStatus('SCANNING', 'scanning');
+  BRAIN_STAGES_ORDER.forEach(s => _setBrainStage(s, null, '—'));
+
+  // Kick the existing seed-scan flow (renders into seedWalletSections)
+  if (!_seedContracts.includes(ca)) _seedContracts.push(ca);
+  if (input) input.value = '';
+  renderSeedList();
+  // Don't await — we want the staged animation to run alongside the fetch
+  const scanPromise = analyzeSeedContract(ca).catch(() => null);
+
+  // Animate stages progressively while we wait for the real data.
+  // Each stage takes ~700ms; total ~5s for a satisfying scan feel.
+  const stagePct = 100 / BRAIN_STAGES_ORDER.length;
+  let stageIdx = 0;
+  for (const stage of BRAIN_STAGES_ORDER) {
+    _setBrainStage(stage, 'active');
+    _setBrainProgress((stageIdx + 0.5) * stagePct, BRAIN_STAGE_LABELS[stage]);
+    await new Promise(r => setTimeout(r, 650));
+    _setBrainStage(stage, 'done');
+    stageIdx++;
+  }
+
+  // Now wait for the real candidate data (if not already back) and fill counts
+  await scanPromise;
+  let candidate = null;
+  try {
+    const data = await apiFetch('/api/candidates/by-ca/' + encodeURIComponent(ca));
+    candidate = data?.candidate || null;
+  } catch {}
+
+  if (candidate) {
+    const wi = candidate.wallet_intel
+      ? (typeof candidate.wallet_intel === 'string' ? JSON.parse(candidate.wallet_intel) : candidate.wallet_intel)
+      : {};
+    const holders  = candidate.holders ?? candidate.holder_count ?? 0;
+    const whales   = wi.whaleCount ?? Math.max(0, Math.round((candidate.top10_holder_pct || 0) / 10));
+    const smart    = wi.knownWinnerWalletCount ?? wi.smartMoneyCount ?? 0;
+    const snipers  = candidate.sniper_wallet_count ?? wi.sniperWalletCount ?? 0;
+    const clusters = wi.clusterWalletCount ?? 0;
+    const exits    = wi.exitedCount ?? 0;
+    _setBrainStage('holders',  'done', holders ? holders.toLocaleString() : '—');
+    _setBrainStage('whales',   'done', whales);
+    _setBrainStage('smart',    'done', smart);
+    _setBrainStage('snipers',  'done', snipers);
+    _setBrainStage('clusters', 'done', clusters);
+    _setBrainStage('exits',    'done', exits);
+
+    // Fire Solscan PnL enrichment on top wallets in the background.
+    // The endpoint returns quickly with stats for the first wallet hit.
+    try {
+      const topWallet = (wi.topWinnerAddresses && wi.topWinnerAddresses[0]) || null;
+      if (topWallet) {
+        const pnlRes = await fetch('/api/wallets/enrich', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: topWallet })
+        }).then(r => r.json()).catch(() => null);
+        if (pnlRes?.stats?.avgRoi != null) {
+          const roiPct = Math.round(pnlRes.stats.avgRoi * 100);
+          _setBrainStage('pnl', 'done', (roiPct >= 0 ? '+' : '') + roiPct + '%');
+        } else {
+          _setBrainStage('pnl', 'done', '—');
+        }
+      } else {
+        _setBrainStage('pnl', 'done', '—');
+      }
+    } catch {
+      _setBrainStage('pnl', 'done', '—');
+    }
+
+    _setBrainStatus('COMPLETE', 'done');
+    _setBrainProgress(100, '✓ Scan complete · ' + (candidate.token ? '$' + candidate.token : ca.slice(0, 8)));
+  } else {
+    BRAIN_STAGES_ORDER.forEach(s => _setBrainStage(s, 'done', '—'));
+    _setBrainStatus('NO DATA', 'error');
+    _setBrainProgress(100, 'Token not in our database — try DexScreener');
+  }
+
+  document.getElementById('brainAnalyzerCard')?.classList.remove('scanning');
+  setTimeout(_hideBrainProgress, 4000);
+  _brainBusy = false;
+}
 
 /* ═══════════════════════════════════════════════════════════
    WALLET INTELLIGENCE — HEATMAP + CATEGORY FILTER PATCHES
