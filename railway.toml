@@ -1,0 +1,17 @@
+# railway.toml — Alpha Lennix persistent storage config
+# This tells Railway to mount a persistent volume at /data
+# so your SQLite database survives deploys and restarts.
+#
+# HOW TO SET UP (one-time):
+# 1. Deploy this file to your repo
+# 2. In Railway dashboard → your service → "Volumes" tab
+#    → "Add Volume" → Mount Path: /data
+# 3. In Railway → your service → Variables:
+#    Add: DATABASE_PATH=/data/alpha-lennix.db
+# 4. Redeploy — your data will now persist forever
+
+[deploy]
+startCommand = "node --max-old-space-size=1024 server.js"
+
+[[volumes]]
+mountPath = "/data"

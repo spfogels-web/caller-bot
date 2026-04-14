@@ -1,0 +1,254 @@
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ *  db-insert-patch.js
+ *
+ *  This shows the EXACT changes needed in your db.js insertCandidate() function
+ *  to make LAUNCHQ, BUY%1H, and VOLVEL populate in the dashboard.
+ *
+ *  The problem: enricher.js produces these camelCase fields:
+ *    launchQualityScore, buySellRatio1h, volumeVelocity, sniperWalletCount etc.
+ *
+ *  But insertCandidate() wasn't mapping them to the DB columns.
+ *
+ *  INSTRUCTIONS:
+ *  Find your insertCandidate() function in db.js and ADD these fields
+ *  to the INSERT statement and the parameter list.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+// ── FIND this section in your db.js insertCandidate() INSERT statement
+// and ADD the new columns + values shown below.
+// The exact position doesn't matter as long as columns and values match up.
+
+// COLUMNS TO ADD to your INSERT INTO candidates (...) statement:
+const NEW_COLUMNS = `
+  launch_quality_score,
+  launch_unique_buyer_ratio,
+  launch_top_buyer_share,
+  launch_top3_buyer_share,
+  launch_tx_count,
+  launch_unique_buyers,
+  sniper_wallet_count,
+  buy_sell_ratio_1h,
+  buy_sell_ratio_6h,
+  volume_velocity,
+  buy_velocity,
+  breakout_score,
+  recovery_score,
+  holder_dist_score,
+  fresh_wallet_inflows,
+  bundle_risk_helius,
+  bot_source,
+  sltp
+`;
+
+// VALUES TO ADD (matching the columns above, using the candidate object):
+const NEW_VALUES_MAPPING = (c) => ([
+  c.launchQualityScore        ?? null,
+  c.launchUniqueBuyerRatio    ?? null,
+  c.launchTopBuyerShare       ?? null,
+  c.launchTop3BuyerShare      ?? null,
+  c.launchTxCount             ?? null,
+  c.launchUniqueBuyerCount    ?? null,
+  c.sniperWalletCount         ?? null,
+  c.buySellRatio1h            ?? null,
+  c.buySellRatio6h            ?? null,
+  c.volumeVelocity            ?? null,
+  c.buyVelocity               ?? null,
+  c.breakoutContinuationScore ?? null,
+  c.firstDumpRecoveryScore    ?? null,
+  c.holderDistributionScore   ?? null,
+  c.freshWalletInflows ? 1 : 0,
+  c.bundleRisk_helius         ?? null,
+  c.botSource                 ?? null,
+  c.sltp                      ?? null,
+]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FULL REPLACEMENT insertCandidate() function
+// Replace your entire existing insertCandidate() with this one:
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function insertCandidate(c) {
+  // This is a complete drop-in replacement for your existing insertCandidate
+  // It includes ALL your existing fields PLUS the new launch data fields
+
+  const stmt = db.prepare(`
+    INSERT INTO candidates (
+      token, token_name, contract_address, chain, dex,
+      pair_age_hours, pair_created_at, stage,
+      price_usd, market_cap, liquidity,
+      volume_24h, volume_6h, volume_1h,
+      price_change_24h, price_change_6h, price_change_1h, price_change_5m,
+      buys_24h, sells_24h, buys_1h, sells_1h, txns_24h, txns_1h,
+      holders, holder_growth_24h,
+      top10_holder_pct, dev_wallet_pct, insider_wallet_pct,
+      mint_authority, freeze_authority, lp_locked,
+      bundle_risk, bubble_map_risk, wallet_cluster_risk,
+      deployer_history_risk, volume_quality, chart_extended,
+      social_score, website, twitter, telegram,
+      narrative_tags, labels,
+      composite_score, structure_grade, setup_type, stage_label,
+      trap_triggered, trap_severity, dynamic_threshold,
+      market_regime, regime_adjusted_score,
+      claude_score, claude_risk, claude_decision, claude_setup_type,
+      claude_verdict, claude_raw, final_decision, posted,
+      notes, birdeye_ok, helius_ok, bubblemaps_ok,
+      retest_count, bot_source, sltp,
+
+      launch_quality_score, launch_unique_buyer_ratio,
+      launch_top_buyer_share, launch_top3_buyer_share,
+      launch_tx_count, launch_unique_buyers,
+      sniper_wallet_count,
+      buy_sell_ratio_1h, buy_sell_ratio_6h,
+      volume_velocity, buy_velocity,
+      breakout_score, recovery_score, holder_dist_score,
+      fresh_wallet_inflows, bundle_risk_helius,
+      wallet_intel_score, cluster_risk, coordination_intensity,
+      momentum_grade, survival_score
+    ) VALUES (
+      ?,?,?,?,?,
+      ?,?,?,
+      ?,?,?,
+      ?,?,?,
+      ?,?,?,?,
+      ?,?,?,?,?,?,
+      ?,?,
+      ?,?,?,
+      ?,?,?,
+      ?,?,?,
+      ?,?,?,
+      ?,?,?,?,
+      ?,?,
+      ?,?,?,?,
+      ?,?,?,
+      ?,?,
+      ?,?,?,?,
+      ?,?,?,?,?,
+      ?,?,
+
+      ?,?,
+      ?,?,
+      ?,?,
+      ?,
+      ?,?,
+      ?,?,
+      ?,?,?,
+      ?,?,
+      ?,?,?,
+      ?,?
+    )
+  `);
+
+  const result = stmt.run(
+    // Identity
+    c.token ?? null,
+    c.tokenName ?? null,
+    c.contractAddress ?? null,
+    c.chain ?? 'solana',
+    c.dex ?? null,
+    // Pair
+    c.pairAgeHours ?? null,
+    c.pairCreatedAt ?? null,
+    c.stage ?? null,
+    // Market
+    c.priceUsd ?? null,
+    c.marketCap ?? null,
+    c.liquidity ?? null,
+    c.volume24h ?? null,
+    c.volume6h ?? null,
+    c.volume1h ?? null,
+    // Price changes
+    c.priceChange24h ?? null,
+    c.priceChange6h ?? null,
+    c.priceChange1h ?? null,
+    c.priceChange5m ?? null,
+    // Transactions
+    c.buys24h ?? null,
+    c.sells24h ?? null,
+    c.buys1h ?? null,
+    c.sells1h ?? null,
+    c.txns24h ?? null,
+    c.txns1h ?? null,
+    // Holders
+    c.holders ?? null,
+    c.holderGrowth24h ?? null,
+    c.top10HolderPct ?? null,
+    c.devWalletPct ?? null,
+    c.insiderWalletPct ?? null,
+    // Contract safety
+    c.mintAuthority ?? null,
+    c.freezeAuthority ?? null,
+    c.lpLocked ?? null,
+    // Risk signals
+    c.bundleRisk ?? null,
+    c.bubbleMapRisk ?? null,
+    c.walletClusterRisk ?? null,
+    c.deployerHistoryRisk ?? null,
+    c.volumeQuality ?? null,
+    c.chartExtended ? 1 : 0,
+    // Socials
+    c.socialScore ?? null,
+    c.website ?? c.socials?.website ?? null,
+    c.twitter ?? c.socials?.twitter ?? null,
+    c.telegram ?? c.socials?.telegram ?? null,
+    // Tags
+    Array.isArray(c.narrativeTags) ? c.narrativeTags.join(',') : null,
+    Array.isArray(c.labels) ? c.labels.join(',') : null,
+    // Scores
+    c.compositeScore ?? null,
+    c.structureGrade ?? null,
+    c.setupType ?? null,
+    c.stage ?? null,
+    // Trap
+    c.trapTriggered ? 1 : 0,
+    c.trapSeverity ?? null,
+    c.dynamicThreshold ?? null,
+    // Regime
+    c.marketRegime ?? null,
+    c.regimeAdjustedScore ?? null,
+    // Claude
+    c.claudeScore ?? null,
+    c.claudeRisk ?? null,
+    c.claudeDecision ?? null,
+    c.claudeSetupType ?? null,
+    c.claudeVerdict ?? null,
+    typeof c.claudeRaw === 'string' ? c.claudeRaw : JSON.stringify(c.claudeRaw ?? null),
+    c.finalDecision ?? null,
+    c.posted ? 1 : 0,
+    // Meta
+    Array.isArray(c.notes) ? c.notes.join(' | ') : (c.notes ?? null),
+    c.birdeyeOk ? 1 : 0,
+    c.heliusOk ? 1 : 0,
+    c.bubblemapOk ? 1 : 0,
+    c.retestCount ?? 0,
+    c.botSource ?? null,
+    typeof c.sltp === 'string' ? c.sltp : (c.sltp ? JSON.stringify(c.sltp) : null),
+
+    // ── NEW: Launch intelligence fields ──────────────────────────────────
+    c.launchQualityScore        ?? null,
+    c.launchUniqueBuyerRatio    ?? null,
+    c.launchTopBuyerShare       ?? null,
+    c.launchTop3BuyerShare      ?? null,
+    c.launchTxCount             ?? null,
+    c.launchUniqueBuyerCount    ?? null,
+    c.sniperWalletCount         ?? null,
+    c.buySellRatio1h            ?? null,
+    c.buySellRatio6h            ?? null,
+    c.volumeVelocity            ?? null,
+    c.buyVelocity               ?? null,
+    c.breakoutContinuationScore ?? null,
+    c.firstDumpRecoveryScore    ?? null,
+    c.holderDistributionScore   ?? null,
+    c.freshWalletInflows        ? 1 : 0,
+    c.bundleRisk_helius         ?? null,
+    // ── Wallet intel ──────────────────────────────────────────────────────
+    c.walletIntelScore          ?? null,
+    c.clusterRisk               ?? null,
+    c.coordinationIntensity     ?? null,
+    c.momentumGrade             ?? null,
+    c.survivalScore             ?? null,
+  );
+
+  return result.lastInsertRowid;
+}
