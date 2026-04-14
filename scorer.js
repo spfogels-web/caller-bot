@@ -230,6 +230,11 @@ export function scoreLaunchQuality(candidate) {
     score -= 20; penalties.push('Deployer history flagged');
   } else if (candidate.deployerHistoryRisk === 'SERIAL_RUGGER') {
     score -= 40; penalties.push('SERIAL RUGGER deployer');
+  } else if (isVeryNew) {
+    // First-time dev launches get a neutral-positive baseline instead of being
+    // punished for the absence of history. 0 previous launches ≠ bad dev.
+    score += 5;
+    signals.push('First-time dev launch — no history to penalize');
   }
 
   const heliusLaunchQ = candidate.launchQualityScore;
@@ -241,10 +246,19 @@ export function scoreLaunchQuality(candidate) {
   }
 
   const ubr = candidate.launchUniqueBuyerRatio;
+  const ageHrs = candidate.pairAgeHours ?? 99;
   if (ubr != null) {
     if      (ubr >= 0.75) { score += 12; signals.push(`Excellent buyer diversity: ${(ubr*100).toFixed(0)}% unique`); }
     else if (ubr >= 0.55) { score += 6;  signals.push(`Good buyer diversity: ${(ubr*100).toFixed(0)}% unique`); }
-    else if (ubr < 0.35)  { score -= 15; penalties.push(`Low unique buyers: ${(ubr*100).toFixed(0)}%`); }
+    else if (ubr < 0.35) {
+      // Don't punish low unique-buyer ratio on a brand-new pair that hasn't
+      // had time to diversify yet (< 15 minutes). Just note it.
+      if (ageHrs < 0.25) {
+        signals.push(`Early buyer sample — only ${(ubr*100).toFixed(0)}% unique so far (too new to judge)`);
+      } else {
+        score -= 15; penalties.push(`Low unique buyers: ${(ubr*100).toFixed(0)}%`);
+      }
+    }
   }
 
   return { score: clamp(score), signals, penalties };

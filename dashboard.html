@@ -2724,11 +2724,43 @@ setInterval(updateClock,1000);updateClock();
 
 // ── PROMOTED SIDEBAR (ALWAYS VISIBLE, NEVER CLEARED) ─────
 let _sidebarLoaded=false;
+// Sticky cache: keep previously-promoted coins visible for 30 min so the sidebar
+// always shows at least ~10 coins even when the current feed thins out.
+const _promotedSticky = new Map(); // ca -> { row, seenAt }
+const STICKY_TTL_MS   = 30 * 60 * 1000; // 30 minutes
+const STICKY_MIN      = 10;             // min rows to keep on screen
+
 async function loadPromotedSidebar(){
   const data=await apiFetch('/api/scanner-feed?limit=300');
   if(!data)return;
   const rows=data.rows??[];
-  _promotedAll=rows.filter(r=>r.filter_action==='PROMOTE').sort((a,b)=>(b.quick_score??0)-(a.quick_score??0));
+  const live=rows.filter(r=>r.filter_action==='PROMOTE');
+
+  const now=Date.now();
+  // Refresh sticky cache from the live feed
+  live.forEach(r=>{
+    const ca=r.contract_address||r.contractAddress;
+    if(!ca) return;
+    _promotedSticky.set(ca, { row:r, seenAt:now });
+  });
+  // Prune sticky entries older than TTL
+  for(const [ca,v] of _promotedSticky){
+    if(now - v.seenAt > STICKY_TTL_MS) _promotedSticky.delete(ca);
+  }
+
+  // If live feed has <STICKY_MIN, top up from the sticky cache (most recent first)
+  const liveCAs=new Set(live.map(r=>r.contract_address||r.contractAddress));
+  let merged=[...live];
+  if(merged.length < STICKY_MIN){
+    const extras=[..._promotedSticky.values()]
+      .filter(v=>!liveCAs.has(v.row.contract_address||v.row.contractAddress))
+      .sort((a,b)=>b.seenAt - a.seenAt)
+      .slice(0, STICKY_MIN - merged.length)
+      .map(v=>({...v.row, _sticky:true}));
+    merged=[...merged, ...extras];
+  }
+
+  _promotedAll=merged.sort((a,b)=>(b.quick_score??0)-(a.quick_score??0));
   renderSidebar();
   setText('sidebarCount',_promotedAll.length+' tokens');
   setText('tb-promoted-badge',_promotedAll.length);
@@ -2766,7 +2798,7 @@ function buildSidebarCoin(r){
   // Check if DEX Screener paid
   const hasSocials = r.website||r.twitter||r.telegram;
 
-  return`<div class="pcoin" style="--accent-color:${col}" onclick="openPromotedModal(${safeR})">
+  return`<div class="pcoin" style="--accent-color:${col};${r._sticky?'opacity:0.78':''}" onclick="openPromotedModal(${safeR})">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
       <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${r.contract_address||''}.png"
            onerror="this.style.display='none'"
@@ -2774,6 +2806,7 @@ function buildSidebarCoin(r){
            alt="">
       <div style="flex:1;min-width:0">
         ${isBrandNew(r.pair_age_hours)?'<span class="new-badge">⚡ BRAND NEW</span>':''}
+        ${r._sticky?'<span style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:2px;background:rgba(136,153,187,0.1);border:1px solid rgba(136,153,187,0.3);color:var(--text3);margin-left:4px">RECENT</span>':''}
       </div>
     </div>
     <div class="pcoin-top">
