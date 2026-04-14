@@ -4346,9 +4346,13 @@ function renderAuditList(){
             if(!full && r.contractAddress){
               try{ const d=await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(r.contractAddress)); if(d&&d.candidate) full=d.candidate; }catch(e){}
             }
-            // 3. Last resort: archive row
+            // 3. Archive row
             if(!full && r.contractAddress){
               try{ const d=await apiFetch('/api/archive/'+encodeURIComponent(r.contractAddress)); if(d&&d.ok&&d.row) full=d.row; }catch(e){}
+            }
+            // 4. External live (DexScreener + Helius holders) — works for ANY CA
+            if(!full && r.contractAddress){
+              try{ const d=await apiFetch('/api/external/token/'+encodeURIComponent(r.contractAddress)); if(d&&d.ok&&d.candidate) full=d.candidate; }catch(e){}
             }
             if(det){
               if(full){
@@ -7438,7 +7442,7 @@ async function _mobileLoadDetail(opts){
   if(id != null){
     try{ const d = await apiFetch('/api/candidates/'+id); if(d && d.candidate) full = d.candidate; }catch(e){}
   }
-  // 2. By contract address
+  // 2. By contract address (our DB)
   if(!full && ca){
     try{ const d = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(ca)); if(d && d.candidate) full = d.candidate; }catch(e){}
   }
@@ -7446,9 +7450,11 @@ async function _mobileLoadDetail(opts){
   if(!full && ca){
     try{ const d = await apiFetch('/api/archive/'+encodeURIComponent(ca)); if(d && d.ok && d.row) full = d.row; }catch(e){}
   }
-  // 4. Last resort: render with whatever the row already has — ALWAYS
-  //    use the rich buildAuditDetail (never the minimal fallback) so
-  //    mobile and desktop see the same layout.
+  // 4. EXTERNAL LIVE — DexScreener + Helius holders for any CA not in our DB
+  if(!full && ca){
+    try{ const d = await apiFetch('/api/external/token/'+encodeURIComponent(ca)); if(d && d.ok && d.candidate) full = d.candidate; }catch(e){}
+  }
+  // 5. Last resort: render with whatever the row already has
   const dataToRender = full ? normalizeCandidate(full) : (seed ? (seed._normalized ? seed : normalizeCandidate(seed)) : null);
   if(dataToRender){
     content.innerHTML = buildAuditDetail(dataToRender);

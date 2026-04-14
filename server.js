@@ -3629,6 +3629,95 @@ app.get('/api/external/token/:ca', async (req, res) => {
       merged.telegram         = merged.telegram || dex.info?.socials?.find(s => s.type === 'telegram')?.url;
     }
 
+    // 3.5. Fetch top holders via Helius RPC + classify against tracked_wallets
+    //      This is what lets the Brain Analyzer show real WHALES/SMART$/SNIPERS counts
+    //      instead of zeros on outside tokens.
+    let holderStats = null;
+    if (HELIUS_API_KEY) {
+      try {
+        const rpcRes = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'topholders', method: 'getTokenLargestAccounts',
+            params: [ca, { commitment: 'confirmed' }],
+          }),
+          signal: AbortSignal.timeout(9_000),
+        });
+        if (rpcRes.ok) {
+          const rpcJson = await rpcRes.json();
+          const holders = rpcJson?.result?.value || [];
+          if (holders.length) {
+            // Convert token account addresses to owner addresses via getMultipleAccounts
+            const tokenAccts = holders.map(h => h.address).slice(0, 20);
+            let owners = [];
+            try {
+              const ownerRes = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  jsonrpc: '2.0', id: 'owners', method: 'getMultipleAccounts',
+                  params: [tokenAccts, { encoding: 'jsonParsed' }],
+                }),
+                signal: AbortSignal.timeout(9_000),
+              });
+              if (ownerRes.ok) {
+                const ownerJson = await ownerRes.json();
+                owners = (ownerJson?.result?.value || [])
+                  .map(a => a?.data?.parsed?.info?.owner)
+                  .filter(Boolean);
+              }
+            } catch {}
+
+            // Classify against our tracked_wallets database
+            let whales = 0, smart = 0, snipers = 0, clusters = 0;
+            const matchedLabels = [];
+            if (owners.length) {
+              for (const owner of owners) {
+                try {
+                  const tw = dbInstance.prepare(`SELECT category, label FROM tracked_wallets WHERE address=? AND is_blacklist=0`).get(owner);
+                  if (!tw) continue;
+                  if (tw.category === 'WINNER')       whales++;
+                  else if (tw.category === 'SMART_MONEY') smart++;
+                  else if (tw.category === 'SNIPER')      snipers++;
+                  else if (tw.category === 'CLUSTER')     clusters++;
+                  if (tw.label) matchedLabels.push(tw.label);
+                } catch {}
+              }
+            }
+            // Percentage held by top 10 (total supply comparison)
+            const totalTop10 = holders.slice(0, 10).reduce((s, h) => s + (h.uiAmount || 0), 0);
+            const totalAll = holders.reduce((s, h) => s + (h.uiAmount || 0), 0);
+            const top10Pct = totalAll > 0 ? (totalTop10 / totalAll) * 100 : null;
+
+            holderStats = {
+              holderCount:   holders.length,
+              ownerCount:    owners.length,
+              whales, smart, snipers, clusters,
+              top10Pct,
+              matchedLabels,
+              topHolderOwners: owners.slice(0, 10),
+            };
+
+            // Hydrate merged with these for the candidate shape
+            merged.holders          = merged.holders || holders.length;
+            merged.top10_holder_pct = merged.top10_holder_pct ?? top10Pct;
+            merged.wallet_intel = JSON.stringify({
+              whaleCount:              whales,
+              knownWinnerWalletCount:  whales,
+              smartMoneyCount:         smart,
+              sniperWalletCount:       snipers,
+              clusterWalletCount:      clusters,
+              topWinnerAddresses:      owners.slice(0, 10),
+              matchedLabels,
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('[external-token] helius holder fetch failed:', err.message);
+      }
+    }
+
     // 4. Persist a snapshot to scanner_feed so the system "sees" this token
     try {
       dbInstance.prepare(`
