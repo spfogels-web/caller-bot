@@ -2794,6 +2794,11 @@ app.get('/dashboard', (_req, res) => {
   try {
     const html = readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
     res.setHeader('Content-Type', 'text/html');
+    // Force mobile/desktop browsers to fetch the latest dashboard every load —
+    // we ship UI changes constantly and stale caches were hiding new features.
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.send(html);
   } catch (err) {
     res.status(500).send('Dashboard not found: ' + err.message);
