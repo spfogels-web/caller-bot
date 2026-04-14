@@ -2355,7 +2355,27 @@ body::before {
 /* ═══════════════════════════════════════════════════
    🧠⚖️ BRAINSTORM ROOM
    ═══════════════════════════════════════════════════ */
-.bsr-wrap { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.bsr-wrap {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: calc(100vh - var(--header-h, 60px) - 20px);
+}
+/* Compact hero — collapsible to keep real estate for the conversation */
+.bsr-hero-compact { padding: 10px 14px; }
+.bsr-hero-compact .bsr-hero-title { margin-bottom: 0; font-size: 15px; }
+.bsr-hero-toggle {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 1.5px;
+  padding: 4px 10px; border-radius: 12px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text3); cursor: pointer; transition: all 0.15s;
+}
+.bsr-hero-toggle:hover { background: rgba(255,215,64,0.1); border-color: rgba(255,215,64,0.3); color: var(--gold); }
+.bsr-hero-expand { display: none; padding-top: 10px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); }
+.bsr-hero-compact.open .bsr-hero-expand { display: block; }
+.bsr-hero-compact.open .bsr-hero-toggle { background: rgba(255,215,64,0.1); border-color: rgba(255,215,64,0.3); color: var(--gold); }
 
 .bsr-hero {
   background:
@@ -2458,8 +2478,30 @@ body::before {
 }
 .bsr-quick-chip:hover { background: rgba(255,215,64,0.1); border-color: rgba(255,215,64,0.3); color: var(--gold); }
 
-/* Conversation thread */
-.bsr-thread { display: flex; flex-direction: column; gap: 14px; }
+/* Conversation thread — scrollable, takes remaining vertical space */
+.bsr-thread {
+  display: flex; flex-direction: column; gap: 14px;
+  flex: 1; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 4px 8px 4px 4px;
+  -webkit-overflow-scrolling: touch;
+}
+.bsr-thread::-webkit-scrollbar { width: 6px; }
+.bsr-thread::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+
+/* Sticky chatbox at the bottom */
+.bsr-chatbox {
+  background: linear-gradient(135deg, rgba(4,6,11,0.97), rgba(8,14,30,0.96));
+  border: 1px solid rgba(255,215,64,0.3);
+  border-radius: 12px;
+  padding: 12px 14px 10px 14px;
+  box-shadow: 0 -8px 24px rgba(0,0,0,0.4);
+  flex-shrink: 0;
+}
+.bsr-chatbox .bsr-quick-row { margin-top: 0; margin-bottom: 8px; }
+.bsr-chatbox .bsr-input { min-height: 40px; font-size: 11px; }
+.bsr-quick-clear { color: var(--red) !important; border-color: rgba(255,23,68,0.2) !important; }
+.bsr-quick-clear:hover { background: rgba(255,23,68,0.1) !important; border-color: rgba(255,23,68,0.4) !important; }
 .bsr-empty {
   padding: 60px 20px; text-align: center;
   background: rgba(0,0,0,0.3); border: 1px dashed rgba(255,255,255,0.1); border-radius: 10px;
@@ -3728,55 +3770,56 @@ body::before {
          ═══════════════════════════════════════════════════════════════════════════ -->
     <div class="tab-panel" id="tab-brainstorm">
       <div class="bsr-wrap">
-        <!-- Hero -->
-        <div class="bsr-hero">
+        <!-- Compact hero (collapsed by default — click to expand) -->
+        <div class="bsr-hero bsr-hero-compact">
           <div class="bsr-hero-title">
             <span class="bsr-glow">🧠 BRAINSTORM ROOM</span>
             <span class="bsr-hero-pill">CLAUDE × OPENAI</span>
+            <span class="bsr-hero-toggle" onclick="toggleBsrHero(this)">▾ MISSION</span>
           </div>
-          <div class="bsr-hero-sub">
-            <strong>Mission:</strong> Build the most advanced Solana early-gem call system for $7.5K–$40K market cap tokens. Consistently identify 10x+ opportunities before the crowd.
-          </div>
-          <div class="bsr-hero-tag">Engineer edge, not hype · Predict, don't react · Every upgrade must ↑ win rate, ↑ ROI, ↑ speed to entry.</div>
-          <div class="bsr-roles">
-            <div class="bsr-role bsr-role-claude">
-              <div class="bsr-role-head"><span class="bsr-role-icon">🧠</span><span class="bsr-role-name">CLAUDE — The Analyst</span></div>
-              <div class="bsr-role-desc">Deep analysis. Pattern recognition. Identifies weaknesses. Proposes upgrades. <em>Builds the case — never decides.</em></div>
-              <div class="bsr-role-format">Output: Insight · Problem · Proposed Upgrade · Expected Impact</div>
-            </div>
-            <div class="bsr-role bsr-role-openai">
-              <div class="bsr-role-head"><span class="bsr-role-icon">⚖️</span><span class="bsr-role-name">OPENAI — Decision Engine</span></div>
-              <div class="bsr-role-desc">Final filter. Approves / modifies / rejects. Profitability + risk. Challenges Claude. <em>Goal: right &amp; profitable — not clever.</em></div>
-              <div class="bsr-role-format">Output: Decision · Reason · Implementation · Expected ROI</div>
+          <div class="bsr-hero-expand">
+            <div class="bsr-hero-sub"><strong>Mission:</strong> Build the most advanced Solana early-gem call system for $7.5K–$40K market cap tokens. Consistently identify 10x+ opportunities before the crowd.</div>
+            <div class="bsr-hero-tag">Engineer edge, not hype · Predict, don't react · Every upgrade must ↑ win rate, ↑ ROI, ↑ speed to entry.</div>
+            <div class="bsr-roles">
+              <div class="bsr-role bsr-role-claude">
+                <div class="bsr-role-head"><span class="bsr-role-icon">🧠</span><span class="bsr-role-name">CLAUDE — The Analyst</span></div>
+                <div class="bsr-role-desc">Deep analysis. Pattern recognition. Proposes upgrades. <em>Builds the case — never decides.</em></div>
+                <div class="bsr-role-format">Output: Insight · Problem · Proposed Upgrade · Expected Impact</div>
+              </div>
+              <div class="bsr-role bsr-role-openai">
+                <div class="bsr-role-head"><span class="bsr-role-icon">⚖️</span><span class="bsr-role-name">OPENAI — Decision Engine</span></div>
+                <div class="bsr-role-desc">Final filter. Approves / modifies / rejects. Challenges Claude. <em>Goal: right &amp; profitable — not clever.</em></div>
+                <div class="bsr-role-format">Output: Decision · Reason · Implementation · Expected ROI</div>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- Input / kickoff -->
-        <div class="bsr-input-card">
-          <div class="bsr-input-label">🎯 DROP A TOPIC — the bots will debate it until you have an actionable answer</div>
-          <div class="bsr-input-row">
-            <textarea id="bsrInput" class="bsr-input" rows="2"
-              placeholder="e.g. We're late detecting $5K–$15K gems. Claude: propose 3 upgrades. OpenAI: decide which to implement."
-              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();runBrainstormTurn();}"></textarea>
-            <button id="bsrRunBtn" class="bsr-run-btn" onclick="runBrainstormTurn()">⚡ RUN ROUND</button>
+        <!-- Conversation feed (chronological — oldest at top, newest at bottom) -->
+        <div id="bsrThread" class="bsr-thread">
+          <div class="bsr-empty">
+            <div style="font-size:38px;margin-bottom:8px;opacity:0.3">🧠⚖️</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--text3);letter-spacing:2px">ROOM IDLE — drop a topic below or tap a KICKOFF</div>
           </div>
+        </div>
+
+        <!-- Sticky chat box pinned at the bottom -->
+        <div class="bsr-chatbox">
           <div class="bsr-quick-row">
             <span class="bsr-quick-lbl">KICKOFFS:</span>
             <button class="bsr-quick-chip" onclick="bsrQuick('We are late detecting tokens below $15K market cap. Analyze why and propose 3 system upgrades to catch gems earlier. Rank by expected impact.')">🚀 DETECT EARLIER</button>
             <button class="bsr-quick-chip" onclick="bsrQuick('Our win rate is low. Audit the scorer weighting and propose concrete adjustments. Be specific about which dimension weights to change and why.')">🎯 RAISE WIN RATE</button>
             <button class="bsr-quick-chip" onclick="bsrQuick('We need better smart-money signals. Claude, what new wallet behaviors should we track? OpenAI, which would move the needle most?')">🐋 SMART MONEY EDGE</button>
-            <button class="bsr-quick-chip" onclick="bsrQuick('How do we detect stealth accumulation on a brand-new token before it runs? Propose specific detection signals.')">🥷 STEALTH ACCUMULATION</button>
-            <button class="bsr-quick-chip" onclick="bsrQuick('List the top 3 ways our bot is currently being fooled by manipulation or coordinated wallets, and propose anti-manipulation logic.')">🛡 ANTI-MANIPULATION</button>
-            <button class="bsr-quick-chip" onclick="bsrQuick('What new external data sources or APIs would give us edge over competing call bots? Rank by impact vs implementation cost.')">📡 NEW DATA SOURCES</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('How do we detect stealth accumulation on a brand-new token before it runs? Propose specific detection signals.')">🥷 STEALTH</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('List the top 3 ways our bot is currently being fooled by manipulation or coordinated wallets, and propose anti-manipulation logic.')">🛡 ANTI-MANIP</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('What new external data sources or APIs would give us edge over competing call bots? Rank by impact vs implementation cost.')">📡 NEW DATA</button>
+            <button class="bsr-quick-chip bsr-quick-clear" onclick="clearBrainstorm()">🗑 CLEAR</button>
           </div>
-        </div>
-
-        <!-- Conversation feed -->
-        <div id="bsrThread" class="bsr-thread">
-          <div class="bsr-empty">
-            <div style="font-size:38px;margin-bottom:8px;opacity:0.3">🧠⚖️</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--text3);letter-spacing:2px">ROOM IDLE — drop a topic above or tap a KICKOFF</div>
+          <div class="bsr-input-row">
+            <textarea id="bsrInput" class="bsr-input" rows="2"
+              placeholder="Type a message to the bots — follow-up questions build on the conversation..."
+              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();runBrainstormTurn();}"></textarea>
+            <button id="bsrRunBtn" class="bsr-run-btn" onclick="runBrainstormTurn()">⚡ SEND</button>
           </div>
         </div>
       </div>
@@ -8417,6 +8460,20 @@ function bsrQuick(topic){
   runBrainstormTurn();
 }
 
+function toggleBsrHero(btn){
+  const hero = btn.closest('.bsr-hero');
+  if(hero) hero.classList.toggle('open');
+  btn.textContent = hero && hero.classList.contains('open') ? '▴ MISSION' : '▾ MISSION';
+}
+
+function clearBrainstorm(){
+  _bsrHistory = [];
+  const thread = document.getElementById('bsrThread');
+  if(thread){
+    thread.innerHTML = '<div class="bsr-empty"><div style="font-size:38px;margin-bottom:8px;opacity:0.3">🧠⚖️</div><div style="font-family:var(--mono);font-size:11px;color:var(--text3);letter-spacing:2px">ROOM CLEARED — start a new conversation</div></div>';
+  }
+}
+
 async function runBrainstormTurn(){
   if(_bsrBusy) return;
   const input  = document.getElementById('bsrInput');
@@ -8433,7 +8490,7 @@ async function runBrainstormTurn(){
   const empty = thread.querySelector('.bsr-empty');
   if(empty) empty.remove();
 
-  // Optimistic render — topic card + loading shimmer
+  // Optimistic render — topic card + loading shimmer (chat-style: append to bottom)
   const roundId = 'bsr-'+Date.now();
   const roundEl = document.createElement('div');
   roundEl.className = 'bsr-round';
@@ -8442,8 +8499,8 @@ async function runBrainstormTurn(){
     '<div class="bsr-round-head"><span>ROUND ' + (_bsrHistory.filter(h=>h.role==='user').length + 1) + '</span><span>'+ new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true}).toLowerCase() +' ET</span></div>'+
     '<div class="bsr-round-topic">🎯 ' + esc(topic) + '</div>'+
     '<div class="bsr-loading"><span class="bsr-loading-dot"></span><span class="bsr-loading-dot"></span><span class="bsr-loading-dot"></span><span>Claude analyzing &amp; OpenAI deciding... (up to 45s)</span></div>';
-  thread.insertBefore(roundEl, thread.firstChild);
-  roundEl.scrollIntoView({behavior:'smooth', block:'start'});
+  thread.appendChild(roundEl);
+  thread.scrollTop = thread.scrollHeight;
 
   try {
     const r = await fetch('/api/brainstorm/turn', {
@@ -8487,6 +8544,9 @@ async function runBrainstormTurn(){
         '<div class="bsr-turn-body">'+ _bsrFormat(openaiContent) +'</div>';
     }
     roundEl.appendChild(openaiTurn);
+
+    // Auto-scroll so newest content is always visible
+    thread.scrollTop = thread.scrollHeight;
 
     // Update history so next round has context
     _bsrHistory.push({ role:'user', content: topic });
