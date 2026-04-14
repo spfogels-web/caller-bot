@@ -1443,6 +1443,98 @@ body::before {
 .coin-score-big {
   font-family:var(--mono);font-size:22px;font-weight:900;line-height:1;
 }
+
+/* ═══════════════════════════════════════════════════
+   WALLET INTELLIGENCE — CATEGORY CARDS + HEATMAP
+   ═══════════════════════════════════════════════════ */
+
+.wi-cat-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+@media(max-width:900px){
+  .wi-cat-grid { grid-template-columns: 1fr 1fr; }
+}
+
+.wi-cat-card {
+  border-radius: 12px;
+  padding: 14px;
+  border: 1px solid;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.wi-cat-card::before {
+  content: '';
+  position: absolute;
+  top: -30px; right: -30px;
+  width: 80px; height: 80px;
+  border-radius: 50%;
+  background: var(--cat-col);
+  opacity: 0.08;
+  filter: blur(20px);
+}
+.wi-cat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+
+.cat-icon-big { font-size: 28px; margin-bottom: 8px; }
+
+.wi-cat-name {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--cat-col);
+  margin-bottom: 4px;
+}
+
+.wi-cat-count {
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--cat-col);
+}
+
+.wi-cat-desc {
+  font-family: var(--mono);
+  font-size: 8px;
+  color: var(--text3);
+  margin-top: 5px;
+  line-height: 1.4;
+}
+
+.wi-cat-bar {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--cat-col);
+  margin-top: 8px;
+  opacity: 0.5;
+}
+
+.wi-heatmap-card {
+  background: linear-gradient(135deg, rgba(4,6,11,0.98), rgba(8,12,24,0.95));
+  border: 1px solid rgba(255,215,64,0.15);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.wi-heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 3px;
+}
+
+.wi-heatmap-cell {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  transition: transform 0.2s;
+  cursor: pointer;
+}
+.wi-heatmap-cell:hover { transform: scale(1.3); z-index: 10; position: relative; }
 </style>
 </head>
 <body>
@@ -2153,103 +2245,170 @@ body::before {
     </div><!-- /ai -->
 
     <!-- SMART MONEY TAB -->
-    <!-- ANALYTICS TAB -->
     <div class="tab-panel" id="tab-smart">
+      <div style="padding:16px">
 
-      <!-- Stats row -->
-      <div class="g5" style="margin-bottom:12px">
-        <div class="tile"><div class="tile-label">TOTAL WALLETS</div><div class="tile-val" id="smTotalWallets">—</div></div>
-        <div class="tile"><div class="tile-label">WINNERS</div><div class="tile-val" style="color:var(--gold)" id="smWinnerCount">—</div></div>
-        <div class="tile"><div class="tile-label">SMART $</div><div class="tile-val" style="color:var(--cyan)" id="smSmartCount">—</div></div>
-        <div class="tile"><div class="tile-label">SNIPERS</div><div class="tile-val" style="color:var(--red)" id="smSniperCount">—</div></div>
-        <div class="tile"><div class="tile-label">LAST SCAN</div><div class="tile-val" id="smLastScan">—</div></div>
-      </div>
-
-      <!-- Scan + status -->
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <div id="seedStatusMsg" style="font-family:var(--mono);font-size:9px;color:var(--text3)">Run a scan to populate wallet data</div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-          <button onclick="triggerDuneScan()" id="smScanBtn" style="background:linear-gradient(135deg,rgba(255,215,64,0.2),rgba(255,109,0,0.1));border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:5px;padding:7px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">⚡ RUN WALLET SCAN</button>
+        <!-- SCAN BUTTON ROW (header removed — pulse caller branding already present) -->
+        <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+          <button onclick="triggerDuneScan()" id="smScanBtn" style="background:linear-gradient(135deg,rgba(255,215,64,0.2),rgba(255,109,0,0.1));border:1px solid rgba(255,215,64,0.4);color:#ffd740;border-radius:6px;padding:8px 16px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">⚡ SCAN WALLETS</button>
+          <div id="smLastScan" style="font-family:var(--mono);font-size:8px;color:rgba(136,153,187,0.6)">—</div>
           <span id="smScanStatus" style="font-family:var(--mono);font-size:9px;color:var(--text3)"></span>
         </div>
-      </div>
 
-      <!-- TOKEN ANALYZER / SEED CONTRACTS -->
-      <div class="card" id="seedContractsCard" style="margin-bottom:12px">
-        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
-          <span>🔬 TOKEN ANALYZER — Paste contract addresses to find early wallets</span>
-          <button onclick="addSeedContract()" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:4px;padding:4px 12px;font-family:var(--mono);font-size:9px;cursor:pointer">+ ADD TOKEN</button>
-        </div>
-        <div class="card-body">
-          <div style="display:flex;gap:6px;margin-bottom:10px">
-            <input id="seedContractInput" placeholder="Paste contract address (CA)..." style="flex:1;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:5px;padding:7px 10px;color:var(--text1);font-family:var(--mono);font-size:10px;outline:none" onkeydown="if(event.key==='Enter')addSeedContract()">
-            <button onclick="addSeedContract()" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:5px;padding:7px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700">ANALYZE</button>
+        <!-- TOKEN ANALYZER / SEED CONTRACTS (preserved — independent feature) -->
+        <div class="card" id="seedContractsCard" style="margin-bottom:14px">
+          <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+            <span>🔬 TOKEN ANALYZER — Paste contract addresses to find early wallets</span>
+            <button onclick="addSeedContract()" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:4px;padding:4px 12px;font-family:var(--mono);font-size:9px;cursor:pointer">+ ADD TOKEN</button>
           </div>
-          <div id="seedContractsList" style="display:flex;flex-direction:column;gap:6px"></div>
-          <div id="seedWalletSections" style="margin-top:12px"></div>
+          <div class="card-body">
+            <div style="display:flex;gap:6px;margin-bottom:10px">
+              <input id="seedContractInput" placeholder="Paste contract address (CA)..." style="flex:1;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:5px;padding:7px 10px;color:var(--text1);font-family:var(--mono);font-size:10px;outline:none" onkeydown="if(event.key==='Enter')addSeedContract()">
+              <button onclick="addSeedContract()" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:5px;padding:7px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700">ANALYZE</button>
+            </div>
+            <div id="seedContractsList" style="display:flex;flex-direction:column;gap:6px"></div>
+            <div id="seedWalletSections" style="margin-top:12px"></div>
+          </div>
         </div>
-      </div>
 
-      <!-- Category breakdown -->
-      <div class="g5" style="margin-bottom:12px">
-        <div class="tile"><div class="tile-label">🏆 WINNERS</div><div class="intel-value" style="color:var(--gold)" id="smCatWinner">—</div></div>
-        <div class="tile"><div class="tile-label">🧠 SMART $</div><div class="intel-value" style="color:var(--cyan)" id="smCatSmart">—</div></div>
-        <div class="tile"><div class="tile-label">📈 MOMENTUM</div><div class="intel-value" style="color:var(--green)" id="smCatMomentum">—</div></div>
-        <div class="tile"><div class="tile-label">🎯 SNIPERS</div><div class="intel-value" style="color:var(--orange)" id="smCatSniper">—</div></div>
-        <div class="tile"><div class="tile-label">☠ CLUSTERS</div><div class="intel-value" style="color:var(--red)" id="smCatCluster">—</div></div>
-      </div>
+        <!-- WALLET CATEGORY CARDS -->
+        <div class="wi-cat-grid">
 
-      <!-- Top winner spotlight -->
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;color:var(--gold);letter-spacing:1px;font-weight:700">🏆 TOP WINNER WALLETS</div>
-        <div id="smTopWinnersGrid" style="padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px"></div>
-      </div>
+          <!-- 1. WHALES — proven winners -->
+          <div class="wi-cat-card" style="--cat-col:#ffd740;background:rgba(255,215,64,0.04);border-color:rgba(255,215,64,0.25)" onclick="loadWalletRankings('WINNER')">
+            <div class="cat-icon-big">🐋</div>
+            <div class="wi-cat-name">WHALE INTEL</div>
+            <div class="wi-cat-count" id="smCatWinner">0</div>
+            <div class="wi-cat-desc">Proven winners. High win rate, consistent early entries. Follow these.</div>
+            <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
+              <span style="color:rgba(255,215,64,0.7)">AVG WIN RATE</span>
+              <span style="color:#ffd740;font-weight:700" id="smWinnerAvgWR">—</span>
+            </div>
+            <div class="wi-cat-bar"></div>
+          </div>
 
-      <!-- Winner wallets table -->
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;color:var(--cyan);letter-spacing:1px;font-weight:700">🎖 WINNER WALLET HISTORY — Seen in our winning calls</div>
-        <div style="overflow-x:auto">
-          <table class="data-table" style="width:100%">
-            <thead><tr><th>#</th><th>WALLET</th><th>OUR WINS</th><th>WIN RATE</th><th>LINKS</th></tr></thead>
-            <tbody id="winnerWalletsBody"></tbody>
-          </table>
+          <!-- 2. SMART MONEY -->
+          <div class="wi-cat-card" style="--cat-col:#18ffff;background:rgba(24,255,255,0.04);border-color:rgba(24,255,255,0.25)" onclick="loadWalletRankings('SMART_MONEY')">
+            <div class="cat-icon-big">🧠</div>
+            <div class="wi-cat-name">SMART MONEY</div>
+            <div class="wi-cat-count" id="smCatSmart">0</div>
+            <div class="wi-cat-desc">Algorithmic or insider wallets with superior timing and exit strategy.</div>
+            <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
+              <span style="color:rgba(24,255,255,0.7)">AVG ROI</span>
+              <span style="color:#18ffff;font-weight:700" id="smSmartAvgROI">—</span>
+            </div>
+            <div class="wi-cat-bar"></div>
+          </div>
+
+          <!-- 3. MOMENTUM -->
+          <div class="wi-cat-card" style="--cat-col:#00e676;background:rgba(0,230,118,0.04);border-color:rgba(0,230,118,0.25)" onclick="loadWalletRankings('MOMENTUM')">
+            <div class="cat-icon-big">📈</div>
+            <div class="wi-cat-name">MOMENTUM</div>
+            <div class="wi-cat-count" id="smCatMomentum">0</div>
+            <div class="wi-cat-desc">Trend chasers — enter after proof. Good signal for confirmation plays.</div>
+            <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
+              <span style="color:rgba(0,230,118,0.7)">SIGNAL STRENGTH</span>
+              <span style="color:#00e676;font-weight:700" id="smMomSignal">—</span>
+            </div>
+            <div class="wi-cat-bar"></div>
+          </div>
+
+          <!-- 4. SNIPERS -->
+          <div class="wi-cat-card" style="--cat-col:#ff6d00;background:rgba(255,109,0,0.04);border-color:rgba(255,109,0,0.25)" onclick="loadWalletRankings('SNIPER')">
+            <div class="cat-icon-big">🎯</div>
+            <div class="wi-cat-name">SNIPERS</div>
+            <div class="wi-cat-count" id="smCatSniper">0</div>
+            <div class="wi-cat-desc">First-5-minute buyers. Often correlated with dumps — use as WARNING signal.</div>
+            <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
+              <span style="color:rgba(255,109,0,0.7)">DUMP RISK</span>
+              <span style="color:#ff6d00;font-weight:700" id="smSniperRisk">—</span>
+            </div>
+            <div class="wi-cat-bar"></div>
+          </div>
+
+          <!-- 5. DEGEN CLUSTER -->
+          <div class="wi-cat-card" style="--cat-col:#e040fb;background:rgba(224,64,251,0.04);border-color:rgba(224,64,251,0.25)" onclick="loadWalletRankings('CLUSTER')">
+            <div class="cat-icon-big">🎲</div>
+            <div class="wi-cat-name">DEGEN CLUSTER</div>
+            <div class="wi-cat-count" id="smCatCluster">0</div>
+            <div class="wi-cat-desc">Coordinated wallets, farming clusters. HIGH manipulation risk — avoid.</div>
+            <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
+              <span style="color:rgba(224,64,251,0.7)">MANIPULATION</span>
+              <span style="color:#e040fb;font-weight:700" id="smClusterRisk">EXTREME</span>
+            </div>
+            <div class="wi-cat-bar"></div>
+          </div>
+
         </div>
-      </div>
 
-      <!-- Full wallet rankings -->
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
-          <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);letter-spacing:1px;font-weight:700">📊 FULL WALLET RANKINGS</div>
-          <div style="display:flex;gap:4px;flex-wrap:wrap">
-            <select id="smRankCategory" onchange="loadWalletRankings()" style="background:var(--surface);border:1px solid var(--border);color:var(--text1);border-radius:4px;padding:3px 6px;font-family:var(--mono);font-size:9px">
+        <!-- WALLET ACTIVITY HEATMAP -->
+        <div class="wi-heatmap-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:6px">
+            <div>
+              <div style="font-family:var(--mono);font-size:10px;font-weight:700;color:#ffd740;letter-spacing:2px">WALLET ACTIVITY HEATMAP</div>
+              <div style="font-family:var(--mono);font-size:8px;color:rgba(136,153,187,0.6);margin-top:2px">Each cell = 1 tracked wallet · Color = win rate intensity</div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;font-family:var(--mono);font-size:8px;color:rgba(136,153,187,0.6)">
+              <div style="width:8px;height:8px;border-radius:2px;background:rgba(136,153,187,0.2)"></div><span>0%</span>
+              <div style="width:8px;height:8px;border-radius:2px;background:rgba(0,230,118,0.3)"></div><span>25%</span>
+              <div style="width:8px;height:8px;border-radius:2px;background:#00e676"></div><span>50%</span>
+              <div style="width:8px;height:8px;border-radius:2px;background:#ffd740"></div><span>75%+</span>
+            </div>
+          </div>
+          <div class="wi-heatmap-grid" id="walletHeatmap" style="margin-bottom:10px"></div>
+          <div style="font-family:var(--mono);font-size:8px;color:rgba(136,153,187,0.5);text-align:center" id="heatmapCaption">Loading wallet heatmap...</div>
+        </div>
+
+        <!-- ACTIVE FILTER + SEARCH -->
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+          <div style="font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:2px;color:rgba(136,153,187,0.8)" id="smActiveFilter">ALL WALLETS</div>
+          <div style="display:flex;gap:5px">
+            <input id="smWalletSearch" oninput="filterWalletRankings(this.value)" placeholder="Search wallets..." style="background:rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.1);border-radius:5px;padding:5px 10px;color:var(--text1);font-family:var(--mono);font-size:9px;outline:none;width:160px">
+            <select id="smRankCategory" onchange="loadWalletRankings(this.value)" style="background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);border-radius:5px;color:var(--text1);font-family:var(--mono);font-size:9px;padding:5px 8px;outline:none">
               <option value="">ALL</option>
-              <option value="WINNER">WINNERS</option>
-              <option value="SMART_MONEY">SMART $</option>
-              <option value="SNIPER">SNIPERS</option>
+              <option value="WINNER">🐋 WHALES</option>
+              <option value="SMART_MONEY">🧠 SMART MONEY</option>
+              <option value="MOMENTUM">📈 MOMENTUM</option>
+              <option value="SNIPER">🎯 SNIPERS</option>
+              <option value="CLUSTER">🎲 DEGENS</option>
             </select>
-            <input onkeyup="filterWalletRankings(this.value)" placeholder="Search..." style="background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:4px;padding:3px 8px;color:var(--text1);font-family:var(--mono);font-size:9px;outline:none;width:110px">
           </div>
         </div>
-        <div style="overflow-x:auto">
-          <table class="data-table" style="width:100%">
-            <thead><tr><th>#</th><th>WALLET</th><th>CATEGORY</th><th>SCORE</th><th>WIN RATE</th><th>AVG ROI</th><th>TRADES</th><th>WINS</th><th>LINKS</th></tr></thead>
-            <tbody id="smRankBody"></tbody>
-          </table>
-        </div>
-        <div id="smRankPager" style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:10px;border-top:1px solid var(--border)"></div>
-      </div>
 
-      <!-- Deployer leaderboard -->
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;color:var(--gold);letter-spacing:1px;font-weight:700">🏗️ DEPLOYER LEADERBOARD</div>
-        <div style="overflow-x:auto">
-          <table class="data-table" style="width:100%">
-            <thead><tr><th>#</th><th>DEPLOYER</th><th>LAUNCHES</th><th>WIN RATE</th><th>GRADE</th><th>LINKS</th></tr></thead>
-            <tbody id="deployerLeaderBody"></tbody>
-          </table>
+        <!-- WALLET RANKINGS TABLE -->
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:14px;overflow:hidden">
+          <div style="overflow-x:auto">
+            <table class="data-table" style="width:100%">
+              <thead><tr><th>#</th><th>WALLET</th><th>CATEGORY</th><th>SCORE</th><th>WIN RATE</th><th>AVG ROI</th><th>TRADES</th><th>WINS</th><th>LINKS</th></tr></thead>
+              <tbody id="smRankBody"></tbody>
+            </table>
+          </div>
+          <div id="smRankPager" style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:10px;border-top:1px solid var(--border)"></div>
         </div>
-      </div>
 
+        <!-- WINNER WALLET HISTORY -->
+        <div style="background:rgba(255,215,64,0.03);border:1px solid rgba(255,215,64,0.15);border-radius:10px;margin-bottom:14px;overflow:hidden">
+          <div style="padding:10px 14px;border-bottom:1px solid rgba(255,215,64,0.1);font-family:var(--mono);font-size:8px;font-weight:700;color:#ffd740;letter-spacing:2px">🏆 WINNER WALLET HISTORY — seen in our winning calls</div>
+          <div style="overflow-x:auto">
+            <table class="data-table" style="width:100%">
+              <thead><tr><th>#</th><th>WALLET</th><th>OUR WINS</th><th>WIN RATE</th><th>LINKS</th></tr></thead>
+              <tbody id="winnerWalletsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- DEPLOYER LEADERBOARD -->
+        <div style="background:rgba(24,255,255,0.02);border:1px solid rgba(24,255,255,0.12);border-radius:10px;overflow:hidden">
+          <div style="padding:10px 14px;border-bottom:1px solid rgba(24,255,255,0.08);font-family:var(--mono);font-size:8px;font-weight:700;color:#18ffff;letter-spacing:2px">🏗 DEPLOYER LEADERBOARD — track who deploys winners vs rugs</div>
+          <div style="overflow-x:auto">
+            <table class="data-table" style="width:100%">
+              <thead><tr><th>#</th><th>DEPLOYER</th><th>LAUNCHES</th><th>WIN RATE</th><th>GRADE</th><th>LINKS</th></tr></thead>
+              <tbody id="deployerLeaderBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
     </div><!-- /smart -->
 
     <!-- SYSTEM TAB -->
@@ -5664,6 +5823,108 @@ async function analyzeSeedContract(ca){
 
 
 startAutoRefresh();
+
+/* ═══════════════════════════════════════════════════════════
+   WALLET INTELLIGENCE — HEATMAP + CATEGORY FILTER PATCHES
+   ═══════════════════════════════════════════════════════════ */
+
+// ── WALLET HEATMAP ─────────────────────────────────────────────
+async function renderWalletHeatmap() {
+  var grid    = document.getElementById('walletHeatmap');
+  var caption = document.getElementById('heatmapCaption');
+  if (!grid) return;
+
+  try {
+    var data    = await apiFetch('/api/wallets/rankings?limit=100');
+    var wallets = data && data.wallets ? data.wallets : [];
+
+    if (!wallets.length) {
+      grid.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);grid-column:1/-1;text-align:center;padding:20px">Run a Dune scan to populate the heatmap</div>';
+      if (caption) caption.textContent = '0 wallets tracked — run a scan first';
+      return;
+    }
+
+    while (wallets.length < 100) wallets.push(null);
+    wallets = wallets.slice(0, 100);
+
+    grid.innerHTML = '';
+    wallets.forEach(function(w) {
+      var cell = document.createElement('div');
+      cell.className = 'wi-heatmap-cell';
+
+      if (!w) {
+        cell.style.background = 'rgba(255,255,255,0.03)';
+      } else {
+        var cat    = w.category || 'NEUTRAL';
+        var wr     = w.win_rate != null ? w.win_rate : 0;
+        var catRGB = {
+          WINNER:      '255,215,64',
+          SMART_MONEY: '24,255,255',
+          MOMENTUM:    '0,230,118',
+          SNIPER:      '255,109,0',
+          CLUSTER:     '224,64,251',
+          RUG:         '255,23,68',
+          NEUTRAL:     '136,153,187',
+        }[cat] || '136,153,187';
+        var opacity = Math.max(0.1, Math.min(0.9, wr + 0.2));
+        cell.style.background = 'rgba(' + catRGB + ',' + opacity + ')';
+        cell.title = (w.label || w.address.slice(0, 8)) + ' | ' + cat + ' | WR: ' + (wr * 100).toFixed(0) + '%';
+        cell.addEventListener('click', function() {
+          if (typeof showWalletModal === 'function') showWalletModal(w.address);
+        });
+      }
+      grid.appendChild(cell);
+    });
+
+    var tracked = wallets.filter(Boolean).length;
+    if (caption) caption.textContent = tracked + ' wallets tracked · click any cell for full analysis';
+
+  } catch (err) {
+    if (grid) grid.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:rgba(255,23,68,0.6);grid-column:1/-1;padding:10px">Error loading heatmap: ' + err.message + '</div>';
+  }
+}
+
+// ── PATCH loadWalletRankings to accept optional cat arg and
+//    update the active filter label ─────────────────────────────
+var _origLoadWalletRankings = (typeof loadWalletRankings === 'function') ? loadWalletRankings : null;
+
+function loadWalletRankings(cat) {
+  var sel = document.getElementById('smRankCategory');
+  if (sel && cat !== undefined) sel.value = cat || '';
+
+  var label    = document.getElementById('smActiveFilter');
+  var catNames = {
+    WINNER:      '🐋 WHALE INTEL',
+    SMART_MONEY: '🧠 SMART MONEY',
+    MOMENTUM:    '📈 MOMENTUM',
+    SNIPER:      '🎯 SNIPERS',
+    CLUSTER:     '🎲 DEGEN CLUSTERS',
+  };
+  if (label) {
+    label.textContent = cat ? (catNames[cat] || cat) : 'ALL WALLETS';
+    var catCols = { WINNER:'#ffd740', SMART_MONEY:'#18ffff', MOMENTUM:'#00e676', SNIPER:'#ff6d00', CLUSTER:'#e040fb' };
+    label.style.color = cat ? (catCols[cat] || 'var(--text2)') : 'rgba(136,153,187,0.8)';
+  }
+
+  if (_origLoadWalletRankings) return _origLoadWalletRankings();
+}
+
+// ── PATCH loadSmartMoneyTab to also render the heatmap ────────
+var _origLoadSmartMoneyTab2 = (typeof loadSmartMoneyTab === 'function') ? loadSmartMoneyTab : null;
+
+async function loadSmartMoneyTab() {
+  if (_origLoadSmartMoneyTab2) await _origLoadSmartMoneyTab2();
+  renderWalletHeatmap();
+}
+
+// Boot: render heatmap on page load if already on smart tab
+window.addEventListener('load', function() {
+  setTimeout(function() {
+    if (typeof currentTab !== 'undefined' && currentTab === 'smart') {
+      renderWalletHeatmap();
+    }
+  }, 2500);
+});
 
 </script>
 
