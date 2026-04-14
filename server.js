@@ -3629,11 +3629,45 @@ app.get('/api/external/token/:ca', async (req, res) => {
       merged.telegram         = merged.telegram || dex.info?.socials?.find(s => s.type === 'telegram')?.url;
     }
 
-    // 3.5. Fetch top holders via Helius RPC + classify against tracked_wallets
-    //      This is what lets the Brain Analyzer show real WHALES/SMART$/SNIPERS counts
-    //      instead of zeros on outside tokens.
+    // 3.5. Fetch top holders + classify against tracked_wallets.
+    //      Strategy:
+    //        A) Try Solscan /token/holders first — ONE call returns owner addresses directly
+    //        B) Fall back to Helius getTokenLargestAccounts → getMultipleAccounts (2 calls)
+    //      The HELIUS two-step was failing silently on some tokens (timeout / encoding),
+    //      leaving the holder list empty. Solscan Pro is faster and more reliable here.
     let holderStats = null;
-    if (HELIUS_API_KEY) {
+    let holders = []; // token-account rows (for balance data)
+    let owners = [];  // resolved owner wallet addresses
+    let amounts = []; // balance per owner (uiAmount)
+
+    // ── Try Solscan first ──
+    if (process.env.SOLSCAN_API_KEY) {
+      try {
+        const solRes = await fetch(
+          `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=20&page=1`,
+          {
+            headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' },
+            signal: AbortSignal.timeout(9_000),
+          }
+        );
+        if (solRes.ok) {
+          const solJson = await solRes.json();
+          const items = solJson?.data?.items || solJson?.data || [];
+          if (Array.isArray(items) && items.length) {
+            owners  = items.map(h => h.owner).filter(Boolean);
+            amounts = items.map(h => h.amount ?? h.uiAmount ?? null);
+            holders = items.map((h, i) => ({ address: h.address || owners[i], uiAmount: amounts[i] }));
+          }
+        } else {
+          console.warn(`[external-token] Solscan holders returned ${solRes.status}`);
+        }
+      } catch (err) {
+        console.warn('[external-token] Solscan holders failed:', err.message);
+      }
+    }
+
+    // ── Helius fallback if Solscan didn't give us owners ──
+    if (!owners.length && HELIUS_API_KEY) {
       try {
         const rpcRes = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
           method: 'POST',
@@ -3646,11 +3680,9 @@ app.get('/api/external/token/:ca', async (req, res) => {
         });
         if (rpcRes.ok) {
           const rpcJson = await rpcRes.json();
-          const holders = rpcJson?.result?.value || [];
+          holders = rpcJson?.result?.value || [];
           if (holders.length) {
-            // Convert token account addresses to owner addresses via getMultipleAccounts
             const tokenAccts = holders.map(h => h.address).slice(0, 20);
-            let owners = [];
             try {
               const ownerRes = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
                 method: 'POST',
@@ -3659,84 +3691,90 @@ app.get('/api/external/token/:ca', async (req, res) => {
                   jsonrpc: '2.0', id: 'owners', method: 'getMultipleAccounts',
                   params: [tokenAccts, { encoding: 'jsonParsed' }],
                 }),
-                signal: AbortSignal.timeout(9_000),
+                signal: AbortSignal.timeout(12_000),
               });
               if (ownerRes.ok) {
                 const ownerJson = await ownerRes.json();
                 owners = (ownerJson?.result?.value || [])
                   .map(a => a?.data?.parsed?.info?.owner)
                   .filter(Boolean);
+                amounts = holders.map(h => h.uiAmount);
+              } else {
+                console.warn(`[external-token] Helius getMultipleAccounts returned ${ownerRes.status}`);
               }
-            } catch {}
-
-            // Classify against our tracked_wallets database.
-            // Also build a per-holder list so the UI can offer "add / enrich"
-            // actions for wallets we haven't seen before.
-            let whales = 0, smart = 0, snipers = 0, clusters = 0;
-            const matchedLabels = [];
-            const holdersList = [];
-            if (owners.length) {
-              for (let i = 0; i < owners.length; i++) {
-                const owner = owners[i];
-                let tw = null;
-                try {
-                  tw = dbInstance.prepare(
-                    `SELECT address, label, category, win_rate, avg_roi, score
-                     FROM tracked_wallets WHERE address=? AND is_blacklist=0`
-                  ).get(owner);
-                } catch {}
-                if (tw) {
-                  if (tw.category === 'WINNER')       whales++;
-                  else if (tw.category === 'SMART_MONEY') smart++;
-                  else if (tw.category === 'SNIPER')      snipers++;
-                  else if (tw.category === 'CLUSTER')     clusters++;
-                  if (tw.label) matchedLabels.push(tw.label);
-                }
-                holdersList.push({
-                  rank:     i + 1,
-                  address:  owner,
-                  balance:  holders[i]?.uiAmount ?? null,
-                  inDb:     !!tw,
-                  label:    tw?.label || null,
-                  category: tw?.category || null,
-                  winRate:  tw?.win_rate ?? null,
-                  avgRoi:   tw?.avg_roi ?? null,
-                  score:    tw?.score ?? null,
-                });
-              }
-            }
-            // Percentage held by top 10 (total supply comparison)
-            const totalTop10 = holders.slice(0, 10).reduce((s, h) => s + (h.uiAmount || 0), 0);
-            const totalAll = holders.reduce((s, h) => s + (h.uiAmount || 0), 0);
-            const top10Pct = totalAll > 0 ? (totalTop10 / totalAll) * 100 : null;
-
-            holderStats = {
-              holderCount:   holders.length,
-              ownerCount:    owners.length,
-              whales, smart, snipers, clusters,
-              top10Pct,
-              matchedLabels,
-              topHolderOwners: owners.slice(0, 10),
-              holdersList, // full enriched list with DB status per holder
-            };
-
-            // Hydrate merged with these for the candidate shape
-            merged.holders          = merged.holders || holders.length;
-            merged.top10_holder_pct = merged.top10_holder_pct ?? top10Pct;
-            merged.wallet_intel = JSON.stringify({
-              whaleCount:              whales,
-              knownWinnerWalletCount:  whales,
-              smartMoneyCount:         smart,
-              sniperWalletCount:       snipers,
-              clusterWalletCount:      clusters,
-              topWinnerAddresses:      owners.slice(0, 10),
-              matchedLabels,
-              holdersList, // UI renders an actionable list from this
-            });
+            } catch (err) { console.warn('[external-token] Helius owners fetch failed:', err.message); }
           }
         }
+      } catch (err) { console.warn('[external-token] Helius getTokenLargestAccounts failed:', err.message); }
+    }
+
+    // ── Populate holderStats + classify against tracked_wallets ──
+    if (owners.length || holders.length) {
+      try {
+
+        // Classify against our tracked_wallets database.
+        // Also build a per-holder list so the UI can offer "add / enrich"
+        // actions for wallets we haven't seen before.
+        let whales = 0, smart = 0, snipers = 0, clusters = 0;
+        const matchedLabels = [];
+        const holdersList = [];
+        for (let i = 0; i < owners.length; i++) {
+          const owner = owners[i];
+          let tw = null;
+          try {
+            tw = dbInstance.prepare(
+              `SELECT address, label, category, win_rate, avg_roi, score
+               FROM tracked_wallets WHERE address=? AND is_blacklist=0`
+            ).get(owner);
+          } catch {}
+          if (tw) {
+            if (tw.category === 'WINNER')       whales++;
+            else if (tw.category === 'SMART_MONEY') smart++;
+            else if (tw.category === 'SNIPER')      snipers++;
+            else if (tw.category === 'CLUSTER')     clusters++;
+            if (tw.label) matchedLabels.push(tw.label);
+          }
+          holdersList.push({
+            rank:     i + 1,
+            address:  owner,
+            balance:  amounts[i] ?? holders[i]?.uiAmount ?? null,
+            inDb:     !!tw,
+            label:    tw?.label || null,
+            category: tw?.category || null,
+            winRate:  tw?.win_rate ?? null,
+            avgRoi:   tw?.avg_roi ?? null,
+            score:    tw?.score ?? null,
+          });
+        }
+        // Percentage held by top 10 (rough, based on whatever balance data we have)
+        const totalTop10 = holders.slice(0, 10).reduce((s, h) => s + (h.uiAmount || 0), 0);
+        const totalAll   = holders.reduce((s, h) => s + (h.uiAmount || 0), 0);
+        const top10Pct   = totalAll > 0 ? (totalTop10 / totalAll) * 100 : null;
+
+        holderStats = {
+          holderCount:   holders.length,
+          ownerCount:    owners.length,
+          whales, smart, snipers, clusters,
+          top10Pct,
+          matchedLabels,
+          topHolderOwners: owners.slice(0, 10),
+          holdersList,
+        };
+
+        merged.holders          = merged.holders || holders.length;
+        merged.top10_holder_pct = merged.top10_holder_pct ?? top10Pct;
+        merged.wallet_intel = JSON.stringify({
+          whaleCount:              whales,
+          knownWinnerWalletCount:  whales,
+          smartMoneyCount:         smart,
+          sniperWalletCount:       snipers,
+          clusterWalletCount:      clusters,
+          topWinnerAddresses:      owners.slice(0, 10),
+          matchedLabels,
+          holdersList,
+        });
       } catch (err) {
-        console.warn('[external-token] helius holder fetch failed:', err.message);
+        console.warn('[external-token] holder classification failed:', err.message);
       }
     }
 
