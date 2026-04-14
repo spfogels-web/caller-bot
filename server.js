@@ -3831,12 +3831,79 @@ app.get('/api/external/wallet/:address', async (req, res) => {
       ).all(address);
     } catch {}
 
+    // ── Recent token activity — aggregates Solscan transfers into a per-token list
+    //    so the UI can show real alpha even when audit_archive has no overlap yet.
+    //    Each token cross-references against scanner_feed / candidates / audit_archive
+    //    so we can surface: did WE call it? what was the outcome? current mcap?
+    let recentTokens = [];
+    if (process.env.SOLSCAN_API_KEY) {
+      try {
+        // Fetch transfers directly (quick, bounded)
+        const pageSize = 100;
+        const url = `https://pro-api.solscan.io/v2.0/account/transfer`
+          + `?address=${encodeURIComponent(address)}`
+          + `&page=1&page_size=${pageSize}&sort_by=block_time&sort_order=desc`;
+        const r = await fetch(url, {
+          headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' },
+          signal: AbortSignal.timeout(9_000),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          const items = j?.data ?? j?.result ?? j?.transfers ?? [];
+          // Aggregate by token: count transfers, track last-seen timestamp, first side
+          const byToken = new Map();
+          for (const t of items) {
+            const token = (t.token_address || t.tokenAddress || t.mint || '').toString();
+            if (!token || token.length < 32) continue;
+            const bt    = t.block_time || t.blockTime || t.time || null;
+            const fromA = (t.from_address || t.fromAddress || t.from || '').toLowerCase();
+            const isBuy = fromA !== address.toLowerCase();
+            const entry = byToken.get(token) || { address: token, count: 0, lastSeen: bt, buys: 0, sells: 0 };
+            entry.count++;
+            if (isBuy) entry.buys++; else entry.sells++;
+            if (bt && (!entry.lastSeen || bt > entry.lastSeen)) entry.lastSeen = bt;
+            byToken.set(token, entry);
+          }
+          // Cross-reference with our DB
+          const tokens = [...byToken.values()]
+            .sort((a,b) => (b.lastSeen||0) - (a.lastSeen||0))
+            .slice(0, 20);
+          for (const t of tokens) {
+            let ours = null;
+            try { ours = dbInstance.prepare(
+              `SELECT token, composite_score, final_decision FROM candidates
+               WHERE contract_address=? ORDER BY id DESC LIMIT 1`
+            ).get(t.address); } catch {}
+            if (!ours) {
+              try { ours = dbInstance.prepare(
+                `SELECT token, composite_score, final_decision, outcome, peak_multiple
+                 FROM audit_archive WHERE contract_address=? LIMIT 1`
+              ).get(t.address); } catch {}
+            }
+            if (!ours) {
+              try { ours = dbInstance.prepare(
+                `SELECT token FROM scanner_feed WHERE contract_address=? ORDER BY id DESC LIMIT 1`
+              ).get(t.address); } catch {}
+            }
+            t.symbol        = ours?.token || null;
+            t.ourScore      = ours?.composite_score ?? null;
+            t.ourDecision   = ours?.final_decision ?? null;
+            t.outcome       = ours?.outcome ?? null;
+            t.peakMultiple  = ours?.peak_multiple ?? null;
+            t.inOurDb       = !!ours;
+          }
+          recentTokens = tokens;
+        }
+      } catch (err) { console.warn('[external-wallet] recent tokens fetch failed:', err.message); }
+    }
+
     res.json({
       ok: true,
       address,
       stats,
       dbRecord: existing,
       appearances,
+      recentTokens,
       source: stats ? 'solscan' : 'db-only',
     });
   } catch (err) {

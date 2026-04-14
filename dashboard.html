@@ -6682,6 +6682,7 @@ async function showWalletModal(address){
   const transferCount = s.transferCount ?? w.trade_count ?? null;
   const overlapCount  = s.overlapCount ?? null;
   const apps = statsData?.appearances || extData?.appearances || [];
+  const recentTokens  = extData?.recentTokens || [];
   const modal=document.createElement('div');
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
   modal.onclick=function(ev){if(ev.target===modal)modal.remove();};
@@ -6721,6 +6722,38 @@ async function showWalletModal(address){
         ? '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:8px;line-height:1.4">💡 This wallet has traded '+transferCount+' times recently, but none of those tokens are in our audit_archive yet with a WIN/LOSS outcome. As more of our promoted calls resolve, the WIN RATE and SCORE above will populate automatically on the next 6h enrichment cycle.</div>'
         : '')+
     '</div>'+
+    // ── RECENT TOKEN ACTIVITY — the real alpha, from Solscan ──────────
+    (recentTokens.length ? (function(){
+      const outcomeCol = { WIN:'var(--green)', LOSS:'var(--red)', PENDING:'var(--text3)' };
+      return '<div style="padding:12px 16px;border-bottom:1px solid var(--border);background:rgba(255,215,64,0.02)">'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+          '<div style="font-family:var(--mono);font-size:8px;color:var(--gold);letter-spacing:1.5px;font-weight:700">💎 RECENT TOKEN ACTIVITY</div>'+
+          '<div style="font-family:var(--mono);font-size:7px;color:var(--text3)">'+recentTokens.length+' unique tokens · sorted newest first</div>'+
+        '</div>'+
+        '<div style="display:flex;flex-direction:column;gap:3px;max-height:260px;overflow-y:auto;padding-right:4px">'+
+        recentTokens.map(function(t){
+          const when = t.lastSeen ? timeAgo(new Date(t.lastSeen*1000).toISOString()) : '—';
+          const short = t.address.slice(0,6)+'…'+t.address.slice(-4);
+          const buySellText = '<span style="color:var(--green)">'+t.buys+'B</span>/<span style="color:var(--red)">'+t.sells+'S</span>';
+          const ourBadge = t.inOurDb
+            ? (t.outcome==='WIN' ? '<span style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:3px;background:rgba(0,230,118,0.15);border:1px solid rgba(0,230,118,0.4);color:var(--green);font-weight:700">🏆 WIN'+(t.peakMultiple?' '+t.peakMultiple.toFixed(1)+'x':'')+'</span>'
+               : t.outcome==='LOSS' ? '<span style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:3px;background:rgba(255,23,68,0.15);border:1px solid rgba(255,23,68,0.4);color:var(--red);font-weight:700">💀 LOSS</span>'
+               : t.ourDecision ? '<span style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:3px;background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan)">'+esc(t.ourDecision)+(t.ourScore?' '+t.ourScore:'')+'</span>'
+               : '<span style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:3px;background:rgba(68,138,255,0.1);border:1px solid rgba(68,138,255,0.3);color:var(--blue)">IN DB</span>')
+            : '<span style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:3px;background:rgba(136,153,187,0.1);border:1px dashed rgba(136,153,187,0.3);color:var(--text3)">NEW</span>';
+          return '<div onclick="if(typeof openFullCandidateDetail===\'function\')openFullCandidateDetail(\''+t.address+'\')" style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:rgba(0,0,0,0.3);border-radius:4px;cursor:pointer;transition:background 0.15s" onmouseenter="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseleave="this.style.background=\'rgba(0,0,0,0.3)\'">'+
+            '<div style="flex:1;min-width:0">'+
+              '<div style="font-family:var(--mono);font-size:10px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(t.symbol ? '$'+esc(t.symbol) : short)+'</div>'+
+              '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:1px">'+t.count+' tx · '+buySellText+' · '+when+'</div>'+
+            '</div>'+
+            ourBadge+
+            '<a href="https://dexscreener.com/solana/'+t.address+'" target="_blank" onclick="event.stopPropagation()" style="font-family:var(--mono);font-size:7px;color:var(--green);text-decoration:none;padding:2px 5px;background:rgba(0,230,118,0.08);border-radius:3px">DSC↗</a>'+
+          '</div>';
+        }).join('')+
+        '</div>'+
+        '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:6px;letter-spacing:0.5px">💡 Click any token to open full analysis · coins already in our DB show our decision / outcome</div>'+
+      '</div>';
+    })() : '')+
     // ── Label editor — name this wallet anything you want ─────────────
     '<div style="padding:12px 16px;border-bottom:1px solid var(--border)">'+
       '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-bottom:5px">📛 LABEL THIS WALLET</div>'+
