@@ -2704,7 +2704,10 @@ async function runAutoCallerCycle() {
 
       const enriched = await enrichCandidates(uniqueCandidates, 500);
 
-      const PROCESS_BATCH = 3;
+      // Bumped from 3 → 8. Scoring is CPU-bound and fast; the old batch of 3
+      // throttled throughput to ~0.3 tok/s when scanner found 50+ candidates.
+      // 8 gets us ~1 tok/s while still bounding concurrent Birdeye/Helius calls.
+      const PROCESS_BATCH = 8;
       for (let i = 0; i < enriched.length; i += PROCESS_BATCH) {
         const batch = enriched.slice(i, i + PROCESS_BATCH);
         await Promise.all(batch.map(candidate => processCandidate(candidate, false)));
