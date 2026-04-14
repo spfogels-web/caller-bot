@@ -2516,17 +2516,26 @@ body::before {
           </select>
           <select id="auMcap" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
             <option value="">ANY MCAP</option>
-            <option value="gem">$5K–$40K (GEM WINDOW)</option>
+            <option value="gem">$7.5K–$40K (GEM WINDOW)</option>
             <option value="micro">&lt; $100K</option>
             <option value="small">$100K–$500K</option>
             <option value="mid">&gt; $500K</option>
+          </select>
+          <select id="auOutcome" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
+            <option value="">ANY OUTCOME</option>
+            <option value="WIN">🏆 WINS ONLY</option>
+            <option value="LOSS">💀 LOSSES</option>
+            <option value="PENDING">⏳ PENDING</option>
+            <option value="2x">≥ 2× peak</option>
+            <option value="5x">≥ 5× peak</option>
+            <option value="10x">≥ 10× peak (GEMS)</option>
           </select>
         </div>
 
         <!-- Audit rows -->
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-          <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:80px 1fr 80px 60px 1fr 90px 110px;gap:8px;font-family:var(--mono);font-size:7px;letter-spacing:2px;color:rgba(136,153,187,0.55);text-transform:uppercase">
-            <div>TIME</div><div>TOKEN</div><div>MCAP</div><div>SCORE</div><div>CLAUDE / GPT-4o</div><div>DECISION</div><div>SETUP</div>
+          <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:70px 1fr 75px 55px 90px 1fr 80px 90px;gap:6px;font-family:var(--mono);font-size:7px;letter-spacing:2px;color:rgba(136,153,187,0.55);text-transform:uppercase">
+            <div>TIME</div><div>TOKEN</div><div>MCAP</div><div>SCORE</div><div>OUTCOME</div><div>CLAUDE / GPT-4o</div><div>DECISION</div><div>SETUP</div>
           </div>
           <div id="auRows" style="max-height:600px;overflow-y:auto">
             <div style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:rgba(136,153,187,0.5)">Loading audit archive...</div>
@@ -2680,6 +2689,12 @@ function normalizeCandidate(c){
     scannedAt:c.scannedAt??c.scanned_at,
     evaluatedAt:c.evaluatedAt??c.evaluated_at,
     calledAtEt:c.calledAtEt??c.called_at_et,
+    // Outcome (lit up after runOutcomeTracker resolves the call)
+    outcome:c.outcome,
+    peakMultiple:c.peakMultiple??c.peak_multiple,
+    peakMcap:c.peakMcap??c.peak_mcap,
+    peakAt:c.peakAt??c.peak_at,
+    outcomeLockedAt:c.outcomeLockedAt??c.outcome_locked_at,
   };
 }
 
@@ -3526,6 +3541,34 @@ function buildAuditDetail(c){
     </div>
 
     <div style="padding:14px 14px 0 14px">
+
+    <!-- ═══ OUTCOME BANNER (only when resolved or peak is known) ═══ -->
+    ${(()=>{
+      const o = c.outcome;
+      const px = c.peakMultiple;
+      if(!o && (px==null || px<=0)) return '';
+      const isWin = o==='WIN';
+      const isLoss = o==='LOSS';
+      const baseCol = isWin ? '#00e676' : isLoss ? '#ff1744' : '#18ffff';
+      const bgGrad = isWin ? 'linear-gradient(135deg,rgba(0,230,118,0.15),rgba(255,215,64,0.08))'
+                  : isLoss ? 'linear-gradient(135deg,rgba(255,23,68,0.12),rgba(255,109,0,0.06))'
+                  :          'linear-gradient(135deg,rgba(24,255,255,0.08),rgba(0,230,118,0.04))';
+      const icon = isWin ? '🏆' : isLoss ? '💀' : '⏳';
+      const label = isWin ? 'WIN' : isLoss ? 'LOSS' : 'PENDING';
+      const peakLabel = px!=null ? `${px.toFixed(2)}× peak` : 'awaiting move';
+      const peakMcVal = c.peakMcap;
+      return `<div style="background:${bgGrad};border:1px solid ${baseCol}55;border-radius:10px;padding:12px 14px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;box-shadow:0 0 24px ${baseCol}22">
+        <div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">CALL OUTCOME</div>
+          <div style="font-family:var(--mono);font-size:18px;font-weight:900;color:${baseCol};letter-spacing:0.5px">${icon} ${label}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">PEAK MULTIPLE</div>
+          <div style="font-family:var(--mono);font-size:18px;font-weight:900;color:${px>=10?'#ffd740':px>=5?'#00e676':px>=2?'#18ffff':'var(--text2)'}">${peakLabel}</div>
+          ${peakMcVal!=null?`<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">at ${fmt(peakMcVal,'$')}</div>`:''}
+        </div>
+      </div>`;
+    })()}
 
     <!-- ═══ CALLOUT TIMESTAMP + MCAP AT CALL (BIG, AT TOP) ═══ -->
     ${(()=>{
@@ -6474,10 +6517,11 @@ async function loadAuditor() {
 }
 
 function filterAuditor() {
-  var search = (document.getElementById('auSearch')?.value || '').toLowerCase().trim();
-  var dec    = document.getElementById('auDecision')?.value || '';
-  var minSc  = parseInt(document.getElementById('auMinScore')?.value || '0', 10);
-  var mcap   = document.getElementById('auMcap')?.value || '';
+  var search  = (document.getElementById('auSearch')?.value || '').toLowerCase().trim();
+  var dec     = document.getElementById('auDecision')?.value || '';
+  var minSc   = parseInt(document.getElementById('auMinScore')?.value || '0', 10);
+  var mcap    = document.getElementById('auMcap')?.value || '';
+  var outcome = document.getElementById('auOutcome')?.value || '';
 
   _auFiltered = _auRows.filter(function(r) {
     if (dec && r.final_decision !== dec) return false;
@@ -6487,10 +6531,19 @@ function filterAuditor() {
       if (hay.indexOf(search) === -1) return false;
     }
     var mc = r.market_cap || 0;
-    if (mcap === 'gem'   && !(mc >= 5000 && mc <= 40000)) return false;
+    if (mcap === 'gem'   && !(mc >= 7500 && mc <= 40000)) return false;
     if (mcap === 'micro' && !(mc < 100000)) return false;
     if (mcap === 'small' && !(mc >= 100000 && mc <= 500000)) return false;
     if (mcap === 'mid'   && !(mc > 500000)) return false;
+    if (outcome) {
+      var px = r.peak_multiple;
+      if (outcome === 'WIN'     && r.outcome !== 'WIN') return false;
+      if (outcome === 'LOSS'    && r.outcome !== 'LOSS') return false;
+      if (outcome === 'PENDING' && r.outcome && r.outcome !== 'PENDING') return false;
+      if (outcome === '2x'      && !(px >= 2)) return false;
+      if (outcome === '5x'      && !(px >= 5)) return false;
+      if (outcome === '10x'     && !(px >= 10)) return false;
+    }
     return true;
   });
   renderAuditor();
@@ -6523,12 +6576,22 @@ function renderAuditor() {
     var ts       = r.called_at_et || r.created_at;
     var timeTxt  = ts ? timeAgo(ts) : '—';
 
-    return '<div onclick="openAuditorRow(\'' + esc(ca) + '\')" style="display:grid;grid-template-columns:80px 1fr 80px 60px 1fr 90px 110px;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.04);cursor:pointer;transition:background 0.1s" onmouseenter="this.style.background=\'rgba(255,255,255,0.03)\'" onmouseleave="this.style.background=\'transparent\'">' +
+    var outcome = r.outcome || 'PENDING';
+    var peakX   = r.peak_multiple;
+    var outcomeCol = outcome==='WIN' ? 'var(--green)' : outcome==='LOSS' ? 'var(--red)' : 'var(--text3)';
+    var outcomeIcon = outcome==='WIN' ? '🏆' : outcome==='LOSS' ? '💀' : '⏳';
+    var outcomeHTML = '<div style="font-family:var(--mono);font-size:8px">'
+      + '<span style="color:' + outcomeCol + ';font-weight:700">' + outcomeIcon + ' ' + outcome + '</span>'
+      + (peakX != null ? '<div style="color:' + (peakX>=2?'var(--green)':peakX>=1?'var(--cyan)':'var(--text3)') + ';font-size:9px;font-weight:700">' + peakX.toFixed(2) + 'x peak</div>' : '')
+      + '</div>';
+
+    return '<div onclick="openAuditorRow(\'' + esc(ca) + '\')" style="display:grid;grid-template-columns:70px 1fr 75px 55px 90px 1fr 80px 90px;gap:6px;align-items:center;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.04);cursor:pointer;transition:background 0.1s" onmouseenter="this.style.background=\'rgba(255,255,255,0.03)\'" onmouseleave="this.style.background=\'transparent\'">' +
       '<div style="font-family:var(--mono);font-size:8px;color:var(--text3)">' + timeTxt + '</div>' +
       '<div style="min-width:0"><div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">$' + esc(token) + '</div>' +
         '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(ca.slice(0,10) + '…' + ca.slice(-4)) + '</div></div>' +
       '<div style="font-family:var(--mono);font-size:10px;font-weight:700;color:' + (gemWindow ? 'var(--gold)' : 'var(--text2)') + '">' + fmt(mc,'$') + (gemWindow ? ' 💎' : '') + '</div>' +
       '<div style="font-family:var(--mono);font-size:14px;font-weight:900;color:' + scCol + '">' + score + '</div>' +
+      outcomeHTML +
       '<div style="display:flex;gap:3px;flex-wrap:wrap;min-width:0">' +
         (clRisk ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:' + (clRisk==='LOW'?'rgba(0,230,118,0.1)':clRisk==='EXTREME'?'rgba(255,23,68,0.1)':'rgba(255,215,64,0.1)') + ';color:' + (clRisk==='LOW'?'var(--green)':clRisk==='EXTREME'?'var(--red)':'var(--gold)') + '">C:' + clRisk + '</span>' : '') +
         (oaiD ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:' + (oaiD==='AUTO_POST'?'rgba(0,230,118,0.1)':oaiD==='IGNORE'?'rgba(255,23,68,0.1)':'rgba(255,215,64,0.1)') + ';color:' + (oaiD==='AUTO_POST'?'var(--green)':oaiD==='IGNORE'?'var(--red)':'var(--gold)') + '">G:' + oaiD.replace('AUTO_POST','POST') + (oaiC?' ' + oaiC + '%':'') + '</span>' : '') +

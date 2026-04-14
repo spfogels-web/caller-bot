@@ -422,14 +422,30 @@ try {
       sub_scores      TEXT,
       full_candidate_json TEXT,
       called_at_et    TEXT,
-      created_at      TEXT DEFAULT (datetime('now'))
+      created_at      TEXT DEFAULT (datetime('now')),
+      -- Outcome tracking (populated by runOutcomeTracker after resolution)
+      outcome           TEXT DEFAULT 'PENDING',   -- PENDING | WIN | LOSS | NEUTRAL
+      peak_multiple     REAL,                     -- highest observed mcap_now / mcap_at_call
+      peak_mcap         REAL,                     -- highest observed mcap (absolute)
+      peak_at           TEXT,                     -- when peak was observed (ISO)
+      outcome_locked_at TEXT                      -- when outcome was finalized (ISO)
     );
     CREATE INDEX IF NOT EXISTS idx_aa_token    ON audit_archive(token);
     CREATE INDEX IF NOT EXISTS idx_aa_decision ON audit_archive(final_decision);
     CREATE INDEX IF NOT EXISTS idx_aa_score    ON audit_archive(composite_score DESC);
     CREATE INDEX IF NOT EXISTS idx_aa_time     ON audit_archive(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_aa_outcome  ON audit_archive(outcome);
+    CREATE INDEX IF NOT EXISTS idx_aa_peak     ON audit_archive(peak_multiple DESC);
   `);
-  console.log('[db] ✓ audit_archive table ready');
+  // Add outcome columns to older DBs that predate them. Ignore errors (columns already exist).
+  for (const col of [
+    `ALTER TABLE audit_archive ADD COLUMN outcome TEXT DEFAULT 'PENDING'`,
+    `ALTER TABLE audit_archive ADD COLUMN peak_multiple REAL`,
+    `ALTER TABLE audit_archive ADD COLUMN peak_mcap REAL`,
+    `ALTER TABLE audit_archive ADD COLUMN peak_at TEXT`,
+    `ALTER TABLE audit_archive ADD COLUMN outcome_locked_at TEXT`,
+  ]) { try { dbInstance.exec(col); } catch {} }
+  console.log('[db] ✓ audit_archive table ready (with outcome columns)');
 } catch (err) {
   console.warn('[db] audit_archive setup:', err.message);
 }
@@ -4801,7 +4817,8 @@ app.get('/api/archive', (req, res) => {
                top10_holder_pct, dev_wallet_pct, wallet_verdict, smart_money_score, winner_wallets,
                claude_verdict, claude_risk, claude_setup_type, openai_decision, openai_conviction,
                narrative_tags, structure_grade, trap_severity, bonding_curve_pct,
-               twitter, website, telegram, holder_count, sub_scores, called_at_et, created_at
+               twitter, website, telegram, holder_count, sub_scores, called_at_et, created_at,
+               outcome, peak_multiple, peak_mcap, peak_at, outcome_locked_at
              FROM audit_archive WHERE 1=1`;
     const params = [];
     if (decision) { q += ` AND final_decision=?`; params.push(decision); }

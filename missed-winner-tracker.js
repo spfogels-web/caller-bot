@@ -30,7 +30,12 @@ const CLAUDE_MODEL    = 'claude-sonnet-4-20250514';
  * Returns outcome analysis including whether SL/TP levels were hit.
  */
 export async function checkCallOutcome(call) {
-  const { contractAddress, market_cap_at_call, called_at } = call;
+  // Accept both camelCase (legacy) and snake_case (DB column names) — the SQL in
+  // runOutcomeTracker returns snake_case columns, so the old destructure of
+  // `contractAddress` was always undefined and the tracker silently did nothing.
+  const contractAddress = call.contractAddress ?? call.contract_address;
+  const market_cap_at_call = call.market_cap_at_call ?? call.marketCapAtCall;
+  const called_at = call.called_at ?? call.calledAt;
   if (!contractAddress || !market_cap_at_call) return null;
 
   try {
@@ -320,9 +325,35 @@ export async function runOutcomeTracker(dbInstance) {
   for (const call of unresolvedCalls) {
     try {
       const result = await checkCallOutcome(call);
-      if (!result || !result.autoOutcome) continue;
+      if (!result) continue;
 
       const minutesSince = result.minutesSinceCall ?? 0;
+      const ca = call.contract_address ?? call.contractAddress;
+
+      // ── Always roll the peak forward in audit_archive, even for unresolved calls ──
+      // This lets us see how far a coin ran while it was pending — useful for
+      // learning even if the final outcome never formally hits WIN/LOSS.
+      if (ca && result.multiple != null) {
+        try {
+          dbInstance.prepare(`
+            UPDATE audit_archive
+            SET peak_multiple = CASE
+                  WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ?
+                  ELSE peak_multiple END,
+                peak_mcap = CASE
+                  WHEN peak_mcap IS NULL OR ? > peak_mcap THEN ?
+                  ELSE peak_mcap END,
+                peak_at = CASE
+                  WHEN peak_multiple IS NULL OR ? > peak_multiple THEN datetime('now')
+                  ELSE peak_at END
+            WHERE contract_address = ?
+          `).run(result.multiple, result.multiple,
+                 result.currentMcap, result.currentMcap,
+                 result.multiple, ca);
+        } catch {}
+      }
+
+      if (!result.autoOutcome) { await sleep(300); continue; }
 
       // Only auto-resolve if enough time has passed
       if (result.autoOutcome === 'WIN' && minutesSince >= 30) {
@@ -334,6 +365,19 @@ export async function runOutcomeTracker(dbInstance) {
             auto_resolved_at = datetime('now')
           WHERE id = ?
         `).run(result.pctChange, call.id);
+
+        // Lock the outcome onto the audit_archive row as well so the Auditor
+        // can query "what did winners look like?" without joining calls.
+        if (ca) {
+          try {
+            dbInstance.prepare(`
+              UPDATE audit_archive
+              SET outcome = 'WIN',
+                  outcome_locked_at = datetime('now')
+              WHERE contract_address = ? AND (outcome IS NULL OR outcome = 'PENDING')
+            `).run(ca);
+          } catch {}
+        }
         console.log(`[outcome-tracker] ✅ Auto-WIN: $${call.token} ${result.multiple}x`);
       } else if (result.autoOutcome === 'LOSS' && minutesSince >= 60) {
         dbInstance.prepare(`
@@ -344,6 +388,17 @@ export async function runOutcomeTracker(dbInstance) {
             auto_resolved_at = datetime('now')
           WHERE id = ?
         `).run(result.pctChange, call.id);
+
+        if (ca) {
+          try {
+            dbInstance.prepare(`
+              UPDATE audit_archive
+              SET outcome = 'LOSS',
+                  outcome_locked_at = datetime('now')
+              WHERE contract_address = ? AND (outcome IS NULL OR outcome = 'PENDING')
+            `).run(ca);
+          } catch {}
+        }
         console.log(`[outcome-tracker] ❌ Auto-LOSS: $${call.token} (${result.pctChange.toFixed(0)}%)`);
       }
 
