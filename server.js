@@ -3555,6 +3555,146 @@ app.all('/api/wt/*', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════
+// EXTERNAL SCAN ENDPOINTS — work on ANY token/wallet, not just ones in our DB
+// Used by the Brain Analyzer and Wallet Intel Scanner so the user can study
+// tokens & wallets the bot hasn't seen yet. Fetches live from DexScreener +
+// Solscan, cross-references our own audit_archive where possible, and
+// persists a snapshot so every external lookup helps train the system.
+// ═══════════════════════════════════════════════════════════
+
+// External token scan — accepts any Solana CA, returns a normalized candidate
+// shape the frontend's buildAuditDetail / Brain Analyzer expects.
+app.get('/api/external/token/:ca', async (req, res) => {
+  setCors(res);
+  const ca = (req.params.ca || '').trim();
+  if (!ca || ca.length < 32) return res.status(400).json({ ok: false, error: 'Invalid CA' });
+
+  try {
+    // 1. Check our own DB first (fast path)
+    let row = null;
+    try { row = dbInstance.prepare(`SELECT * FROM candidates WHERE contract_address=? ORDER BY id DESC LIMIT 1`).get(ca); } catch {}
+    if (!row) {
+      try { row = dbInstance.prepare(`SELECT * FROM audit_archive WHERE contract_address=? LIMIT 1`).get(ca); } catch {}
+    }
+
+    // 2. Fetch live data from DexScreener regardless — we want current mcap etc.
+    let dex = null;
+    try {
+      const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(ca)}`, {
+        signal: AbortSignal.timeout(9_000),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const pairs = j?.pairs || [];
+        if (pairs.length) {
+          // Pick most liquid Solana pair
+          const best = pairs
+            .filter(p => (p.chainId || p.chain) === 'solana')
+            .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0] || pairs[0];
+          dex = best;
+        }
+      }
+    } catch (err) { console.warn('[external-token] dex fetch failed:', err.message); }
+
+    if (!row && !dex) {
+      return res.status(404).json({ ok: false, error: 'Not in DB and DexScreener has no data for this CA' });
+    }
+
+    // 3. Merge — DexScreener live data wins for volatile fields (price/mcap/vol),
+    //    DB wins for scored fields (composite_score, claude_verdict, sub_scores)
+    const merged = { ...(row || {}) };
+    if (dex) {
+      merged.contract_address = ca;
+      merged.token            = merged.token || dex.baseToken?.symbol;
+      merged.token_name       = merged.token_name || dex.baseToken?.name;
+      merged.chain            = 'solana';
+      merged.dex              = dex.dexId;
+      merged.market_cap       = dex.marketCap ?? dex.fdv ?? merged.market_cap;
+      merged.liquidity        = dex.liquidity?.usd ?? merged.liquidity;
+      merged.volume_1h        = dex.volume?.h1 ?? merged.volume_1h;
+      merged.volume_24h       = dex.volume?.h24 ?? merged.volume_24h;
+      merged.price_usd        = parseFloat(dex.priceUsd || 0) || merged.price_usd;
+      merged.price_change_5m  = dex.priceChange?.m5 ?? merged.price_change_5m;
+      merged.price_change_1h  = dex.priceChange?.h1 ?? merged.price_change_1h;
+      merged.price_change_6h  = dex.priceChange?.h6 ?? merged.price_change_6h;
+      merged.price_change_24h = dex.priceChange?.h24 ?? merged.price_change_24h;
+      merged.buys_1h          = dex.txns?.h1?.buys ?? merged.buys_1h;
+      merged.sells_1h         = dex.txns?.h1?.sells ?? merged.sells_1h;
+      const pairCreated = dex.pairCreatedAt ? Date.now() - dex.pairCreatedAt : null;
+      merged.pair_age_hours   = pairCreated != null ? pairCreated / 3_600_000 : merged.pair_age_hours;
+      merged.pair_address     = dex.pairAddress || merged.pair_address;
+      merged.website          = merged.website  || dex.info?.websites?.[0]?.url;
+      merged.twitter          = merged.twitter  || dex.info?.socials?.find(s => s.type === 'twitter')?.url;
+      merged.telegram         = merged.telegram || dex.info?.socials?.find(s => s.type === 'telegram')?.url;
+    }
+
+    // 4. Persist a snapshot to scanner_feed so the system "sees" this token
+    try {
+      dbInstance.prepare(`
+        INSERT OR IGNORE INTO scanner_feed
+          (token, contract_address, pair_address, dex, market_cap, liquidity,
+           volume_24h, volume_1h, price_usd, pair_age_hours,
+           price_change_5m, price_change_1h, price_change_24h, buys_1h, sells_1h,
+           filter_action, filter_reason, website, twitter, telegram)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        merged.token || null, ca, merged.pair_address || null, merged.dex || null,
+        merged.market_cap || null, merged.liquidity || null,
+        merged.volume_24h || null, merged.volume_1h || null,
+        merged.price_usd || null, merged.pair_age_hours || null,
+        merged.price_change_5m || null, merged.price_change_1h || null,
+        merged.price_change_24h || null, merged.buys_1h || null, merged.sells_1h || null,
+        'EXTERNAL_SCAN', 'user-triggered brain analyzer scan',
+        merged.website || null, merged.twitter || null, merged.telegram || null,
+      );
+    } catch {}
+
+    res.json({ ok: true, candidate: merged, source: row ? 'db+live' : 'live-only' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// External wallet scan — fetches any wallet's stats live via Solscan + our
+// audit_archive cross-reference. Persists to tracked_wallets.
+app.get('/api/external/wallet/:address', async (req, res) => {
+  setCors(res);
+  const address = (req.params.address || '').trim();
+  if (!address || address.length < 32) return res.status(400).json({ ok: false, error: 'Invalid wallet address' });
+
+  try {
+    // Reuse the Solscan enricher — same function the scheduled job uses
+    const { enrichWallet } = await import('./solscan-wallet-enricher.js');
+    const stats = await enrichWallet(address, dbInstance);
+
+    // Also pull any existing DB record + our own early_wallets data
+    let existing = null;
+    try { existing = dbInstance.prepare(`SELECT * FROM tracked_wallets WHERE address=?`).get(address); } catch {}
+    let appearances = [];
+    try {
+      appearances = dbInstance.prepare(
+        `SELECT ew.token_ca, ew.entry_rank, ew.entry_mcap, ew.outcome,
+                aa.final_decision, aa.composite_score, aa.called_at_et
+         FROM early_wallets ew
+         LEFT JOIN audit_archive aa ON ew.token_ca = aa.contract_address
+         WHERE ew.wallet = ? ORDER BY ew.created_at DESC LIMIT 20`
+      ).all(address);
+    } catch {}
+
+    res.json({
+      ok: true,
+      address,
+      stats,
+      dbRecord: existing,
+      appearances,
+      source: stats ? 'solscan' : 'db-only',
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Rolling-window pipeline metrics for the Analytics tab.
 // Returns counts across 1h / 5h / 24h / 7d windows for every major stage.
 app.get('/api/stats/rolling', (req, res) => {

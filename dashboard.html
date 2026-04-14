@@ -1997,6 +1997,25 @@ body::before {
 .ws-stat-label { font-family: var(--mono); font-size: 7px; color: var(--text3); letter-spacing: 1.5px; margin-bottom: 3px; }
 .ws-stat-val   { font-family: 'Orbitron', var(--mono), monospace; font-size: 16px; font-weight: 800; line-height: 1; color: var(--text1); }
 
+.ws-scan-any {
+  display: flex; gap: 6px;
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(24,255,255,0.25);
+  border-radius: 8px;
+  padding: 6px;
+  margin-top: 4px;
+}
+.ws-scan-any-input {
+  flex: 1; min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--text1);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 6px 10px;
+  outline: none;
+}
+.ws-scan-any-input::placeholder { color: rgba(136,153,187,0.5); }
 .ws-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 .ws-btn {
   border-radius: 6px;
@@ -3125,9 +3144,16 @@ body::before {
                 <div class="ws-stat"><div class="ws-stat-label">ENRICHED 24H</div><div class="ws-stat-val" style="color:var(--green)" id="wsStat24h">—</div></div>
                 <div class="ws-stat"><div class="ws-stat-label">LAST SCAN</div><div class="ws-stat-val" style="font-size:11px" id="wsStatLast">—</div></div>
               </div>
+              <!-- Scan ANY wallet address (not just ones in our DB) -->
+              <div class="ws-scan-any">
+                <input id="wsScanAnyInput" class="ws-scan-any-input"
+                       placeholder="🔍 Paste ANY wallet address — harvests PnL live via Solscan..."
+                       onkeydown="if(event.key==='Enter')scanArbitraryWallet()">
+                <button class="ws-btn ws-btn-primary" onclick="scanArbitraryWallet()">🔬 SCAN WALLET</button>
+              </div>
               <div class="ws-actions">
-                <button class="ws-btn ws-btn-primary" id="wsScanBtn" onclick="triggerDuneScan()">⚡ SCAN DUNE BATCH</button>
-                <button class="ws-btn ws-btn-secondary" id="wsEnrichBtn" onclick="triggerSolscanEnrichment()">🧬 ENRICH PnL (Solscan)</button>
+                <button class="ws-btn ws-btn-secondary" id="wsScanBtn" onclick="triggerDuneScan()">⚡ DUNE BATCH</button>
+                <button class="ws-btn ws-btn-secondary" id="wsEnrichBtn" onclick="triggerSolscanEnrichment()">🧬 ENRICH STALE (PnL)</button>
                 <button class="ws-btn ws-btn-tertiary" onclick="loadWalletTiles()">↻ REFRESH TILES</button>
               </div>
               <div class="ws-status-line" id="wsStatusLine"></div>
@@ -6430,6 +6456,40 @@ async function triggerDuneScan(){
   }
 }
 
+// Scan ANY wallet address — uses the new /api/external/wallet/:address endpoint
+// which fires Solscan + DB cross-reference for a wallet we may not have seen.
+async function scanArbitraryWallet(){
+  const input = document.getElementById('wsScanAnyInput');
+  const addr  = (input?.value || '').trim();
+  if (!addr || addr.length < 32) {
+    _setWalletScannerStatus('BAD ADDR', 'error', 'Paste a valid Solana wallet address (32–44 chars)');
+    return;
+  }
+  _setWalletScannerStatus('SCANNING', 'scanning', `🔬 Scanning ${addr.slice(0,6)}…${addr.slice(-4)} via Solscan — ~5s`);
+  try {
+    const res  = await fetch('/api/external/wallet/' + encodeURIComponent(addr), {
+      signal: AbortSignal.timeout(30000),
+    });
+    const data = await res.json();
+    if (data?.ok) {
+      const s = data.stats || {};
+      const msg = s.decided
+        ? `✓ ${addr.slice(0,6)}…${addr.slice(-4)} · ${s.decided} resolved overlap · win rate ${Math.round((s.winRate||0)*100)}% · avg peak ${(s.avgPeak||0).toFixed(2)}×`
+        : `✓ Wallet scanned — no overlap with our winning calls yet (${s.transferCount || 0} transfers seen)`;
+      _setWalletScannerStatus('COMPLETE', 'done', msg);
+      // Refresh the tile grid so this wallet appears
+      if (typeof loadWalletTiles === 'function') await loadWalletTiles();
+      // Open the full wallet modal so the user can label it and see appearances
+      setTimeout(() => { if (typeof showWalletModal === 'function') showWalletModal(addr); }, 400);
+      if (input) input.value = '';
+    } else {
+      _setWalletScannerStatus('ERROR', 'error', '✗ ' + (data?.error || 'Scan failed — check SOLSCAN_API_KEY'));
+    }
+  } catch (err) {
+    _setWalletScannerStatus('ERROR', 'error', '✗ ' + err.message);
+  }
+}
+
 async function triggerSolscanEnrichment(){
   const btn=document.getElementById('wsEnrichBtn');
   if(btn){btn.disabled=true;btn.textContent='⏳ ENRICHING...';}
@@ -7637,6 +7697,13 @@ async function triggerBrainAnalysis() {
     const data = await apiFetch('/api/candidates/by-ca/' + encodeURIComponent(ca));
     candidate = data?.candidate || null;
   } catch {}
+  // External fallback — fetch live from DexScreener for any CA not in our DB
+  if (!candidate) {
+    try {
+      const data = await apiFetch('/api/external/token/' + encodeURIComponent(ca));
+      if (data?.ok && data.candidate) candidate = data.candidate;
+    } catch {}
+  }
 
   if (candidate) {
     const wi = candidate.wallet_intel
