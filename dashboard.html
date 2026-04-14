@@ -6160,68 +6160,65 @@ function candidatesRender(){
 // UNIFIED COIN DETAIL — called from every tab
 // Always shows full popup with ✕ CLOSE at top right
 // ═══════════════════════════════════════════════════════
+// Shared mobile detail loader — cascades through every API source and
+// always renders the full buildAuditDetail (now with the on-fly score
+// fallback in the API), never the minimal buildPromotedFallback.
+async function _mobileLoadDetail(opts){
+  const { id, ca, seed } = opts || {};
+  const content = document.getElementById('auditMobileContent');
+  if(!content) return;
+  let full = null;
+  // 1. By candidate ID
+  if(id != null){
+    try{ const d = await apiFetch('/api/candidates/'+id); if(d && d.candidate) full = d.candidate; }catch(e){}
+  }
+  // 2. By contract address
+  if(!full && ca){
+    try{ const d = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(ca)); if(d && d.candidate) full = d.candidate; }catch(e){}
+  }
+  // 3. Audit archive (resolved/promoted history)
+  if(!full && ca){
+    try{ const d = await apiFetch('/api/archive/'+encodeURIComponent(ca)); if(d && d.ok && d.row) full = d.row; }catch(e){}
+  }
+  // 4. Last resort: render with whatever the row already has — ALWAYS
+  //    use the rich buildAuditDetail (never the minimal fallback) so
+  //    mobile and desktop see the same layout.
+  const dataToRender = full ? normalizeCandidate(full) : (seed ? (seed._normalized ? seed : normalizeCandidate(seed)) : null);
+  if(dataToRender){
+    content.innerHTML = buildAuditDetail(dataToRender);
+  } else {
+    content.innerHTML = '<div class="empty-state" style="padding:40px"><div class="empty-icon">❌</div><div>Analysis not available</div></div>';
+  }
+  content.scrollTop = 0;
+}
+
+function _mobileOpenModal(){
+  const modal = document.getElementById('auditMobileModal');
+  const content = document.getElementById('auditMobileContent');
+  if(modal) modal.classList.add('open');
+  if(content) content.innerHTML = '<div class="spinner" style="padding:60px 20px"><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--green)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>';
+  document.body.style.overflow = 'hidden';
+}
+
 function showCoinDetail(data){
   if(!data) return;
-  const modal   = document.getElementById('auditMobileModal');
-  const content = document.getElementById('auditMobileContent');
-  if(!modal || !content) return;
-
-  // Show spinner immediately
-  content.innerHTML = '<div class="spinner"><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--green)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>';
-  modal.classList.add('open');
-  document.body.style.overflow = 'hidden';
-
-  // If data has full analysis, render it
-  if(data.compositeScore && data.finalDecision && data.finalDecision !== 'PENDING'){
-    const c = normalizeCandidate(data);
-    content.innerHTML = buildAuditDetail(c);
-    content.scrollTop = 0;
-  } else {
-    // Fallback for scanner-feed / PENDING tokens
-    content.innerHTML = buildPromotedFallback(data);
-    content.scrollTop = 0;
-  }
+  _mobileOpenModal();
+  // data here is a row from the candidates list (already normalized via normalizeCandidate)
+  _mobileLoadDetail({ id: data.id, ca: data.contractAddress || data.contract_address, seed: data });
 }
 
 async function showCoinById(id){
-  if(!id && id!==0) return;
-  const modal   = document.getElementById('auditMobileModal');
-  const content = document.getElementById('auditMobileContent');
-  if(!modal || !content) return;
-
-  content.innerHTML = '<div class="spinner"><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--green)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>';
-  modal.classList.add('open');
-  document.body.style.overflow = 'hidden';
-
-  const resp = await apiFetch('/api/candidates/'+id);
-  if(resp?.candidate){
-    content.innerHTML = buildAuditDetail(normalizeCandidate(resp.candidate));
-  } else {
-    // Try by-ca fallback using local data
-    const local = allCandidatesData.find(c=>String(c.id)===String(id));
-    if(local){ content.innerHTML = buildPromotedFallback(local); }
-    else { content.innerHTML = '<div class="empty-state"><div class="empty-icon">❌</div><div>Analysis not available</div></div>'; }
-  }
-  content.scrollTop = 0;
+  if(id == null) return;
+  _mobileOpenModal();
+  // Look up local row to grab CA for fallback chain
+  const local = allCandidatesData.find(c => String(c.id) === String(id));
+  await _mobileLoadDetail({ id, ca: local?.contractAddress, seed: local });
 }
 
 async function showCoinByCA(ca){
   if(!ca) return;
-  const modal   = document.getElementById('auditMobileModal');
-  const content = document.getElementById('auditMobileContent');
-  if(!modal || !content) return;
-
-  content.innerHTML = '<div class="spinner"><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--green)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>';
-  modal.classList.add('open');
-  document.body.style.overflow = 'hidden';
-
-  const resp = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(ca));
-  if(resp?.candidate){
-    content.innerHTML = buildAuditDetail(normalizeCandidate(resp.candidate));
-  } else {
-    content.innerHTML = '<div class="empty-state"><div class="empty-icon">❌</div><div>No full analysis yet for this token</div></div>';
-  }
-  content.scrollTop = 0;
+  _mobileOpenModal();
+  await _mobileLoadDetail({ ca });
 }
 
 function closeAuditModal(){
