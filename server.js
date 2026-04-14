@@ -3669,20 +3669,40 @@ app.get('/api/external/token/:ca', async (req, res) => {
               }
             } catch {}
 
-            // Classify against our tracked_wallets database
+            // Classify against our tracked_wallets database.
+            // Also build a per-holder list so the UI can offer "add / enrich"
+            // actions for wallets we haven't seen before.
             let whales = 0, smart = 0, snipers = 0, clusters = 0;
             const matchedLabels = [];
+            const holdersList = [];
             if (owners.length) {
-              for (const owner of owners) {
+              for (let i = 0; i < owners.length; i++) {
+                const owner = owners[i];
+                let tw = null;
                 try {
-                  const tw = dbInstance.prepare(`SELECT category, label FROM tracked_wallets WHERE address=? AND is_blacklist=0`).get(owner);
-                  if (!tw) continue;
+                  tw = dbInstance.prepare(
+                    `SELECT address, label, category, win_rate, avg_roi, score
+                     FROM tracked_wallets WHERE address=? AND is_blacklist=0`
+                  ).get(owner);
+                } catch {}
+                if (tw) {
                   if (tw.category === 'WINNER')       whales++;
                   else if (tw.category === 'SMART_MONEY') smart++;
                   else if (tw.category === 'SNIPER')      snipers++;
                   else if (tw.category === 'CLUSTER')     clusters++;
                   if (tw.label) matchedLabels.push(tw.label);
-                } catch {}
+                }
+                holdersList.push({
+                  rank:     i + 1,
+                  address:  owner,
+                  balance:  holders[i]?.uiAmount ?? null,
+                  inDb:     !!tw,
+                  label:    tw?.label || null,
+                  category: tw?.category || null,
+                  winRate:  tw?.win_rate ?? null,
+                  avgRoi:   tw?.avg_roi ?? null,
+                  score:    tw?.score ?? null,
+                });
               }
             }
             // Percentage held by top 10 (total supply comparison)
@@ -3697,6 +3717,7 @@ app.get('/api/external/token/:ca', async (req, res) => {
               top10Pct,
               matchedLabels,
               topHolderOwners: owners.slice(0, 10),
+              holdersList, // full enriched list with DB status per holder
             };
 
             // Hydrate merged with these for the candidate shape
@@ -3710,6 +3731,7 @@ app.get('/api/external/token/:ca', async (req, res) => {
               clusterWalletCount:      clusters,
               topWinnerAddresses:      owners.slice(0, 10),
               matchedLabels,
+              holdersList, // UI renders an actionable list from this
             });
           }
         }
