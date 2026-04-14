@@ -3096,7 +3096,11 @@ async function loadAudit(){
     .filter(r=>!candCAs.has(r.contract_address))
     .map(r=>normalizeCandidate({...r,
       finalDecision:(r.filter_action||r.filterAction)==='PROMOTE'?'AUTO_POST':'PENDING',
-      compositeScore: r.quick_score??r.quickScore??0
+      // Don't conflate quick_score with the real composite score. quick_score
+      // is a fast pre-screening number that often hits 100 for any token
+      // passing basic checks. Leave compositeScore null until full scoring
+      // runs — the row will show '⏳ SCORING' instead of a misleading 100.
+      compositeScore: null
     }));
   allCandidatesData = [...candRows, ...feedRows];
   setText('tb-audit-badge', allCandidatesData.length);
@@ -3136,8 +3140,12 @@ function renderAuditList(){
   else if(auditCurrentFilter==='BLOCKLIST') rows=rows.filter(function(r){return r.finalDecision==='BLOCKLIST';});
   else if(auditCurrentFilter==='PENDING') rows=rows.filter(function(r){return r.finalDecision==='PENDING';});
 
-  // Sort by score desc
-  rows.sort(function(a,b){ return ((b.compositeScore||b.quick_score||0)-(a.compositeScore||a.quick_score||0)); });
+  // Sort by REAL composite score desc — unscored rows (null) sink to bottom
+  rows.sort(function(a,b){
+    var av = a.compositeScore != null ? a.compositeScore : -1;
+    var bv = b.compositeScore != null ? b.compositeScore : -1;
+    return bv - av;
+  });
 
   const total=rows.length;
   setText('tb-candidates-badge', total||'');
@@ -3162,9 +3170,13 @@ function renderAuditList(){
   var isMobile = window.innerWidth <= 900;
 
   slice.forEach(function(r){
-    var rawScore = r.compositeScore??r.quick_score??r.quickScore??null;
-    var score    = rawScore!=null ? Math.round(rawScore) : null;
-    var isScoring = score==null || score===0;
+    // Only use the REAL composite score for the row display. quick_score
+    // is a pre-screening number that often shows 100 — misleading users
+    // when the real composite turns out to be 48. Show '⏳ SCORING' until
+    // the full scorer has run.
+    var rawScore = r.compositeScore != null ? r.compositeScore : null;
+    var score    = rawScore != null ? Math.round(rawScore) : null;
+    var isScoring = score == null || score === 0;
     var displayScore = isScoring ? '—' : score;
     var sCol     = isScoring ? 'var(--text3)' : scoreCol(score);
     var dec      = r.finalDecision||'PENDING';
