@@ -4646,6 +4646,23 @@ app.get('/api/wallets/rankings', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Trigger Solscan wallet enrichment on demand (single wallet OR batch)
+app.post('/api/wallets/enrich', async (req, res) => {
+  setCors(res);
+  try {
+    const { address, batchSize } = req.body ?? {};
+    const { enrichWallet, enrichStaleWallets } = await import('./solscan-wallet-enricher.js');
+    if (address) {
+      const stats = await enrichWallet(address, dbInstance);
+      return res.json({ ok: true, address, stats });
+    }
+    const result = await enrichStaleWallets(dbInstance, batchSize ?? 50);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Smart money stats for a specific wallet address
 app.get('/api/wallets/stats/:address', (req, res) => {
   setCors(res);
@@ -5203,6 +5220,17 @@ app.listen(PORT, async () => {
   // ── v8.0: Start Learning Loop ─────────────────────────────────────────────
   learningLoopHandles = startLearningLoop(dbInstance, CLAUDE_API_KEY);
   console.log('[startup] ✓ Learning loop active — outcome tracking + missed winner detection');
+
+  // ── Smart Money: Solscan wallet enrichment loop (every 6h) ────────────────
+  // Backfills tracked_wallets with real win-rate / ROI based on overlap with
+  // our audit_archive outcomes. Skips if SOLSCAN_API_KEY is missing.
+  try {
+    const { startSolscanEnrichmentLoop } = await import('./solscan-wallet-enricher.js');
+    startSolscanEnrichmentLoop(dbInstance);
+    console.log('[startup] ✓ Solscan wallet enrichment loop active (6h interval)');
+  } catch (err) {
+    console.warn('[startup] Solscan enricher failed to start:', err.message);
+  }
 
   // ── v8.0: Survivor Detection (every 30min) ────────────────────────────────
   setInterval(() => {
