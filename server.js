@@ -3022,6 +3022,177 @@ app.get('/api/ai/memory', (req, res) => {
 // ─── AI Agent Chat Proxy ──────────────────────────────────────────────────────
 // Dashboard chat calls this instead of Anthropic directly (avoids CORS).
 // The bot backend holds the CLAUDE_API_KEY so the browser never needs it.
+// ═══════════════════════════════════════════════════════════════════════════
+// BRAINSTORM ROOM — Claude (Analyst) + OpenAI (Decision Engine) loop
+// User drops a topic → Claude analyzes with structured output → OpenAI
+// challenges + decides. Full system context (live pipeline stats + mission)
+// injected into both prompts so they reason with real numbers.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/brainstorm/turn', async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured' });
+  if (!OPENAI_API_KEY) return res.status(503).json({ ok: false, error: 'OPENAI_API_KEY not configured' });
+  try {
+    const { topic, history } = req.body ?? {};
+    if (!topic || typeof topic !== 'string') return res.status(400).json({ ok: false, error: 'topic required' });
+
+    // Build live system context from DB — so bots reason with real numbers
+    const sysContext = (() => {
+      try {
+        const safeCount = (sql) => { try { return dbInstance.prepare(sql).get().n; } catch { return 0; } };
+        const total    = safeCount(`SELECT COUNT(*) as n FROM candidates`);
+        const scored   = safeCount(`SELECT COUNT(*) as n FROM candidates WHERE composite_score IS NOT NULL`);
+        const posted   = safeCount(`SELECT COUNT(*) as n FROM candidates WHERE final_decision='AUTO_POST'`);
+        const wins     = safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'`);
+        const losses   = safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'`);
+        const wallets  = safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0`);
+        const whales   = safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE category='WINNER' AND is_blacklist=0`);
+        const smart    = safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE category='SMART_MONEY' AND is_blacklist=0`);
+        const archived = safeCount(`SELECT COUNT(*) as n FROM audit_archive`);
+        const wr       = (wins + losses) > 0 ? Math.round(wins / (wins + losses) * 100) : null;
+        return `LIVE PIPELINE STATS (right now):
+- Candidates evaluated: ${total} | Fully scored: ${scored} | AUTO_POSTED: ${posted}
+- Archived decisions: ${archived}
+- Outcomes: ${wins} wins / ${losses} losses (win rate: ${wr != null ? wr + '%' : 'pending'})
+- Wallet DB: ${wallets} tracked (${whales} whales, ${smart} smart money)
+- Target window: $7.5K-$40K MCap (refined from $5K-$40K)
+- Data sources live: Helius RPC, Solscan Pro, Birdeye, DexScreener, Pump.fun, Dune`;
+      } catch (err) { return `Live stats unavailable: ${err.message}`; }
+    })();
+
+    const missionBlock = `MISSION: Build the most advanced Solana early-gem call system for $7.5K-$40K market cap tokens. Consistently identify 10x+ opportunities BEFORE the crowd.
+
+PHILOSOPHY: We engineer edge, not chase hype. We predict, not react. Every improvement must increase win rate, avg ROI, signal quality, or speed to entry.
+
+${sysContext}`;
+
+    // ── CLAUDE (The Analyst) ────────────────────────────────────────────
+    const claudeSystem = `You are CLAUDE — THE ANALYST inside the Brainstorm Room.
+
+${missionBlock}
+
+YOUR ROLE: You analyze, challenge, and improve this Solana gem-hunting system. You are proactive, aggressive, and obsessed with edge. You do NOT make final decisions — you BUILD THE CASE. OpenAI is your counterparty — they will decide.
+
+RESPONSIBILITIES:
+1. SYSTEM ANALYSIS — identify weaknesses, data gaps, timing delays, false positives
+2. PATTERN RECOGNITION — dev behavior, early buyer clusters, liquidity patterns, vol spikes
+3. IMPROVEMENT ENGINE — propose new scoring variables, filters, APIs, hidden signals
+4. OFFENSIVE THINKING — find ways to get in BEFORE the crowd; detect stealth accumulation
+5. CHALLENGE THE SYSTEM — question assumptions, find where we're being fooled
+
+STRICT OUTPUT FORMAT (use these 4 headings, nothing else):
+
+### Insight
+(What you observed. Be specific with data.)
+
+### Problem
+(What's broken / suboptimal. Quote the number that proves it.)
+
+### Proposed Upgrade
+(Concrete technical change. Files/fields/thresholds where possible.)
+
+### Expected Impact
+(Quantified bet: +X% win rate, -Y seconds, etc.)
+
+NEVER agree blindly. NEVER hedge. Pick the sharpest angle and commit.`;
+
+    const claudeMessages = [];
+    if (Array.isArray(history)) {
+      for (const h of history.slice(-10)) {
+        if (h.role === 'claude') claudeMessages.push({ role: 'assistant', content: h.content });
+        else if (h.role === 'openai') claudeMessages.push({ role: 'user', content: `OpenAI (Decision Engine) responded: ${h.content}` });
+        else if (h.role === 'user') claudeMessages.push({ role: 'user', content: h.content });
+      }
+    }
+    claudeMessages.push({ role: 'user', content: `TOPIC: ${topic}\n\nAnalyze it. Use the 4-heading output format exactly.` });
+
+    const claudeStart = Date.now();
+    const claudeRes = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1400, system: claudeSystem, messages: claudeMessages }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!claudeRes.ok) {
+      const txt = await claudeRes.text();
+      return res.status(502).json({ ok: false, error: `Claude ${claudeRes.status}: ${txt.slice(0, 300)}` });
+    }
+    const claudeJson = await claudeRes.json();
+    const claudeReply = (claudeJson.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const claudeMs = Date.now() - claudeStart;
+
+    // ── OPENAI (The Decision Engine) ────────────────────────────────────
+    const openaiSystem = `You are OPENAI — THE DECISION ENGINE inside the Brainstorm Room.
+
+${missionBlock}
+
+YOUR ROLE: Evaluate Claude's analysis. You are the FINAL FILTER. You approve, modify, or reject. You prioritize profit + reduce risk. Your goal isn't to be smart — it's to be RIGHT and PROFITABLE.
+
+RESPONSIBILITIES:
+1. DECISION MAKING — approve / modify / reject every Claude proposal
+2. PROFITABILITY FILTER — every idea must answer: does it ↑ win rate? ↑ ROI? ↑ entry speed? ↓ rug risk?
+3. RISK CONTROL — reject overfitting, useless complexity, speed-killers
+4. EXECUTION LOGIC — turn ideas into concrete system rules (scanner/scorer/caller)
+5. PRESSURE TEST CLAUDE — challenge weak logic, demand proof
+
+STRICT OUTPUT FORMAT (use these 4 headings, nothing else):
+
+### Decision
+APPROVE / MODIFY / REJECT  (pick one, all caps)
+
+### Reason
+(Why. Back with numbers. Be unforgiving — weak ideas die here.)
+
+### Implementation Plan
+(Step-by-step. Which file / which function / which threshold. If MODIFY, describe the specific change to Claude's proposal.)
+
+### Expected ROI Impact
+(Quantified. "+X% win rate over next 30d", "-Y% false positive rate", etc.)
+
+If Claude's proposal is vague or unprovable, REJECT it and demand specifics.`;
+
+    const openaiBody = {
+      model: 'gpt-4o',
+      temperature: 0.4,
+      max_tokens: 1200,
+      messages: [
+        { role: 'system', content: openaiSystem },
+        { role: 'user',   content: `TOPIC: ${topic}\n\nCLAUDE'S ANALYSIS:\n${claudeReply}\n\nYour call. Use the 4-heading output format exactly.` },
+      ],
+    };
+    const openaiStart = Date.now();
+    const openaiRes = await fetch(`${OPENAI_API_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify(openaiBody),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!openaiRes.ok) {
+      const txt = await openaiRes.text();
+      return res.status(502).json({
+        ok: true,
+        claude: { content: claudeReply, ms: claudeMs },
+        openai: { error: `OpenAI ${openaiRes.status}: ${txt.slice(0, 300)}` },
+      });
+    }
+    const openaiJson = await openaiRes.json();
+    const openaiReply = openaiJson?.choices?.[0]?.message?.content ?? '(no content)';
+    const openaiMs = Date.now() - openaiStart;
+
+    res.json({
+      ok: true,
+      topic,
+      claude: { content: claudeReply, ms: claudeMs, model: CLAUDE_MODEL },
+      openai: { content: openaiReply, ms: openaiMs, model: 'gpt-4o' },
+      totalMs: claudeMs + openaiMs,
+      context: sysContext,
+    });
+  } catch (err) {
+    console.error('[brainstorm]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/api/agent', async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) {

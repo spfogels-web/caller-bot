@@ -2351,6 +2351,168 @@ body::before {
   cursor: pointer; transition: all 0.15s;
 }
 .wc-quick:hover { background: rgba(224,64,251,0.1); border-color: rgba(224,64,251,0.3); color: var(--text1); }
+
+/* ═══════════════════════════════════════════════════
+   🧠⚖️ BRAINSTORM ROOM
+   ═══════════════════════════════════════════════════ */
+.bsr-wrap { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+.bsr-hero {
+  background:
+    radial-gradient(ellipse at top left, rgba(68,138,255,0.1) 0%, transparent 55%),
+    radial-gradient(ellipse at top right, rgba(0,230,118,0.08) 0%, transparent 55%),
+    linear-gradient(135deg, rgba(4,6,11,0.97), rgba(8,14,30,0.95));
+  border: 1px solid rgba(68,138,255,0.3);
+  border-radius: 14px;
+  padding: 18px;
+  position: relative;
+  overflow: hidden;
+}
+.bsr-hero::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:2px;
+  background: linear-gradient(90deg, transparent, rgba(68,138,255,0.8), rgba(0,230,118,0.6), rgba(255,215,64,0.6), transparent);
+  animation: brainScanLine 4s ease-in-out infinite;
+}
+.bsr-hero-title {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 8px;
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 20px; font-weight: 900; letter-spacing: 3px;
+}
+.bsr-glow {
+  background: linear-gradient(90deg,#448aff,#00e676,#ffd740);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 12px rgba(68,138,255,0.4));
+}
+.bsr-hero-pill {
+  font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: 2px;
+  padding: 4px 10px; border-radius: 12px;
+  background: rgba(68,138,255,0.12); border: 1px solid rgba(68,138,255,0.4);
+  color: var(--blue);
+}
+.bsr-hero-sub {
+  font-family: var(--mono); font-size: 10px; line-height: 1.55; color: var(--text1);
+  margin-bottom: 4px;
+}
+.bsr-hero-sub strong { color: var(--cyan); letter-spacing: 1px; }
+.bsr-hero-tag {
+  font-family: var(--mono); font-size: 8px; letter-spacing: 1.5px; color: var(--text3);
+  margin-bottom: 14px;
+}
+.bsr-roles {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+@media(max-width:700px){ .bsr-roles { grid-template-columns: 1fr; } }
+.bsr-role {
+  background: rgba(0,0,0,0.45);
+  border-radius: 8px; padding: 10px 12px;
+  border-left: 3px solid var(--role-col);
+}
+.bsr-role-claude  { --role-col: #448aff; }
+.bsr-role-openai  { --role-col: #00e676; }
+.bsr-role-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.bsr-role-icon { font-size: 13px; }
+.bsr-role-name {
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 10px; font-weight: 900; letter-spacing: 2px; color: var(--role-col);
+}
+.bsr-role-desc { font-family: var(--mono); font-size: 9px; color: var(--text1); line-height: 1.5; margin-bottom: 4px; }
+.bsr-role-desc em { color: var(--text3); font-style: normal; }
+.bsr-role-format { font-family: var(--mono); font-size: 7px; color: var(--text3); letter-spacing: 1px; }
+
+/* Input card */
+.bsr-input-card {
+  background: linear-gradient(135deg, rgba(4,6,11,0.95), rgba(8,14,30,0.95));
+  border: 1px solid rgba(255,215,64,0.25);
+  border-radius: 12px;
+  padding: 14px;
+}
+.bsr-input-label { font-family: var(--mono); font-size: 9px; color: var(--gold); letter-spacing: 1.5px; font-weight: 700; margin-bottom: 8px; }
+.bsr-input-row { display: flex; gap: 8px; align-items: flex-start; }
+.bsr-input {
+  flex: 1; background: rgba(0,0,0,0.55); border: 1px solid rgba(255,215,64,0.25);
+  border-radius: 8px; padding: 10px 14px; color: var(--text1);
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  outline: none; resize: vertical; min-height: 44px;
+}
+.bsr-input:focus { border-color: rgba(255,215,64,0.5); box-shadow: 0 0 14px rgba(255,215,64,0.2); }
+.bsr-run-btn {
+  background: linear-gradient(135deg, rgba(68,138,255,0.3), rgba(0,230,118,0.2));
+  border: 1px solid rgba(255,215,64,0.5);
+  color: #fff;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 1.5px;
+  cursor: pointer; white-space: nowrap;
+  text-shadow: 0 0 6px rgba(255,215,64,0.4);
+  transition: all 0.15s;
+}
+.bsr-run-btn:hover { transform: translateY(-1px); box-shadow: 0 0 16px rgba(255,215,64,0.3); }
+.bsr-run-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.bsr-quick-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.bsr-quick-lbl { font-family: var(--mono); font-size: 8px; color: var(--text3); letter-spacing: 1.5px; }
+.bsr-quick-chip {
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text2); border-radius: 4px; padding: 4px 10px;
+  font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 0.5px;
+  cursor: pointer; transition: all 0.15s;
+}
+.bsr-quick-chip:hover { background: rgba(255,215,64,0.1); border-color: rgba(255,215,64,0.3); color: var(--gold); }
+
+/* Conversation thread */
+.bsr-thread { display: flex; flex-direction: column; gap: 14px; }
+.bsr-empty {
+  padding: 60px 20px; text-align: center;
+  background: rgba(0,0,0,0.3); border: 1px dashed rgba(255,255,255,0.1); border-radius: 10px;
+}
+.bsr-round {
+  background: linear-gradient(135deg, rgba(4,6,11,0.92), rgba(8,14,28,0.9));
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.bsr-round-head { display: flex; justify-content: space-between; align-items: center; font-family: var(--mono); font-size: 8px; color: var(--text3); letter-spacing: 1.5px; padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.bsr-round-topic {
+  font-family: var(--mono); font-size: 10px; color: var(--gold); font-weight: 700;
+  background: rgba(255,215,64,0.06); border-left: 3px solid var(--gold);
+  padding: 8px 12px; border-radius: 0 4px 4px 0; line-height: 1.5;
+}
+.bsr-turn {
+  background: rgba(0,0,0,0.35);
+  border-radius: 8px; padding: 12px 14px;
+  border-left: 3px solid var(--turn-col);
+}
+.bsr-turn-claude { --turn-col: #448aff; }
+.bsr-turn-openai { --turn-col: #00e676; }
+.bsr-turn-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; gap: 6px; }
+.bsr-turn-who { display: flex; align-items: center; gap: 6px; font-family: 'Orbitron', var(--mono), monospace; font-size: 10px; font-weight: 900; letter-spacing: 2px; color: var(--turn-col); }
+.bsr-turn-meta { font-family: var(--mono); font-size: 7px; color: var(--text3); letter-spacing: 1px; }
+.bsr-turn-body {
+  font-family: var(--mono); font-size: 10px; line-height: 1.6; color: var(--text1);
+  white-space: pre-wrap; word-break: break-word;
+}
+.bsr-turn-body h3 {
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 9px; font-weight: 900; letter-spacing: 1.5px;
+  color: var(--turn-col); margin: 10px 0 4px 0;
+  padding-bottom: 3px; border-bottom: 1px dashed rgba(255,255,255,0.1);
+}
+.bsr-turn-body h3:first-child { margin-top: 0; }
+.bsr-turn-body code {
+  background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 3px;
+  font-size: 9px; color: var(--cyan);
+}
+.bsr-turn-body strong { color: var(--text1); font-weight: 700; }
+.bsr-loading {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 30px; font-family: var(--mono); font-size: 10px; color: var(--text3); letter-spacing: 1.5px;
+}
+.bsr-loading-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--cyan);
+  animation: brainStatusPulse 1s ease-in-out infinite;
+}
+.bsr-loading-dot:nth-child(2) { background: var(--green); animation-delay: 0.2s; }
+.bsr-loading-dot:nth-child(3) { background: var(--gold); animation-delay: 0.4s; }
 </style>
 </head>
 <body>
@@ -2370,6 +2532,7 @@ body::before {
     <button class="htab" onclick="switchTab('smart')"><span class="dot"></span>SMART MONEY</button>
     <button class="htab" onclick="switchTab('ai')"><span class="dot"></span>AI BRAIN</button>
     <button class="htab" onclick="switchTab('analytics')"><span class="dot"></span>ANALYTICS</button>
+    <button class="htab" onclick="switchTab('brainstorm')"><span class="dot"></span>BRAINSTORM</button>
     <button class="htab" onclick="switchTab('system')"><span class="dot"></span>SYSTEM</button>
   </nav>
 
@@ -3560,6 +3723,65 @@ body::before {
       </div>
     </div><!-- /auditor -->
 
+    <!-- ═══════════════════════════════════════════════════════════════════════════
+         🧠⚖️ BRAINSTORM ROOM — Claude (Analyst) + OpenAI (Decision Engine) collab
+         ═══════════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-brainstorm">
+      <div class="bsr-wrap">
+        <!-- Hero -->
+        <div class="bsr-hero">
+          <div class="bsr-hero-title">
+            <span class="bsr-glow">🧠 BRAINSTORM ROOM</span>
+            <span class="bsr-hero-pill">CLAUDE × OPENAI</span>
+          </div>
+          <div class="bsr-hero-sub">
+            <strong>Mission:</strong> Build the most advanced Solana early-gem call system for $7.5K–$40K market cap tokens. Consistently identify 10x+ opportunities before the crowd.
+          </div>
+          <div class="bsr-hero-tag">Engineer edge, not hype · Predict, don't react · Every upgrade must ↑ win rate, ↑ ROI, ↑ speed to entry.</div>
+          <div class="bsr-roles">
+            <div class="bsr-role bsr-role-claude">
+              <div class="bsr-role-head"><span class="bsr-role-icon">🧠</span><span class="bsr-role-name">CLAUDE — The Analyst</span></div>
+              <div class="bsr-role-desc">Deep analysis. Pattern recognition. Identifies weaknesses. Proposes upgrades. <em>Builds the case — never decides.</em></div>
+              <div class="bsr-role-format">Output: Insight · Problem · Proposed Upgrade · Expected Impact</div>
+            </div>
+            <div class="bsr-role bsr-role-openai">
+              <div class="bsr-role-head"><span class="bsr-role-icon">⚖️</span><span class="bsr-role-name">OPENAI — Decision Engine</span></div>
+              <div class="bsr-role-desc">Final filter. Approves / modifies / rejects. Profitability + risk. Challenges Claude. <em>Goal: right &amp; profitable — not clever.</em></div>
+              <div class="bsr-role-format">Output: Decision · Reason · Implementation · Expected ROI</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Input / kickoff -->
+        <div class="bsr-input-card">
+          <div class="bsr-input-label">🎯 DROP A TOPIC — the bots will debate it until you have an actionable answer</div>
+          <div class="bsr-input-row">
+            <textarea id="bsrInput" class="bsr-input" rows="2"
+              placeholder="e.g. We're late detecting $5K–$15K gems. Claude: propose 3 upgrades. OpenAI: decide which to implement."
+              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();runBrainstormTurn();}"></textarea>
+            <button id="bsrRunBtn" class="bsr-run-btn" onclick="runBrainstormTurn()">⚡ RUN ROUND</button>
+          </div>
+          <div class="bsr-quick-row">
+            <span class="bsr-quick-lbl">KICKOFFS:</span>
+            <button class="bsr-quick-chip" onclick="bsrQuick('We are late detecting tokens below $15K market cap. Analyze why and propose 3 system upgrades to catch gems earlier. Rank by expected impact.')">🚀 DETECT EARLIER</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('Our win rate is low. Audit the scorer weighting and propose concrete adjustments. Be specific about which dimension weights to change and why.')">🎯 RAISE WIN RATE</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('We need better smart-money signals. Claude, what new wallet behaviors should we track? OpenAI, which would move the needle most?')">🐋 SMART MONEY EDGE</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('How do we detect stealth accumulation on a brand-new token before it runs? Propose specific detection signals.')">🥷 STEALTH ACCUMULATION</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('List the top 3 ways our bot is currently being fooled by manipulation or coordinated wallets, and propose anti-manipulation logic.')">🛡 ANTI-MANIPULATION</button>
+            <button class="bsr-quick-chip" onclick="bsrQuick('What new external data sources or APIs would give us edge over competing call bots? Rank by impact vs implementation cost.')">📡 NEW DATA SOURCES</button>
+          </div>
+        </div>
+
+        <!-- Conversation feed -->
+        <div id="bsrThread" class="bsr-thread">
+          <div class="bsr-empty">
+            <div style="font-size:38px;margin-bottom:8px;opacity:0.3">🧠⚖️</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--text3);letter-spacing:2px">ROOM IDLE — drop a topic above or tap a KICKOFF</div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /brainstorm -->
+
     <!-- SYSTEM TAB -->
     <div class="tab-panel" id="tab-system">
       <div class="g3" style="margin-bottom:12px">
@@ -3745,6 +3967,7 @@ function refreshTabData(name){
     case 'analytics':   loadAnalytics();     break;
     case 'ai':          loadAI();            break;
     case 'smart':       loadSmartMoneyTab(); break;
+    case 'brainstorm':  /* no load — on-demand */ break;
     case 'system':      loadSystem();        break;
   }
 }
@@ -8170,6 +8393,114 @@ function walletChatQuick(text){
   const input = document.getElementById('walletChatInput');
   if (input) { input.value = text; input.focus(); }
   sendWalletChatMsg();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   🧠⚖️ BRAINSTORM ROOM — Claude + OpenAI debate upgrades
+   ═══════════════════════════════════════════════════════════ */
+let _bsrHistory = [];          // running conversation context
+let _bsrBusy    = false;
+
+// Lightweight markdown formatter — we only need ### headings, **bold**, `code`
+function _bsrFormat(text){
+  if(!text) return '';
+  let s = esc(text);
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  return s;
+}
+
+function bsrQuick(topic){
+  const inp = document.getElementById('bsrInput');
+  if(inp){ inp.value = topic; inp.focus(); }
+  runBrainstormTurn();
+}
+
+async function runBrainstormTurn(){
+  if(_bsrBusy) return;
+  const input  = document.getElementById('bsrInput');
+  const btn    = document.getElementById('bsrRunBtn');
+  const thread = document.getElementById('bsrThread');
+  const topic  = (input?.value || '').trim();
+  if(!topic){ input?.focus(); return; }
+
+  _bsrBusy = true;
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ RUNNING...'; }
+  if(input) input.value = '';
+
+  // Remove the empty-state placeholder on first run
+  const empty = thread.querySelector('.bsr-empty');
+  if(empty) empty.remove();
+
+  // Optimistic render — topic card + loading shimmer
+  const roundId = 'bsr-'+Date.now();
+  const roundEl = document.createElement('div');
+  roundEl.className = 'bsr-round';
+  roundEl.id = roundId;
+  roundEl.innerHTML =
+    '<div class="bsr-round-head"><span>ROUND ' + (_bsrHistory.filter(h=>h.role==='user').length + 1) + '</span><span>'+ new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true}).toLowerCase() +' ET</span></div>'+
+    '<div class="bsr-round-topic">🎯 ' + esc(topic) + '</div>'+
+    '<div class="bsr-loading"><span class="bsr-loading-dot"></span><span class="bsr-loading-dot"></span><span class="bsr-loading-dot"></span><span>Claude analyzing &amp; OpenAI deciding... (up to 45s)</span></div>';
+  thread.insertBefore(roundEl, thread.firstChild);
+  roundEl.scrollIntoView({behavior:'smooth', block:'start'});
+
+  try {
+    const r = await fetch('/api/brainstorm/turn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic, history: _bsrHistory.slice(-10) }),
+      signal: AbortSignal.timeout(100_000),
+    });
+    const d = await r.json();
+    if(!d.ok && !d.claude){
+      roundEl.querySelector('.bsr-loading').outerHTML =
+        '<div style="font-family:var(--mono);font-size:10px;color:var(--red);padding:10px">✗ '+ esc(d.error || 'Unknown error') +'</div>';
+      return;
+    }
+    // Remove the loading shimmer
+    const loading = roundEl.querySelector('.bsr-loading');
+    if(loading) loading.remove();
+
+    // Claude turn
+    const claudeContent = d.claude?.content || '(no response)';
+    const claudeMs = d.claude?.ms != null ? Math.round(d.claude.ms/100)/10 : null;
+    const claudeTurn = document.createElement('div');
+    claudeTurn.className = 'bsr-turn bsr-turn-claude';
+    claudeTurn.innerHTML =
+      '<div class="bsr-turn-head"><div class="bsr-turn-who">🧠 CLAUDE — THE ANALYST</div><div class="bsr-turn-meta">'+(claudeMs != null ? claudeMs+'s' : '')+' · '+ esc(d.claude?.model||'') +'</div></div>'+
+      '<div class="bsr-turn-body">'+ _bsrFormat(claudeContent) +'</div>';
+    roundEl.appendChild(claudeTurn);
+
+    // OpenAI turn (or error)
+    const openaiTurn = document.createElement('div');
+    openaiTurn.className = 'bsr-turn bsr-turn-openai';
+    if(d.openai?.error){
+      openaiTurn.innerHTML =
+        '<div class="bsr-turn-head"><div class="bsr-turn-who">⚖️ OPENAI — DECISION ENGINE</div></div>'+
+        '<div class="bsr-turn-body" style="color:var(--red)">✗ '+ esc(d.openai.error) +'</div>';
+    } else {
+      const openaiContent = d.openai?.content || '(no response)';
+      const openaiMs = d.openai?.ms != null ? Math.round(d.openai.ms/100)/10 : null;
+      openaiTurn.innerHTML =
+        '<div class="bsr-turn-head"><div class="bsr-turn-who">⚖️ OPENAI — DECISION ENGINE</div><div class="bsr-turn-meta">'+(openaiMs != null ? openaiMs+'s' : '')+' · '+ esc(d.openai?.model||'') +'</div></div>'+
+        '<div class="bsr-turn-body">'+ _bsrFormat(openaiContent) +'</div>';
+    }
+    roundEl.appendChild(openaiTurn);
+
+    // Update history so next round has context
+    _bsrHistory.push({ role:'user', content: topic });
+    if(d.claude?.content) _bsrHistory.push({ role:'claude', content: d.claude.content });
+    if(d.openai?.content) _bsrHistory.push({ role:'openai', content: d.openai.content });
+    if(_bsrHistory.length > 14) _bsrHistory = _bsrHistory.slice(-12);
+  } catch (err) {
+    const loading = roundEl.querySelector('.bsr-loading');
+    if(loading) loading.outerHTML =
+      '<div style="font-family:var(--mono);font-size:10px;color:var(--red);padding:10px">✗ '+ esc(err.message || err) +'</div>';
+  } finally {
+    _bsrBusy = false;
+    if(btn){ btn.disabled = false; btn.textContent = '⚡ RUN ROUND'; }
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════
