@@ -3254,15 +3254,59 @@ function buildAuditDetail(c){
     <!-- ═══ MARKET DATA ═══ -->
     ${section('📊 MARKET DATA','var(--cyan)',`
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-        ${dataPoint('Market Cap',fmt(c.marketCap,'$'),'var(--orange)')}
+        ${dataPoint('Market Cap',fmt(c.marketCap,'$'),c.marketCap>=5000&&c.marketCap<=40000?'var(--gold)':'var(--orange)')}
         ${dataPoint('Liquidity',fmt(c.liquidity,'$'),'var(--cyan)')}
+        ${dataPoint('Liq / MCap',c.liquidity&&c.marketCap?((c.liquidity/c.marketCap)*100).toFixed(1)+'%':'—',(c.liquidity/c.marketCap)>=0.1?'var(--green)':'var(--gold)')}
+        ${dataPoint('Age',c.pairAgeHours!=null?(c.pairAgeHours<0.083?'<5min':c.pairAgeHours<1?Math.round(c.pairAgeHours*60)+'min':c.pairAgeHours.toFixed(2)+'h'):'—',isBrandNew(c.pairAgeHours)?'var(--red)':'var(--text1)')}
         ${dataPoint('Volume 1H',fmt(c.volume1h,'$'),'var(--green)')}
-        ${dataPoint('Age',c.pairAgeHours!=null?c.pairAgeHours.toFixed(2)+'h':'—','var(--text1)')}
+        ${dataPoint('Volume 24H',fmt(c.volume24h,'$'),'var(--cyan)')}
         ${dataPoint('Price 5M',fmtPct(c.priceChange5m),'var(--text1)')}
         ${dataPoint('Price 1H',fmtPct(c.priceChange1h),'var(--text1)')}
+        ${dataPoint('Price 6H',fmtPct(c.priceChange6h),'var(--text1)')}
+        ${dataPoint('Price 24H',fmtPct(c.priceChange24h),'var(--text1)')}
         ${dataPoint('Buys 1H',(c.buys1h??'—').toString(),'var(--green)')}
         ${dataPoint('Sells 1H',(c.sells1h??'—').toString(),c.sells1h>c.buys1h?'var(--red)':'var(--text3)')}
+        ${dataPoint('Buy Ratio 1H',buyRatio!=null?(buyRatio*100).toFixed(0)+'%':'—',buyRatio>0.65?'var(--green)':buyRatio>0.5?'var(--cyan)':buyRatio>0.4?'var(--gold)':'var(--red)')}
+        ${dataPoint('Vol Velocity',c.volumeVelocity!=null?c.volumeVelocity.toFixed(2):'—',c.volumeVelocity>0.3?'var(--green)':c.volumeVelocity>0.15?'var(--gold)':'var(--text3)')}
+        ${dataPoint('Holders',c.holders!=null?c.holders.toLocaleString():'—','var(--cyan)')}
+        ${dataPoint('Holder Growth 24H',c.holderGrowth24h!=null?(c.holderGrowth24h>0?'+':'')+c.holderGrowth24h.toFixed(1)+'%':'—',c.holderGrowth24h>10?'var(--green)':c.holderGrowth24h>0?'var(--cyan)':'var(--red)')}
       </div>
+    `)}
+
+    <!-- ═══ LAUNCH FORENSICS ═══ -->
+    ${section('🚀 LAUNCH FORENSICS','var(--green)',`
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${dataPoint('Launch Quality',c.launchQualityScore!=null?c.launchQualityScore+'/100':'—',c.launchQualityScore>=70?'var(--green)':c.launchQualityScore>=40?'var(--gold)':'var(--red)')}
+        ${dataPoint('Unique Buyer Ratio',c.launchUniqueBuyerRatio!=null?(c.launchUniqueBuyerRatio*100).toFixed(0)+'%':'—',c.launchUniqueBuyerRatio>=0.55?'var(--green)':c.launchUniqueBuyerRatio>=0.4?'var(--gold)':'var(--red)')}
+        ${dataPoint('Bonding Curve',c.bondingCurvePct!=null?c.bondingCurvePct.toFixed(1)+'%':'—','var(--cyan)')}
+        ${dataPoint('Curve Accel',c.bondingCurveAcceleration!=null?c.bondingCurveAcceleration.toFixed(2):'—',c.bondingCurveAcceleration>0?'var(--green)':'var(--text3)')}
+        ${dataPoint('Buy Velocity',c.buyVelocity!=null?c.buyVelocity.toFixed(2):'—',c.buyVelocity>0.3?'var(--green)':'var(--text3)')}
+        ${dataPoint('Momentum Grade',c.momentumGrade||'—',c.momentumGrade==='ACCELERATING'||c.momentumGrade==='STRONG'?'var(--green)':c.momentumGrade==='DECLINING'?'var(--red)':'var(--text2)')}
+        ${dataPoint('Quick Score',c.quickScore!=null?c.quickScore+'/100':'—','var(--cyan)')}
+        ${dataPoint('Setup Type',(c.claudeSetupType||c.setupType||'STANDARD').replace(/_/g,' '),'var(--purple)')}
+      </div>
+    `)}
+
+    <!-- ═══ HOLDER DEEP-DIVE ═══ -->
+    ${section('👥 HOLDER DEEP-DIVE','var(--purple)',`
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${dataPoint('Total Holders',c.holders!=null?c.holders.toLocaleString():'—','var(--cyan)')}
+        ${dataPoint('Top 10 %',top10!=null?top10.toFixed(1)+'%':'—',top10<25?'var(--green)':top10<50?'var(--gold)':'var(--red)')}
+        ${dataPoint('Dev Wallet %',devPct!=null?devPct.toFixed(2)+'%':'—',devPct<3?'var(--green)':devPct<10?'var(--gold)':'var(--red)')}
+        ${dataPoint('Insider Wallet %',c.insiderWalletPct!=null?c.insiderWalletPct.toFixed(2)+'%':'—',c.insiderWalletPct<5?'var(--green)':c.insiderWalletPct<15?'var(--gold)':'var(--red)')}
+        ${dataPoint('Sniper Count',snipers.toString(),snipCol)}
+        ${dataPoint('Bundle Risk',c.bundleRisk||'—',bundleCol)}
+        ${dataPoint('BubbleMap',c.bubbleMapRisk||'—',c.bubbleMapRisk==='CLEAN'?'var(--green)':c.bubbleMapRisk==='SEVERE'?'var(--red)':'var(--gold)')}
+        ${dataPoint('Cluster Wallets',(wi.clusterWalletCount??0).toString(),wi.clusterWalletCount>0?'var(--orange)':'var(--text3)')}
+        ${dataPoint('Winner Wallets',(wi.knownWinnerWalletCount??0).toString(),wi.knownWinnerWalletCount>0?'var(--gold)':'var(--text3)')}
+        ${dataPoint('Coordination',c.coordinationIntensity!=null?(c.coordinationIntensity*100).toFixed(0)+'%':'—',c.coordinationIntensity>0.5?'var(--red)':c.coordinationIntensity>0.25?'var(--gold)':'var(--green)')}
+        ${dataPoint('Smart $ Score',(wi.smartMoneyScore??c.smartMoneyScore??'—').toString(),'var(--purple)')}
+        ${dataPoint('Wallet Intel Score',c.walletIntelScore!=null?c.walletIntelScore+'/100':'—','var(--purple)')}
+      </div>
+      ${wi.knownWinnerWalletCount>0?`<div style="margin-top:10px;padding:8px 10px;background:rgba(255,215,64,0.06);border:1px solid rgba(255,215,64,0.2);border-radius:6px">
+        <div style="font-family:var(--mono);font-size:8px;color:var(--gold);font-weight:700;letter-spacing:1px;margin-bottom:4px">🏆 WINNER WALLETS PRESENT</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text1)">${wi.knownWinnerWalletCount} wallet(s) seen in our prior winning calls are holding this token.</div>
+      </div>`:''}
     `)}
 
     <!-- ═══ TP/SL ═══ -->
@@ -3311,21 +3355,58 @@ function buildAuditDetail(c){
       ${c.deployerRiskScore!=null?dataPoint('Deployer Risk Score', c.deployerRiskScore+'/100', c.deployerRiskScore<30?'var(--green)':c.deployerRiskScore<70?'var(--gold)':'var(--red)'):''}
     `)}
 
-    <!-- ═══ POSITIVE SIGNALS ═══ -->
-    ${allSigs.length?section('✅ POSITIVE SIGNALS','var(--green)',
-      allSigs.map(sig=>`<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
-        <span style="color:var(--green);flex-shrink:0">✓</span>
-        <span style="font-family:var(--mono);font-size:10px;color:var(--text1)">${esc(String(sig))}</span>
-      </div>`).join('')
+    <!-- ═══ POSITIVE SIGNALS (grouped) ═══ -->
+    ${allSigs.length?section('✅ POSITIVE SIGNALS — '+allSigs.length,'var(--green)',
+      (()=>{
+        const groups=[
+          {key:'launch',label:'🚀 Launch',col:'var(--green)',items:sigs.launch||[]},
+          {key:'wallet',label:'👥 Wallet',col:'var(--purple)',items:sigs.wallet||[]},
+          {key:'market',label:'📈 Market',col:'var(--cyan)',items:sigs.market||[]},
+          {key:'social',label:'💬 Social',col:'var(--gold)',items:sigs.social||[]},
+          {key:'stealth',label:'🥷 Stealth',col:'var(--blue)',items:sigs.stealth||[]},
+        ].filter(g=>g.items.length);
+        return groups.map(g=>`<div style="margin-bottom:10px">
+          <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:${g.col};letter-spacing:1.5px;margin-bottom:4px">${g.label} (${g.items.length})</div>
+          ${g.items.map(sig=>`<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 8px;background:rgba(0,0,0,0.2);border-radius:4px;margin-bottom:3px">
+            <span style="color:${g.col};flex-shrink:0">✓</span>
+            <span style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5">${esc(String(sig))}</span>
+          </div>`).join('')}
+        </div>`).join('');
+      })()
     ):''}
 
-    <!-- ═══ RED FLAGS ═══ -->
-    ${allPens.length?section('🚩 RED FLAGS','var(--red)',
-      allPens.map(p=>`<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
-        <span style="color:var(--red);flex-shrink:0">✗</span>
-        <span style="font-family:var(--mono);font-size:10px;color:var(--text1)">${esc(String(p))}</span>
-      </div>`).join('')
+    <!-- ═══ RED FLAGS (grouped) ═══ -->
+    ${allPens.length?section('🚩 RED FLAGS — '+allPens.length,'var(--red)',
+      (()=>{
+        const groups=[
+          {key:'launch',label:'🚀 Launch',items:pens.launch||[]},
+          {key:'wallet',label:'👥 Wallet',items:pens.wallet||[]},
+          {key:'market',label:'📈 Market',items:pens.market||[]},
+          {key:'social',label:'💬 Social',items:pens.social||[]},
+        ].filter(g=>g.items.length);
+        return groups.map(g=>`<div style="margin-bottom:10px">
+          <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:var(--red);letter-spacing:1.5px;margin-bottom:4px">${g.label} (${g.items.length})</div>
+          ${g.items.map(p=>`<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 8px;background:rgba(255,23,68,0.06);border-radius:4px;margin-bottom:3px">
+            <span style="color:var(--red);flex-shrink:0">✗</span>
+            <span style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5">${esc(String(p))}</span>
+          </div>`).join('')}
+        </div>`).join('');
+      })()
     ):''}
+
+    <!-- ═══ TRAP DETECTOR + REGIME ═══ -->
+    ${section('🪤 TRAP DETECTOR & REGIME','var(--orange)',`
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${dataPoint('Trap Severity',c.trapDetector?.severity||c.trapSeverity||'NONE',(c.trapDetector?.severity||c.trapSeverity)==='NONE'?'var(--green)':(c.trapDetector?.severity||c.trapSeverity)==='HIGH'||(c.trapDetector?.severity||c.trapSeverity)==='SEVERE'?'var(--red)':'var(--gold)')}
+        ${dataPoint('Trap Triggered',c.trapDetector?.triggered?'YES':'NO',c.trapDetector?.triggered?'var(--red)':'var(--green)')}
+        ${dataPoint('Confidence Penalty',c.trapDetector?.confidencePenalty!=null?'-'+c.trapDetector.confidencePenalty:'0','var(--orange)')}
+        ${dataPoint('Dynamic Threshold',(c.dynamicThreshold??38)+'/100','var(--cyan)')}
+        ${dataPoint('Stealth Detected',c.stealthDetected?'YES ✓':'NO',c.stealthDetected?'var(--green)':'var(--text3)')}
+        ${c.stealthBonus?dataPoint('Stealth Bonus','+'+c.stealthBonus,'var(--green)'):''}
+        ${c.missingDataImpact!=null?dataPoint('Missing Data Impact',c.missingDataImpact+'','var(--gold)'):''}
+        ${dataPoint('OAI Agrees w/ Claude',c.openaiAgreesWithClaude===true?'YES':c.openaiAgreesWithClaude===false?'NO':'—',c.openaiAgreesWithClaude===true?'var(--green)':c.openaiAgreesWithClaude===false?'var(--orange)':'var(--text3)')}
+      </div>
+    `)}
 
     <!-- ═══ CLAUDE AI ═══ -->
     ${c.claudeVerdict?section('🤖 CLAUDE FORENSIC ANALYSIS','var(--blue)',`
@@ -3334,9 +3415,28 @@ function buildAuditDetail(c){
         ${chip((c.claudeSetupType||c.setupType||'STANDARD').replace(/_/g,' '),'var(--blue)')}
         ${c.structureGrade?chip('Grade: '+c.structureGrade,c.structureGrade==='CLEAN'?'var(--green)':c.structureGrade==='DIRTY'?'var(--red)':'var(--gold)'):''}
       </div>
-      <div style="background:rgba(68,138,255,0.06);border:1px solid rgba(68,138,255,0.2);border-radius:8px;padding:12px">
+      <div style="background:rgba(68,138,255,0.06);border:1px solid rgba(68,138,255,0.2);border-radius:8px;padding:12px;margin-bottom:8px">
         <p style="font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.6;margin:0">"${esc(c.claudeVerdict)}"</p>
       </div>
+      ${(()=>{
+        // Try to extract bull_case/red_flags from claudeRaw if available
+        const raw=c.claudeRaw||c.claude_raw;
+        let parsed=null;
+        if(raw){try{parsed=typeof raw==='string'?JSON.parse(raw):raw;}catch{}}
+        if(!parsed||(!parsed.bull_case&&!parsed.red_flags))return'';
+        const bull=Array.isArray(parsed.bull_case)?parsed.bull_case:[];
+        const flags=Array.isArray(parsed.red_flags)?parsed.red_flags:[];
+        return`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          ${bull.length?`<div style="background:rgba(0,230,118,0.06);border:1px solid rgba(0,230,118,0.2);border-radius:6px;padding:10px">
+            <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:var(--green);letter-spacing:1.5px;margin-bottom:6px">🟢 BULL CASE</div>
+            ${bull.map(b=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5;padding:3px 0">• ${esc(String(b))}</div>`).join('')}
+          </div>`:''}
+          ${flags.length?`<div style="background:rgba(255,23,68,0.06);border:1px solid rgba(255,23,68,0.2);border-radius:6px;padding:10px">
+            <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:var(--red);letter-spacing:1.5px;margin-bottom:6px">🔴 RED FLAGS</div>
+            ${flags.map(f=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5;padding:3px 0">• ${esc(String(f))}</div>`).join('')}
+          </div>`:''}
+        </div>`;
+      })()}
     `):''}
 
     <!-- ═══ GPT-4o ═══ -->
@@ -3359,6 +3459,42 @@ function buildAuditDetail(c){
       ${dataPoint('Sniper Wallets', snipers.toString(), snipCol)}
       ${dataPoint('Cluster Wallets', (wi.clusterWalletCount??0).toString(), wi.clusterWalletCount>0?'var(--orange)':'var(--text3)')}
       ${dataPoint('Bundle Risk', c.bundleRisk||'—', bundleCol)}
+    `)}
+
+    <!-- ═══ NARRATIVE & TAGS ═══ -->
+    ${(Array.isArray(c.narrativeTags)&&c.narrativeTags.length)||c.candidateType||c.livestream?section('🏷 NARRATIVE & STAGE','var(--gold)',`
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px">
+        ${chip(c.stage||'?',stageCol(c.stage))}
+        ${c.candidateType?chip(c.candidateType.replace(/_/g,' '),'var(--purple)'):''}
+        ${c.momentumGrade?chip('Momentum: '+c.momentumGrade,c.momentumGrade==='ACCELERATING'||c.momentumGrade==='STRONG'?'var(--green)':c.momentumGrade==='DECLINING'?'var(--red)':'var(--gold)'):''}
+        ${c.volumeQuality?chip('Vol: '+c.volumeQuality,c.volumeQuality==='ORGANIC'?'var(--green)':c.volumeQuality==='WASH'?'var(--red)':'var(--gold)'):''}
+      </div>
+      ${Array.isArray(c.narrativeTags)&&c.narrativeTags.length?`<div style="margin-bottom:8px">
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-bottom:5px">NARRATIVE TAGS</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">${c.narrativeTags.map(t=>chip(String(t),'var(--cyan)')).join('')}</div>
+      </div>`:''}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px">
+        ${c.website?`<a href="${esc(c.website)}" target="_blank" style="padding:6px;background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);border-radius:5px;color:var(--cyan);text-decoration:none;font-family:var(--mono);font-size:9px;font-weight:700;text-align:center">🌐 WEBSITE</a>`:chip('No Website','var(--text3)')}
+        ${c.twitter?`<a href="${esc(c.twitter)}" target="_blank" style="padding:6px;background:rgba(68,138,255,0.1);border:1px solid rgba(68,138,255,0.3);border-radius:5px;color:var(--blue);text-decoration:none;font-family:var(--mono);font-size:9px;font-weight:700;text-align:center">𝕏 TWITTER</a>`:chip('No Twitter','var(--text3)')}
+        ${c.telegram?`<a href="${esc(c.telegram)}" target="_blank" style="padding:6px;background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);border-radius:5px;color:var(--cyan);text-decoration:none;font-family:var(--mono);font-size:9px;font-weight:700;text-align:center">✈ TELEGRAM</a>`:chip('No Telegram','var(--text3)')}
+      </div>
+      ${c.livestream?.isLive?`<div style="margin-top:10px;padding:8px 10px;background:rgba(255,23,68,0.08);border:1px solid rgba(255,23,68,0.3);border-radius:6px">
+        <div style="font-family:var(--mono);font-size:9px;color:var(--red);font-weight:700">🔴 LIVE STREAM — ${c.livestream.viewerCount||0} viewers</div>
+      </div>`:''}
+      ${c.dexPaid?chip('💎 DEX PAID','var(--gold)'):''}
+      ${c.boostStatus?chip('⚡ '+c.boostStatus,'var(--orange)'):''}
+    `):''}
+
+    <!-- ═══ DATA SOURCE STATUS ═══ -->
+    ${section('📡 DATA SOURCE STATUS','var(--text3)',`
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        ${dataPoint('Birdeye',c.birdeyeOk===true?'✓ OK':c.birdeyeOk===false?'✗ FAILED':'—',c.birdeyeOk===true?'var(--green)':c.birdeyeOk===false?'var(--red)':'var(--text3)')}
+        ${dataPoint('Helius',c.heliusOk===true?'✓ OK':c.heliusOk===false?'✗ FAILED':'—',c.heliusOk===true?'var(--green)':c.heliusOk===false?'var(--red)':'var(--text3)')}
+        ${dataPoint('BubbleMap',c.bubblemapOk===true?'✓ OK':c.bubblemapOk===false?'✗ FAILED':'—',c.bubblemapOk===true?'var(--green)':c.bubblemapOk===false?'var(--red)':'var(--text3)')}
+        ${dataPoint('Claude',c.claudeVerdict?'✓ RAN':'— skipped','claudeVerdict'in c&&c.claudeVerdict?'var(--green)':'var(--text3)')}
+        ${dataPoint('GPT-4o',oaiD?'✓ '+oaiD:'— skipped',oaiD?'var(--green)':'var(--text3)')}
+        ${dataPoint('Dev Wallet Found',c.deployerVerdict?'✓':'—',c.deployerVerdict?'var(--green)':'var(--text3)')}
+      </div>
     `)}
 
     <!-- ═══ PIPELINE ═══ -->
