@@ -3522,6 +3522,25 @@ function buildAuditDetail(c){
 
     <div style="padding:14px 14px 0 14px">
 
+    <!-- ═══ CALLOUT TIMESTAMP + MCAP AT CALL (BIG, AT TOP) ═══ -->
+    ${(()=>{
+      const rawTs = c.createdAt||c.created_at||c.scannedAt||c.scanned_at||c.calledAtEt||c.called_at_et;
+      let timeTxt='';
+      if(rawTs){try{timeTxt = new Date(rawTs).toLocaleString('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:true})+' ET';}catch(e){}}
+      const mcVal = c.marketCap;
+      const gemWindow = mcVal>=5000 && mcVal<=40000;
+      return `<div style="background:linear-gradient(135deg,rgba(24,255,255,0.08),rgba(0,230,118,0.04));border:1px solid rgba(24,255,255,0.3);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">CALLED AT (US EASTERN)</div>
+          <div style="font-family:var(--mono);font-size:15px;font-weight:900;color:#fff;letter-spacing:0.5px">🕐 ${timeTxt||'—'}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">MCAP AT CALL${gemWindow?' · 💎 GEM WINDOW':''}</div>
+          <div style="font-family:var(--mono);font-size:20px;font-weight:900;color:${gemWindow?'var(--gold)':'var(--cyan)'};letter-spacing:0.5px">${fmt(mcVal,'$')}</div>
+        </div>
+      </div>`;
+    })()}
+
     <!-- ═══ AI VERDICT SUMMARY (at the very top) ═══ -->
     ${(c.claudeVerdict||oaiD)?`<div style="background:linear-gradient(135deg,rgba(68,138,255,0.08),rgba(0,230,118,0.05));border:1px solid rgba(68,138,255,0.25);border-radius:10px;padding:12px;margin-bottom:12px">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
@@ -3550,8 +3569,34 @@ function buildAuditDetail(c){
       <button onclick="copyCA('${ca}')" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:3px;padding:4px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;white-space:nowrap;flex-shrink:0">📋 COPY</button>
     </div>`:''}
 
-    <!-- ═══ TIMESTAMP ═══ -->
-    ${ (c.createdAt||c.created_at||c.scannedAt||c.scanned_at) ? `<div style="font-family:var(--mono);font-size:9px;color:#ffffff;text-align:right;margin-bottom:8px;letter-spacing:0.5px">🕐 ${(()=>{try{return new Date(c.createdAt||c.created_at||c.scannedAt||c.scanned_at).toLocaleString('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:true})+' EST';}catch(ex){return '';}})()}</div>` : '' }
+    <!-- (Old small right-aligned timestamp removed — replaced by big callout banner above) -->
+
+    <!-- ═══ 4 CORE SUB-SCORES — moved here per UX request (above Market Data) ═══ -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden">
+      <div style="padding:8px 14px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2)">
+        <span style="font-family:var(--mono);font-size:9px;font-weight:700;color:var(--cyan);letter-spacing:1px">🎯 SCORING BREAKDOWN — 4 Core Dimensions</span>
+      </div>
+      <div style="padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${subCard('Launch Quality','🚀',sub.launchQuality,'#00e676',30,lqDetail)}
+        ${subCard('Wallet Structure','👥',sub.walletStructure,'#e040fb',35,wsDetail)}
+        ${subCard('Market Behavior','📈',sub.marketBehavior,'#18ffff',20,mbDetail)}
+        ${subCard('Social Narrative','💬',sub.socialNarrative,'#ffd740',15,snDetail)}
+      </div>
+    </div>
+
+    <!-- ═══ PROS / CONS QUICK SUMMARY ═══ -->
+    ${(allSigs.length||allPens.length)?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      <div style="background:rgba(0,230,118,0.06);border:1px solid rgba(0,230,118,0.25);border-radius:8px;padding:10px">
+        <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:var(--green);letter-spacing:1.5px;margin-bottom:6px">✅ PROS (${allSigs.length})</div>
+        ${allSigs.slice(0,6).map(s=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5;padding:2px 0">• ${esc(String(s))}</div>`).join('')||`<div style="font-family:var(--mono);font-size:9px;color:var(--text3)">No positive signals yet</div>`}
+        ${allSigs.length>6?`<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:4px">+${allSigs.length-6} more below</div>`:''}
+      </div>
+      <div style="background:rgba(255,23,68,0.06);border:1px solid rgba(255,23,68,0.25);border-radius:8px;padding:10px">
+        <div style="font-family:var(--mono);font-size:8px;font-weight:700;color:var(--red);letter-spacing:1.5px;margin-bottom:6px">🚩 CONS (${allPens.length})</div>
+        ${allPens.slice(0,6).map(p=>`<div style="font-family:var(--mono);font-size:9px;color:var(--text1);line-height:1.5;padding:2px 0">• ${esc(String(p))}</div>`).join('')||`<div style="font-family:var(--mono);font-size:9px;color:var(--text3)">No red flags detected</div>`}
+        ${allPens.length>6?`<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:4px">+${allPens.length-6} more below</div>`:''}
+      </div>
+    </div>`:''}
 
     <!-- ═══ MARKET DATA ═══ -->
     ${section('📊 MARKET DATA','var(--cyan)',`
@@ -3630,19 +3675,6 @@ function buildAuditDetail(c){
         <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--green)">${fmt(lvls.tp3,'$')}</div>
       </div>
     </div>`:''}
-
-    <!-- ═══ 4 CORE SUB-SCORES — 2x2 GRID WITH MINI RINGS ═══ -->
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden">
-      <div style="padding:8px 14px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2)">
-        <span style="font-family:var(--mono);font-size:9px;font-weight:700;color:var(--cyan);letter-spacing:1px">🎯 SCORING BREAKDOWN — 4 Core Dimensions</span>
-      </div>
-      <div style="padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        ${subCard('Launch Quality','🚀',sub.launchQuality,'#00e676',30,lqDetail)}
-        ${subCard('Wallet Structure','👥',sub.walletStructure,'#e040fb',35,wsDetail)}
-        ${subCard('Market Behavior','📈',sub.marketBehavior,'#18ffff',20,mbDetail)}
-        ${subCard('Social Narrative','💬',sub.socialNarrative,'#ffd740',15,snDetail)}
-      </div>
-    </div>
 
     <!-- ═══ KEY RISK METRICS ═══ -->
     ${section('⚠️ KEY RISK METRICS','var(--orange)',`
@@ -6354,22 +6386,73 @@ async function loadAuditor() {
   var rowsEl = document.getElementById('auRows');
   if (rowsEl) rowsEl.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:rgba(136,153,187,0.5)">Loading audit archive...</div>';
   try {
-    var data = await apiFetch('/api/archive?limit=500');
-    if (!data || !data.ok) {
-      if (rowsEl) rowsEl.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Failed to load audit archive.</div>';
-      return;
+    // Pull BOTH archive (promoted-only) and recent scored candidates,
+    // then union so the Auditor is useful even when audit_archive is empty.
+    const [archiveData, scannerData] = await Promise.all([
+      apiFetch('/api/archive?limit=500'),
+      apiFetch('/api/scanner?limit=500'),
+    ]);
+
+    const archiveRows = (archiveData && archiveData.rows) ? archiveData.rows : [];
+    const scannerRows = (scannerData && scannerData.rows) ? scannerData.rows : [];
+
+    // Normalize scanner rows to the archive row shape (snake_case) for uniform rendering
+    const fromScanner = scannerRows
+      .filter(c => (c.composite_score ?? c.compositeScore) != null)
+      .map(c => ({
+        id: c.id,
+        contract_address: c.contract_address || c.contractAddress,
+        token: c.token || c.symbol,
+        token_name: c.token_name || c.tokenName,
+        final_decision: c.final_decision || c.finalDecision,
+        composite_score: c.composite_score ?? c.compositeScore,
+        market_cap: c.market_cap ?? c.marketCap,
+        liquidity: c.liquidity,
+        volume_1h: c.volume_1h ?? c.volume1h,
+        volume_24h: c.volume_24h ?? c.volume24h,
+        pair_age_hours: c.pair_age_hours ?? c.pairAgeHours,
+        stage: c.stage,
+        buy_ratio_1h: c.buy_sell_ratio_1h ?? c.buySellRatio1h,
+        bundle_risk: c.bundle_risk ?? c.bundleRisk,
+        sniper_count: c.sniper_wallet_count ?? c.sniperWalletCount,
+        top10_holder_pct: c.top10_holder_pct ?? c.top10HolderPct,
+        dev_wallet_pct: c.dev_wallet_pct ?? c.devWalletPct,
+        claude_verdict: c.claude_verdict ?? c.claudeVerdict,
+        claude_risk: c.claude_risk ?? c.claudeRisk,
+        claude_setup_type: c.claude_setup_type ?? c.claudeSetupType ?? c.setup_type,
+        openai_decision: c.openai_decision ?? c.openaiDecision,
+        openai_conviction: c.openai_conviction ?? c.openaiConviction,
+        structure_grade: c.structure_grade ?? c.structureGrade,
+        narrative_tags: c.narrative_tags,
+        sub_scores: c.sub_scores,
+        called_at_et: c.created_at,
+        created_at: c.created_at,
+        _source: 'scanner',
+      }));
+
+    // Union by contract_address — archive wins when both present
+    const seen = new Set(archiveRows.map(r => r.contract_address));
+    const unioned = [
+      ...archiveRows,
+      ...fromScanner.filter(r => !seen.has(r.contract_address)),
+    ];
+
+    _auRows = unioned;
+
+    // Summary stats from archive's byDecision (authoritative), fall back to computing locally
+    var by = (archiveData && archiveData.byDecision) ? archiveData.byDecision : {};
+    if (Object.keys(by).length === 0) {
+      by = {};
+      unioned.forEach(r => { const d=r.final_decision||'PENDING'; by[d]=(by[d]||0)+1; });
     }
-    _auRows = data.rows || [];
-    // Summary stats
-    var by = data.byDecision || {};
-    setText('auTotal', (data.total || _auRows.length).toLocaleString());
+    setText('auTotal', unioned.length.toLocaleString());
     setText('auAutoPost', (by.AUTO_POST || 0).toLocaleString());
     setText('auWatchlist', (by.WATCHLIST || 0).toLocaleString());
     setText('auRetest', (by.RETEST || 0).toLocaleString());
     setText('auBlocklist', ((by.BLOCKLIST || 0) + (by.IGNORE || 0)).toLocaleString());
-    // Tab badge
+
     var badge = document.getElementById('tb-auditor-badge');
-    if (badge) badge.textContent = (data.total || _auRows.length) || '';
+    if (badge) badge.textContent = unioned.length || '';
     filterAuditor();
   } catch (e) {
     if (rowsEl) rowsEl.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Error: ' + (e.message || e) + '</div>';
