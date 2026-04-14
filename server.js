@@ -2960,8 +2960,53 @@ app.post('/api/agent', async (req, res) => {
   }
 
   try {
-    const { messages, system, context } = req.body ?? {};
+    const { messages, system, context, walletContext } = req.body ?? {};
     if (!messages?.length) return res.status(400).json({ ok: false, error: 'messages required' });
+
+    // Optional wallet-context block — used by the Smart Money tab chat so the
+    // agent can answer questions about specific wallets, the database, etc.
+    // Also auto-extracts any 32-44 char base58 address from the user's last
+    // message and pulls that wallet's stats live.
+    const walletBlock = (() => {
+      if (!walletContext) return '';
+      try {
+        const top = dbInstance.prepare(
+          `SELECT address, label, category, win_rate, avg_roi, score, wins_found_in, losses_in
+           FROM tracked_wallets WHERE is_blacklist=0
+           ORDER BY score DESC LIMIT 25`
+        ).all();
+        const totalRow = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0`).get();
+        const cats = dbInstance.prepare(
+          `SELECT category, COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 GROUP BY category`
+        ).all();
+        // Extract wallet addresses from the most recent user message
+        const lastUserMsg = [...(messages||[])].reverse().find(m => m.role === 'user')?.content || '';
+        const addrPattern = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
+        const mentioned = (lastUserMsg.match(addrPattern) || []).slice(0, 3);
+        const drilldowns = mentioned.map(addr => {
+          try {
+            const w = dbInstance.prepare(`SELECT * FROM tracked_wallets WHERE address=?`).get(addr);
+            if (w) {
+              return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}:
+  Label: ${w.label||'(none)'} | Category: ${w.category} | Score: ${w.score}/100
+  Win rate: ${w.win_rate ? Math.round(w.win_rate*100)+'%' : 'n/a'} | Avg ROI: ${w.avg_roi ? Math.round(w.avg_roi*100)+'%' : 'n/a'}
+  Found in: ${w.wins_found_in||0} wins / ${w.losses_in||0} losses`;
+            }
+            return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}: NOT IN DATABASE — recommend running enrichment`;
+          } catch { return ''; }
+        }).filter(Boolean).join('\n\n');
+        return `
+
+WALLET DATABASE CONTEXT (you have access to all tracked wallets):
+- Total wallets tracked: ${totalRow.n}
+- By category: ${cats.map(c=>`${c.category}=${c.n}`).join(', ')}
+- Top 25 wallets (by score):
+${top.map((w,i)=>`  ${i+1}. ${w.label||(w.address||'').slice(0,8)+'…'+(w.address||'').slice(-4)} | ${w.category} | score:${w.score} | wr:${w.win_rate?Math.round(w.win_rate*100):'?'}% | roi:${w.avg_roi?Math.round(w.avg_roi*100)+'%':'?'} | wins:${w.wins_found_in||0}`).join('\n')}
+${drilldowns ? '\n' + drilldowns : ''}
+
+You can answer questions about wallets, label them ("call this one X"), spot patterns across them, and recommend which to follow.`;
+      } catch (err) { return `\n(wallet context unavailable: ${err.message})`; }
+    })();
 
     // Build rich context from live bot data
     const memoryBlock = getBotMemory();
@@ -2998,6 +3043,7 @@ ${memoryBlock}
 
 LIVE BOT DATA:
 ${liveContext}
+${walletBlock}
 
 BOT PARAMETERS (v7.0):
 - Target: $10K–$25K MCap micro-cap stealth launches
@@ -3507,6 +3553,65 @@ app.all('/api/wt/*', async (req, res) => {
     console.warn('[proxy/wt]', err.message);
     res.status(502).json({ ok: false, error: 'Wallet tracker unavailable' });
   }
+});
+
+// Rolling-window pipeline metrics for the Analytics tab.
+// Returns counts across 1h / 5h / 24h / 7d windows for every major stage.
+app.get('/api/stats/rolling', (req, res) => {
+  setCors(res);
+  try {
+    const windows = { '1h': '-1 hour', '5h': '-5 hours', '24h': '-24 hours', '7d': '-7 days' };
+    const safeCount = (sql, ...params) => {
+      try { return dbInstance.prepare(sql).get(...params).n; } catch { return 0; }
+    };
+
+    const out = {};
+    for (const [key, sqlWindow] of Object.entries(windows)) {
+      out[key] = {
+        // Stage 1 — scanner detected
+        scanned:        safeCount(`SELECT COUNT(*) as n FROM scanner_feed WHERE scanned_at > datetime('now', ?)`, sqlWindow),
+        // Stage 2 — promoted by quick filter
+        quickPromoted:  safeCount(`SELECT COUNT(*) as n FROM scanner_feed WHERE filter_action='PROMOTE' AND scanned_at > datetime('now', ?)`, sqlWindow),
+        // Stage 3 — fully scored / evaluated
+        evaluated:      safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND composite_score IS NOT NULL`, sqlWindow),
+        // Stage 4 — Claude reviewed
+        claudeRan:      safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND claude_score IS NOT NULL`, sqlWindow),
+        // Stage 5 — OpenAI final-decided
+        openaiRan:      safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND openai_decision IS NOT NULL`, sqlWindow),
+        // Stage 6 — promoted to AUTO_POST
+        autoPosted:     safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND final_decision='AUTO_POST'`, sqlWindow),
+        watchlist:      safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND final_decision='WATCHLIST'`, sqlWindow),
+        ignored:        safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND final_decision='IGNORE'`, sqlWindow),
+        blocked:        safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND final_decision='BLOCKLIST'`, sqlWindow),
+        // Stage 7 — archived
+        archived:       safeCount(`SELECT COUNT(*) as n FROM audit_archive WHERE created_at > datetime('now', ?)`, sqlWindow),
+        // Outcomes
+        wins:           safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN' AND called_at > datetime('now', ?)`, sqlWindow),
+        losses:         safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS' AND called_at > datetime('now', ?)`, sqlWindow),
+        // Wallet enrichment
+        walletsEnriched: safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE updated_at > datetime('now', ?)`, sqlWindow),
+        // Gem-window candidates ($7.5K - $40K)
+        gemCandidates:   safeCount(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now', ?) AND market_cap >= 7500 AND market_cap <= 40000`, sqlWindow),
+      };
+    }
+
+    // Totals (no window)
+    const totals = {
+      scannerFeed:       safeCount(`SELECT COUNT(*) as n FROM scanner_feed`),
+      candidates:        safeCount(`SELECT COUNT(*) as n FROM candidates`),
+      candidatesScored:  safeCount(`SELECT COUNT(*) as n FROM candidates WHERE composite_score IS NOT NULL`),
+      auditArchive:      safeCount(`SELECT COUNT(*) as n FROM audit_archive`),
+      autoPosted:        safeCount(`SELECT COUNT(*) as n FROM candidates WHERE final_decision='AUTO_POST'`),
+      trackedWallets:    safeCount(`SELECT COUNT(*) as n FROM tracked_wallets`),
+      whales:            safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE category='WINNER' AND is_blacklist=0`),
+      smartMoney:        safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE category='SMART_MONEY' AND is_blacklist=0`),
+      callsResolved:     safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL')`),
+      callsWins:         safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'`),
+      callsLosses:       safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'`),
+    };
+
+    res.json({ ok: true, windows: out, totals, generatedAt: new Date().toISOString() });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 app.get('/api/stats', (req, res) => {

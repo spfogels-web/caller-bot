@@ -2200,6 +2200,138 @@ body::before {
   cursor: pointer;
 }
 .wt-load-more:hover { background: rgba(24,255,255,0.18); }
+
+/* ═══════════════════════════════════════════════════
+   📡 PIPELINE VELOCITY — rolling stats card
+   ═══════════════════════════════════════════════════ */
+.rolling-stats-card {
+  background: linear-gradient(135deg, rgba(4,6,11,0.95), rgba(8,12,24,0.95));
+  border: 1px solid rgba(24,255,255,0.2);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 14px;
+  position: relative;
+  overflow: hidden;
+}
+.rolling-stats-card::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:2px;
+  background: linear-gradient(90deg, transparent, rgba(24,255,255,0.6), rgba(0,230,118,0.5), rgba(255,215,64,0.5), transparent);
+}
+.rs-header { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+.rs-title  { font-family:var(--mono); font-size:10px; font-weight:700; color:var(--cyan); letter-spacing:1.5px; }
+.rs-tab-row { display:flex; gap:4px; flex-wrap:wrap; }
+.rs-tab {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: var(--text3);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 1px;
+  cursor: pointer; transition: all 0.15s;
+}
+.rs-tab:hover { color: var(--text1); border-color: rgba(255,255,255,0.18); }
+.rs-tab.active {
+  background: rgba(24,255,255,0.12); border-color: rgba(24,255,255,0.5); color: var(--cyan);
+  box-shadow: 0 0 10px rgba(24,255,255,0.2);
+}
+.rs-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+@media(max-width:1100px){ .rs-grid { grid-template-columns: repeat(4, 1fr); } }
+@media(max-width:600px) { .rs-grid { grid-template-columns: repeat(2, 1fr); } }
+.rs-tile {
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-left: 3px solid var(--rs-col);
+  border-radius: 6px;
+  padding: 8px 6px 6px 8px;
+  position: relative;
+}
+.rs-lbl { font-family: var(--mono); font-size: 7px; color: var(--text3); letter-spacing: 1px; margin-bottom: 4px; }
+.rs-val { font-family: 'Orbitron', var(--mono), monospace; font-size: 20px; font-weight: 900; line-height: 1; color: var(--rs-col); text-shadow: 0 0 6px color-mix(in srgb, var(--rs-col) 40%, transparent); }
+.rs-sub { font-family: var(--mono); font-size: 6px; color: var(--text3); letter-spacing: 0.5px; margin-top: 3px; opacity: 0.7; }
+
+.rs-totals { padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); }
+.rs-totals-title { font-family: var(--mono); font-size: 8px; font-weight: 700; color: var(--text3); letter-spacing: 2px; margin-bottom: 8px; }
+.rs-totals-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+@media(max-width:900px){ .rs-totals-grid { grid-template-columns: repeat(3, 1fr); } }
+@media(max-width:520px){ .rs-totals-grid { grid-template-columns: repeat(2, 1fr); } }
+.rs-totals-grid > div {
+  background: rgba(0,0,0,0.3); border-radius: 4px; padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.rs-totals-grid > div span { font-family: var(--mono); font-size: 6px; color: var(--text3); letter-spacing: 1px; }
+.rs-totals-grid > div b { font-family: var(--mono); font-size: 12px; font-weight: 800; color: var(--text1); }
+
+/* ═══════════════════════════════════════════════════
+   🧠 WALLET CHAT — bottom of Smart Money tab
+   ═══════════════════════════════════════════════════ */
+.wallet-chat-card {
+  background: linear-gradient(135deg, rgba(4,6,11,0.95), rgba(20,8,30,0.92));
+  border: 1px solid rgba(224,64,251,0.3);
+  border-radius: 12px;
+  padding: 14px;
+  margin-top: 14px;
+  position: relative;
+  overflow: hidden;
+}
+.wallet-chat-card::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:2px;
+  background: linear-gradient(90deg, transparent, rgba(224,64,251,0.6), rgba(24,255,255,0.5), transparent);
+}
+.wc-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.wc-title-row { display: flex; align-items: center; gap: 8px; }
+.wc-pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--purple); box-shadow: 0 0 8px var(--purple);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.wc-title { font-family: 'Orbitron', var(--mono), monospace; font-size: 13px; font-weight: 900; letter-spacing: 2px;
+  background: linear-gradient(90deg,#e040fb,#18ffff); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.wc-sub { font-family: var(--mono); font-size: 8px; color: var(--text3); }
+.wc-status { font-family: var(--mono); font-size: 8px; color: var(--green); padding: 3px 8px; background: rgba(0,230,118,0.1); border: 1px solid rgba(0,230,118,0.3); border-radius: 12px; letter-spacing: 1px; }
+.wc-messages { background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 10px; max-height: 280px; overflow-y: auto; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
+.wc-msg { display: flex; align-items: flex-start; gap: 8px; }
+.wc-msg-user { flex-direction: row-reverse; }
+.wc-avatar {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; flex-shrink: 0;
+}
+.wc-msg-bot .wc-avatar { background: linear-gradient(135deg,#e040fb,#448aff); }
+.wc-msg-user .wc-avatar { background: rgba(255,255,255,0.1); color: var(--text2); }
+.wc-bubble {
+  font-family: var(--mono); font-size: 9px; line-height: 1.55;
+  padding: 6px 10px; border-radius: 8px; max-width: 85%;
+}
+.wc-msg-bot .wc-bubble { background: rgba(224,64,251,0.08); border: 1px solid rgba(224,64,251,0.2); color: var(--text1); }
+.wc-msg-user .wc-bubble { background: rgba(24,255,255,0.06); color: var(--text2); }
+.wc-input-row { display: flex; gap: 6px; }
+.wc-input {
+  flex: 1; background: rgba(0,0,0,0.5); border: 1px solid rgba(224,64,251,0.25); border-radius: 6px;
+  padding: 8px 12px; color: var(--text1); font-family: var(--mono); font-size: 10px; outline: none;
+}
+.wc-input:focus { border-color: rgba(224,64,251,0.5); }
+.wc-input::placeholder { color: rgba(136,153,187,0.5); }
+.wc-send {
+  background: linear-gradient(135deg, rgba(224,64,251,0.25), rgba(24,255,255,0.15));
+  border: 1px solid rgba(224,64,251,0.5); color: #fff; border-radius: 6px;
+  padding: 8px 16px; font-family: var(--mono); font-size: 10px; font-weight: 700;
+  cursor: pointer; letter-spacing: 1px; white-space: nowrap;
+}
+.wc-send:hover { box-shadow: 0 0 12px rgba(224,64,251,0.4); }
+.wc-send:disabled { opacity: 0.4; cursor: not-allowed; }
+.wc-quick-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.wc-quick {
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: var(--text2);
+  border-radius: 4px; padding: 3px 8px; font-family: var(--mono); font-size: 8px;
+  cursor: pointer; transition: all 0.15s;
+}
+.wc-quick:hover { background: rgba(224,64,251,0.1); border-color: rgba(224,64,251,0.3); color: var(--text1); }
 </style>
 </head>
 <body>
@@ -2634,9 +2766,61 @@ body::before {
     <!-- PROMOTED TAB — Full promoted feed -->
     <div class="tab-panel" id="tab-analytics">
 
-      <div style="margin-bottom:12px">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--cyan);letter-spacing:2px;font-weight:700;margin-bottom:4px">📈 PERFORMANCE ANALYTICS</div>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Win/loss breakdown · Score calibration · Pattern performance · AI learning</div>
+      <div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--cyan);letter-spacing:2px;font-weight:700;margin-bottom:4px">📈 PERFORMANCE ANALYTICS</div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Pipeline velocity · Win/loss breakdown · Score calibration · Pattern performance</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px" id="rollingLastUpdate">—</span>
+          <button onclick="loadRollingStats()" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:5px;padding:5px 12px;font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer;letter-spacing:1px">↻ REFRESH</button>
+        </div>
+      </div>
+
+      <!-- ═══ PIPELINE VELOCITY (rolling 1h / 5h / 24h / 7d) ═══ -->
+      <div class="rolling-stats-card">
+        <div class="rs-header">
+          <div class="rs-title">📡 PIPELINE VELOCITY — rolling counts at every stage</div>
+          <div class="rs-tab-row">
+            <button class="rs-tab active" data-w="1h"  onclick="setRollingWindow(this,'1h')">1 HOUR</button>
+            <button class="rs-tab" data-w="5h"  onclick="setRollingWindow(this,'5h')">5 HOURS</button>
+            <button class="rs-tab" data-w="24h" onclick="setRollingWindow(this,'24h')">24 HOURS</button>
+            <button class="rs-tab" data-w="7d"  onclick="setRollingWindow(this,'7d')">7 DAYS</button>
+          </div>
+        </div>
+        <div class="rs-grid">
+          <div class="rs-tile" style="--rs-col:#18ffff"><div class="rs-lbl">📡 SCANNED</div><div class="rs-val" id="rsScanned">—</div><div class="rs-sub">tokens detected</div></div>
+          <div class="rs-tile" style="--rs-col:#00e676"><div class="rs-lbl">⚡ QUICK PROMOTED</div><div class="rs-val" id="rsQuick">—</div><div class="rs-sub">passed scanner gate</div></div>
+          <div class="rs-tile" style="--rs-col:#e040fb"><div class="rs-lbl">🎯 EVALUATED</div><div class="rs-val" id="rsEval">—</div><div class="rs-sub">full composite scored</div></div>
+          <div class="rs-tile" style="--rs-col:#448aff"><div class="rs-lbl">🤖 CLAUDE RAN</div><div class="rs-val" id="rsClaude">—</div><div class="rs-sub">forensic reviewed</div></div>
+          <div class="rs-tile" style="--rs-col:#00e676"><div class="rs-lbl">🧠 GPT-4o RAN</div><div class="rs-val" id="rsOpenai">—</div><div class="rs-sub">final verdict</div></div>
+          <div class="rs-tile" style="--rs-col:#ffd740"><div class="rs-lbl">🚀 AUTO POSTED</div><div class="rs-val" id="rsAutoPost">—</div><div class="rs-sub">went live</div></div>
+          <div class="rs-tile" style="--rs-col:#ffd740"><div class="rs-lbl">👁 WATCHLIST</div><div class="rs-val" id="rsWatch">—</div><div class="rs-sub">monitoring</div></div>
+          <div class="rs-tile" style="--rs-col:#8899bb"><div class="rs-lbl">🚫 IGNORED</div><div class="rs-val" id="rsIgnore">—</div><div class="rs-sub">below threshold</div></div>
+          <div class="rs-tile" style="--rs-col:#ff1744"><div class="rs-lbl">⛔ BLOCKED</div><div class="rs-val" id="rsBlock">—</div><div class="rs-sub">red-flagged</div></div>
+          <div class="rs-tile" style="--rs-col:#18ffff"><div class="rs-lbl">📚 ARCHIVED</div><div class="rs-val" id="rsArchived">—</div><div class="rs-sub">to audit log</div></div>
+          <div class="rs-tile" style="--rs-col:#00e676"><div class="rs-lbl">🏆 WINS</div><div class="rs-val" id="rsWins">—</div><div class="rs-sub">resolved &gt;= 2x</div></div>
+          <div class="rs-tile" style="--rs-col:#ff1744"><div class="rs-lbl">💀 LOSSES</div><div class="rs-val" id="rsLosses">—</div><div class="rs-sub">resolved &lt;= 0.75x</div></div>
+          <div class="rs-tile" style="--rs-col:#ffd740"><div class="rs-lbl">💎 GEM RANGE</div><div class="rs-val" id="rsGem">—</div><div class="rs-sub">$7.5K–$40K</div></div>
+          <div class="rs-tile" style="--rs-col:#e040fb"><div class="rs-lbl">🧬 WALLETS ENRICHED</div><div class="rs-val" id="rsWallets">—</div><div class="rs-sub">via Solscan</div></div>
+        </div>
+        <div class="rs-totals">
+          <div class="rs-totals-title">ALL-TIME TOTALS</div>
+          <div class="rs-totals-grid">
+            <div><span>SCANNER FEED</span><b id="rsTotScanner">—</b></div>
+            <div><span>CANDIDATES</span><b id="rsTotCands">—</b></div>
+            <div><span>SCORED</span><b id="rsTotScored">—</b></div>
+            <div><span>AUDIT ARCHIVE</span><b id="rsTotArchive">—</b></div>
+            <div><span>AUTO POSTED</span><b id="rsTotAutoPost">—</b></div>
+            <div><span>TRACKED WALLETS</span><b id="rsTotWallets">—</b></div>
+            <div><span>WHALES</span><b id="rsTotWhale">—</b></div>
+            <div><span>SMART MONEY</span><b id="rsTotSmart">—</b></div>
+            <div><span>RESOLVED CALLS</span><b id="rsTotResolved">—</b></div>
+            <div><span>ALL WINS</span><b id="rsTotWins">—</b></div>
+            <div><span>ALL LOSSES</span><b id="rsTotLosses">—</b></div>
+            <div><span>WIN %</span><b id="rsTotWinPct">—</b></div>
+          </div>
+        </div>
       </div>
 
       <!-- Score calibration -->
@@ -3229,6 +3413,42 @@ body::before {
               <thead><tr><th>#</th><th>DEPLOYER</th><th>LAUNCHES</th><th>WIN RATE</th><th>GRADE</th><th>LINKS</th></tr></thead>
               <tbody id="deployerLeaderBody"></tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════════
+             🧠 WALLET INTEL CHAT — talk to the wallet database
+             Has full read access to tracked_wallets. Auto-detects pasted
+             wallet addresses in the question and pulls their stats live.
+             ═══════════════════════════════════════════════════════════════ -->
+        <div class="wallet-chat-card" id="walletChatCard">
+          <div class="wc-header">
+            <div class="wc-title-row">
+              <div class="wc-pulse"></div>
+              <div>
+                <div class="wc-title">WALLET ORACLE</div>
+                <div class="wc-sub">Knows every wallet · Paste any address to drill in · Ask for patterns / labels / recommendations</div>
+              </div>
+            </div>
+            <div class="wc-status">CONNECTED</div>
+          </div>
+          <div class="wc-messages" id="walletChatMessages">
+            <div class="wc-msg wc-msg-bot">
+              <div class="wc-avatar">🧠</div>
+              <div class="wc-bubble">I have access to your full wallet database. Paste any address to drill in, or ask things like "show me the top 5 whales", "which wallets keep showing up on winners?", or "label this one APE_KING".</div>
+            </div>
+          </div>
+          <div class="wc-input-row">
+            <input id="walletChatInput" class="wc-input" placeholder="Ask about wallets · paste an address · request a label..."
+                   onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendWalletChatMsg();}">
+            <button class="wc-send" id="walletChatSendBtn" onclick="sendWalletChatMsg()">SEND ↵</button>
+          </div>
+          <div class="wc-quick-row">
+            <button class="wc-quick" onclick="walletChatQuick('Show me the top 5 wallets by score and explain why')">🏆 TOP 5</button>
+            <button class="wc-quick" onclick="walletChatQuick('Which wallets keep appearing on winning calls? Look for patterns.')">🔁 PATTERNS</button>
+            <button class="wc-quick" onclick="walletChatQuick('Are any tracked wallets currently buying tokens in the $7.5K–$40K gem range? Be specific.')">💎 GEM HUNTERS</button>
+            <button class="wc-quick" onclick="walletChatQuick('Recommend the top 10 wallets I should follow most closely and why')">⭐ RECOMMEND</button>
+            <button class="wc-quick" onclick="walletChatQuick('Are there any wallet clusters that look coordinated or suspicious?')">🕸 CLUSTERS</button>
           </div>
         </div>
 
@@ -6402,6 +6622,19 @@ async function showWalletModal(address){
       '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:4px">AVG ROI</div><div style="font-family:var(--mono);font-size:22px;font-weight:900;color:var(--green)">'+roi+'</div></div>'+
       '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:4px">OUR WINS</div><div style="font-family:var(--mono);font-size:22px;font-weight:900;color:'+(w.wins_found_in>0?'var(--green)':'var(--text3)')+'">'+( w.wins_found_in||0)+'</div></div>'+
     '</div>'+
+    // ── Label editor — name this wallet anything you want ─────────────
+    '<div style="padding:12px 16px;border-bottom:1px solid var(--border)">'+
+      '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-bottom:5px">📛 LABEL THIS WALLET</div>'+
+      '<div style="display:flex;gap:6px">'+
+        '<input id="walletLabelInput_'+address.slice(0,8)+'" value="'+esc(w.label||'')+'" placeholder="e.g. APE_KING, DEGEN_001..."'+
+          ' style="flex:1;background:rgba(0,0,0,0.5);border:1px solid var(--border2);border-radius:5px;padding:7px 10px;color:var(--text1);font-family:var(--mono);font-size:10px;outline:none">'+
+        '<select id="walletCatInput_'+address.slice(0,8)+'" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);border-radius:5px;color:var(--text1);font-family:var(--mono);font-size:9px;padding:6px 8px;outline:none">'+
+          ['NEUTRAL','WINNER','SMART_MONEY','MOMENTUM','SNIPER','CLUSTER','RUG'].map(function(c){return '<option value="'+c+'"'+(c===cat?' selected':'')+'>'+c+'</option>';}).join('')+
+        '</select>'+
+        '<button onclick="saveWalletLabel(\''+address+'\')" style="background:linear-gradient(135deg,rgba(0,230,118,0.2),rgba(24,255,255,0.1));border:1px solid rgba(0,230,118,0.4);color:var(--green);border-radius:5px;padding:7px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">SAVE</button>'+
+      '</div>'+
+      '<div id="walletLabelMsg_'+address.slice(0,8)+'" style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:5px;height:10px"></div>'+
+    '</div>'+
     (w.notes?'<div style="padding:12px 16px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;color:var(--text3)">'+esc(w.notes)+' · Source: '+esc(w.source||'')+'</div>':'')+
     '<div style="padding:16px">'+
       '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:1px;margin-bottom:10px">APPEARANCES IN OUR EVALUATED TOKENS ('+apps.length+')</div>'+
@@ -7559,6 +7792,166 @@ window.addEventListener('load', function() {
     }
   }, 2500);
 });
+
+/* ═══════════════════════════════════════════════════════════
+   📡 ROLLING STATS — Pipeline velocity on the Analytics tab
+   ═══════════════════════════════════════════════════════════ */
+let _rollingData = null;
+let _rollingWindow = '1h';
+
+async function loadRollingStats(){
+  const data = await apiFetch('/api/stats/rolling');
+  if (!data || !data.ok) return;
+  _rollingData = data;
+  renderRollingStats();
+  // All-time totals
+  const t = data.totals || {};
+  setText('rsTotScanner',  (t.scannerFeed||0).toLocaleString());
+  setText('rsTotCands',    (t.candidates||0).toLocaleString());
+  setText('rsTotScored',   (t.candidatesScored||0).toLocaleString());
+  setText('rsTotArchive',  (t.auditArchive||0).toLocaleString());
+  setText('rsTotAutoPost', (t.autoPosted||0).toLocaleString());
+  setText('rsTotWallets',  (t.trackedWallets||0).toLocaleString());
+  setText('rsTotWhale',    (t.whales||0).toLocaleString());
+  setText('rsTotSmart',    (t.smartMoney||0).toLocaleString());
+  setText('rsTotResolved', (t.callsResolved||0).toLocaleString());
+  setText('rsTotWins',     (t.callsWins||0).toLocaleString());
+  setText('rsTotLosses',   (t.callsLosses||0).toLocaleString());
+  const wr = (t.callsWins+t.callsLosses) > 0 ? Math.round(t.callsWins/(t.callsWins+t.callsLosses)*100) : null;
+  setText('rsTotWinPct', wr != null ? wr+'%' : '—');
+  setText('rollingLastUpdate', 'updated ' + timeAgo(data.generatedAt));
+}
+
+function renderRollingStats(){
+  if (!_rollingData) return;
+  const w = _rollingData.windows?.[_rollingWindow] || {};
+  setText('rsScanned',   (w.scanned||0).toLocaleString());
+  setText('rsQuick',     (w.quickPromoted||0).toLocaleString());
+  setText('rsEval',      (w.evaluated||0).toLocaleString());
+  setText('rsClaude',    (w.claudeRan||0).toLocaleString());
+  setText('rsOpenai',    (w.openaiRan||0).toLocaleString());
+  setText('rsAutoPost',  (w.autoPosted||0).toLocaleString());
+  setText('rsWatch',     (w.watchlist||0).toLocaleString());
+  setText('rsIgnore',    (w.ignored||0).toLocaleString());
+  setText('rsBlock',     (w.blocked||0).toLocaleString());
+  setText('rsArchived',  (w.archived||0).toLocaleString());
+  setText('rsWins',      (w.wins||0).toLocaleString());
+  setText('rsLosses',    (w.losses||0).toLocaleString());
+  setText('rsGem',       (w.gemCandidates||0).toLocaleString());
+  setText('rsWallets',   (w.walletsEnriched||0).toLocaleString());
+}
+
+function setRollingWindow(btn, w){
+  _rollingWindow = w;
+  document.querySelectorAll('.rs-tab').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderRollingStats();
+}
+
+// Hook into loadAnalytics so rolling stats refresh whenever the tab loads
+const _origLoadAnalytics = (typeof loadAnalytics === 'function') ? loadAnalytics : null;
+loadAnalytics = async function(){
+  if (_origLoadAnalytics) await _origLoadAnalytics();
+  loadRollingStats();
+};
+
+/* ═══════════════════════════════════════════════════════════
+   🧠 WALLET ORACLE CHAT (bottom of Smart Money tab)
+   ═══════════════════════════════════════════════════════════ */
+let _walletChatHistory = [];
+
+function _appendWalletChatMsg(text, role){
+  const msgs = document.getElementById('walletChatMessages');
+  if (!msgs) return;
+  const msgDiv = document.createElement('div');
+  msgDiv.className = 'wc-msg ' + (role === 'bot' ? 'wc-msg-bot' : 'wc-msg-user');
+  msgDiv.innerHTML = (role === 'bot'
+      ? '<div class="wc-avatar">🧠</div>'
+      : '<div class="wc-avatar">U</div>')
+    + '<div class="wc-bubble">' + esc(text) + '</div>';
+  msgs.appendChild(msgDiv);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+async function sendWalletChatMsg(){
+  const input = document.getElementById('walletChatInput');
+  const btn   = document.getElementById('walletChatSendBtn');
+  const text  = (input?.value || '').trim();
+  if (!text) return;
+  if (input) input.value = '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  _appendWalletChatMsg(text, 'user');
+  _walletChatHistory.push({ role: 'user', content: text });
+
+  const tid = 'wct' + Date.now();
+  const msgs = document.getElementById('walletChatMessages');
+  if (msgs) {
+    msgs.innerHTML += '<div id="' + tid + '" class="wc-msg wc-msg-bot"><div class="wc-avatar">🧠</div><div class="wc-bubble" style="opacity:0.6">analyzing wallet database…</div></div>';
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  try {
+    const r = await fetch('/api/agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: _walletChatHistory.slice(-12),
+        walletContext: true,  // ← this is the new flag
+      }),
+      signal: AbortSignal.timeout(45000),
+    });
+    const d = await r.json();
+    document.getElementById(tid)?.remove();
+    const reply = d?.reply || 'No response.';
+    _appendWalletChatMsg(reply, 'bot');
+    _walletChatHistory.push({ role: 'assistant', content: reply });
+    if (_walletChatHistory.length > 20) _walletChatHistory = _walletChatHistory.slice(-16);
+  } catch (err) {
+    document.getElementById(tid)?.remove();
+    _appendWalletChatMsg('Error: ' + err.message, 'bot');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'SEND ↵'; }
+  }
+}
+
+function walletChatQuick(text){
+  const input = document.getElementById('walletChatInput');
+  if (input) { input.value = text; input.focus(); }
+  sendWalletChatMsg();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   📛 WALLET LABEL — save user-given name + category
+   ═══════════════════════════════════════════════════════════ */
+async function saveWalletLabel(address){
+  if (!address) return;
+  const short = address.slice(0, 8);
+  const labelEl = document.getElementById('walletLabelInput_' + short);
+  const catEl   = document.getElementById('walletCatInput_' + short);
+  const msgEl   = document.getElementById('walletLabelMsg_' + short);
+  const label   = (labelEl?.value || '').trim();
+  const category = catEl?.value || 'NEUTRAL';
+  if (msgEl) { msgEl.textContent = '⏳ saving…'; msgEl.style.color = 'var(--cyan)'; }
+  try {
+    const r = await fetch('/api/wallets/' + encodeURIComponent(address), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, category }),
+    });
+    const d = await r.json();
+    if (d?.ok) {
+      if (msgEl) { msgEl.textContent = '✓ saved · refresh tiles to see the new label'; msgEl.style.color = 'var(--green)'; }
+      // Update the wallet in the in-memory tile cache so it shows immediately
+      const target = (typeof _walletTilesAll !== 'undefined' ? _walletTilesAll : []).find(w => w.address === address);
+      if (target) { target.label = label; target.category = category; }
+      if (typeof renderWalletTiles === 'function') renderWalletTiles();
+    } else {
+      if (msgEl) { msgEl.textContent = '✗ ' + (d?.error || 'save failed'); msgEl.style.color = 'var(--red)'; }
+    }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = '✗ ' + err.message; msgEl.style.color = 'var(--red)'; }
+  }
+}
 
 /* ═══════════════════════════════════════════════════════════
    AUDITOR TAB — promoted coins + Claude/GPT-4o decision trail
