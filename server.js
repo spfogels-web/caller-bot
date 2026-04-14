@@ -4187,15 +4187,64 @@ app.get('/api/candidates/:id', (req, res) => {
 
     if (!candidate.subScores || !Object.keys(candidate.subScores).length) {
       // Source 3: Reconstruct from known scored fields on the candidate row itself
-      // The candidates table stores composite_score and launch_quality_score at minimum
       const lq = candidate.launch_quality_score ?? candidate.launchQualityScore ?? null;
       if (lq != null || candidate.composite_score != null) {
         candidate.subScores = {
           launchQuality:   lq,
           walletStructure: candidate.wallet_intel_score ?? candidate.walletIntelScore ?? null,
-          marketBehavior:  null, // not stored individually — will show as —
+          marketBehavior:  null,
           socialNarrative: null,
         };
+      }
+    }
+
+    // Source 4 (LAST RESORT): re-run the scorer on the fly from raw candidate
+    // fields. This guarantees every detail view shows real numbers — even for
+    // legacy rows scored before the sub_scores write path was wired up.
+    if (!candidate.subScores
+        || !Object.keys(candidate.subScores).length
+        || Object.values(candidate.subScores).every(v => v == null)) {
+      try {
+        const c = {
+          mintAuthority:           row.mint_authority,
+          freezeAuthority:         row.freeze_authority,
+          lpLocked:                row.lp_locked,
+          pairAgeHours:            row.pair_age_hours,
+          deployerHistoryRisk:     row.deployer_verdict || row.deployer_history_risk,
+          launchQualityScore:      row.launch_quality_score,
+          heliusOk:                row.helius_ok ?? true,
+          launchUniqueBuyerRatio:  row.launch_unique_buyer_ratio,
+          devWalletPct:            row.dev_wallet_pct,
+          top10HolderPct:          row.top10_holder_pct,
+          insiderWalletPct:        row.insider_wallet_pct,
+          sniperWalletCount:       row.sniper_wallet_count,
+          bundleRisk:              row.bundle_risk,
+          bubbleMapRisk:           row.bubble_map_risk,
+          buys1h:                  row.buys_1h,
+          sells1h:                 row.sells_1h,
+          buySellRatio1h:          row.buy_sell_ratio_1h,
+          volumeVelocity:          row.volume_velocity,
+          volumeQuality:           row.volume_quality,
+          holders:                 row.holders,
+          holderGrowth24h:         row.holder_growth_24h,
+          marketCap:               row.market_cap,
+          liquidity:               row.liquidity,
+          stage:                   row.stage,
+          candidateType:           row.candidate_type,
+          website:                 row.website,
+          twitter:                 row.twitter,
+          telegram:                row.telegram,
+        };
+        const result = computeFullScore(c);
+        if (result?.subScores) {
+          candidate.subScores = result.subScores;
+          if (!candidate.signals)   candidate.signals   = result.signals;
+          if (!candidate.penalties) candidate.penalties = result.penalties;
+          if (!candidate.structure_grade && result.structureGrade) candidate.structure_grade = result.structureGrade;
+          candidate._scoreSource = 'computed-on-fly';
+        }
+      } catch (e) {
+        console.warn('[api] on-fly score fallback failed:', e.message);
       }
     }
 
