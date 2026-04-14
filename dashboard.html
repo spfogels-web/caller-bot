@@ -1438,7 +1438,8 @@ body::before {
   width:440px;flex-shrink:0;
 }
 .candidates-detail-col {
-  flex:1;min-width:0;background:var(--surface);border:1px solid var(--border);
+  flex:1;min-width:0;max-width:620px;
+  background:var(--surface);border:1px solid var(--border);
   border-radius:10px;overflow-y:auto;max-height:calc(100vh - 200px);
   -webkit-overflow-scrolling:touch;
 }
@@ -3068,11 +3069,8 @@ function renderAuditList(){
   if(!el)return;
   let rows=[...allCandidatesData];
 
-  // Hide truly unscored rows (no compositeScore AND no quickScore = not yet evaluated)
-  rows = rows.filter(function(r){
-    const s = r.compositeScore ?? r.quick_score ?? r.quickScore ?? null;
-    return s != null && s > 0;
-  });
+  // Note: we keep ALL scanned tokens visible — unscored ones show a
+  // "SCORING" placeholder so nothing disappears from the list.
 
   // Filter
   const q=(document.getElementById('auditSearch')?.value||'').toLowerCase();
@@ -3111,8 +3109,11 @@ function renderAuditList(){
   var isMobile = window.innerWidth <= 900;
 
   slice.forEach(function(r){
-    var score    = Math.round(r.compositeScore||r.quick_score||r.quickScore||0);
-    var sCol     = scoreCol(score);
+    var rawScore = r.compositeScore??r.quick_score??r.quickScore??null;
+    var score    = rawScore!=null ? Math.round(rawScore) : null;
+    var isScoring = score==null || score===0;
+    var displayScore = isScoring ? '—' : score;
+    var sCol     = isScoring ? 'var(--text3)' : scoreCol(score);
     var dec      = r.finalDecision||'PENDING';
     var decCol2  = decColor(dec);
     var age      = r.pairAgeHours!=null ? (r.pairAgeHours<0.083?'<5m':r.pairAgeHours<1?(r.pairAgeHours*60).toFixed(0)+'m':r.pairAgeHours.toFixed(1)+'h') : '—';
@@ -3121,8 +3122,8 @@ function renderAuditList(){
     var gemWin   = mcVal>=5000 && mcVal<=40000;
     var stage    = r.stage||'?';
     var isNew    = isBrandNew(r.pairAgeHours);
-    var clickable = score >= 33;
-    var expanded  = score >= 40;
+    var clickable = true; // Always clickable — even unscored rows open detail
+    var expanded  = !isScoring && score >= 40;
 
     var div = document.createElement('div');
     div.className = 'coin-row' + (clickable?' clickable':'') + (expanded?' expanded':'') + (dec==='AUTO_POST'?' promoted':'');
@@ -3141,7 +3142,16 @@ function renderAuditList(){
       }catch(ex){}
     }
 
-    // Header row (same for both compact & expanded)
+    // Score block — show ⏳ SCORING for unscored rows, else full score + decision
+    var scoreBlock = isScoring
+      ? '<div style="text-align:right;flex-shrink:0">'+
+          '<div style="font-family:var(--mono);font-size:9px;font-weight:700;padding:4px 9px;border-radius:4px;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.25);color:var(--cyan);letter-spacing:1px">⏳ SCORING</div>'+
+        '</div>'
+      : '<div style="text-align:right;flex-shrink:0">'+
+          '<div class="coin-score-big" style="color:'+sCol+';text-shadow:0 0 10px '+sCol+'44">'+displayScore+'</div>'+
+          '<div style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:'+decCol2+'18;border:1px solid '+decCol2+'44;color:'+decCol2+';margin-top:3px">'+esc(dec)+'</div>'+
+        '</div>';
+
     var headerHTML =
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
         '<div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">'+
@@ -3160,10 +3170,7 @@ function renderAuditList(){
             '</div>'+
           '</div>'+
         '</div>'+
-        '<div style="text-align:right;flex-shrink:0">'+
-          '<div class="coin-score-big" style="color:'+sCol+';text-shadow:0 0 10px '+sCol+'44">'+score+'</div>'+
-          '<div style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:'+decCol2+'18;border:1px solid '+decCol2+'44;color:'+decCol2+';margin-top:3px">'+esc(dec)+'</div>'+
-        '</div>'+
+        scoreBlock+
       '</div>';
 
     // Expanded block for 40+ scores: 4 mini sub-scores + flag chips
@@ -3174,6 +3181,7 @@ function renderAuditList(){
       var ws = ss.walletStructure ?? ss.wallet_structure ?? ss.wallet ?? null;
       var mb = ss.marketBehavior ?? ss.market_behavior ?? ss.market ?? null;
       var sn = ss.socialNarrative ?? ss.social_narrative ?? ss.social ?? null;
+      var hasSub = [lq,ws,mb,sn].some(function(v){return v!=null;});
 
       function subCell(label, val, color){
         var v = val!=null ? Math.round(val) : null;
@@ -3183,12 +3191,16 @@ function renderAuditList(){
         '</div>';
       }
 
-      bodyHTML += '<div class="cand-subscore-grid">'+
-        subCell('🚀 LAUNCH', lq, '#00e676')+
-        subCell('👥 WALLET', ws, '#e040fb')+
-        subCell('📈 MARKET', mb, '#18ffff')+
-        subCell('💬 SOCIAL', sn, '#ffd740')+
-      '</div>';
+      if(hasSub){
+        bodyHTML += '<div class="cand-subscore-grid">'+
+          subCell('🚀 LAUNCH', lq, '#00e676')+
+          subCell('👥 WALLET', ws, '#e040fb')+
+          subCell('📈 MARKET', mb, '#18ffff')+
+          subCell('💬 SOCIAL', sn, '#ffd740')+
+        '</div>';
+      } else {
+        bodyHTML += '<div style="margin-top:8px;padding:6px 10px;background:rgba(24,255,255,0.04);border:1px dashed rgba(24,255,255,0.2);border-radius:5px;font-family:var(--mono);font-size:8px;color:var(--cyan);text-align:center;letter-spacing:1px">⏳ FULL SCORING IN PROGRESS · click for details</div>';
+      }
 
       // Chips: Claude risk, GPT conviction, key flags
       var chips = [];
@@ -3239,24 +3251,36 @@ function renderAuditList(){
             showCoinById(Number(r.id));
           }
         } else {
-          // Desktop: load into right panel
+          // Desktop: load into right panel — try hard to get full detail
           var det = document.getElementById('auditDetailContent');
           if(det){
             det.innerHTML = '<div class="spinner" style="padding:40px"><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--green)"></div></div>';
             det.scrollTop = 0;
           }
-          if(r.finalDecision==='PENDING'||!r.compositeScore){
-            if(det){ det.innerHTML = buildPromotedFallback(r); det.scrollTop=0; }
-          } else {
-            apiFetch('/api/candidates/'+r.id).then(function(data){
-              if(data&&data.candidate){
-                var c = normalizeCandidate(data.candidate);
-                if(det){ det.innerHTML = buildAuditDetail(c); det.scrollTop=0; }
+          (async function(){
+            let full=null;
+            // 1. Try by candidate ID
+            if(r.id){
+              try{ const d=await apiFetch('/api/candidates/'+r.id); if(d&&d.candidate) full=d.candidate; }catch(e){}
+            }
+            // 2. Fall back to lookup by CA
+            if(!full && r.contractAddress){
+              try{ const d=await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(r.contractAddress)); if(d&&d.candidate) full=d.candidate; }catch(e){}
+            }
+            // 3. Last resort: archive row
+            if(!full && r.contractAddress){
+              try{ const d=await apiFetch('/api/archive/'+encodeURIComponent(r.contractAddress)); if(d&&d.ok&&d.row) full=d.row; }catch(e){}
+            }
+            if(det){
+              if(full){
+                det.innerHTML = buildAuditDetail(normalizeCandidate(full));
               } else {
-                if(det){ det.innerHTML = buildPromotedFallback(r); det.scrollTop=0; }
+                // Use buildAuditDetail with whatever we have — better than minimal fallback
+                det.innerHTML = buildAuditDetail(r);
               }
-            });
-          }
+              det.scrollTop = 0;
+            }
+          })();
         }
       });
     }
@@ -3432,14 +3456,14 @@ function buildAuditDetail(c){
     <!-- ═══ HERO: BANNER + LOGO + NAME + SCORE ═══ -->
     <div style="position:relative;background:linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,12,24,0.9));overflow:hidden">
       <!-- Banner (contained, not stretched) -->
-      <div style="width:100%;height:120px;overflow:hidden;background:rgba(0,0,0,0.5);position:relative">
+      <div style="width:100%;height:165px;overflow:hidden;background:rgba(0,0,0,0.5);position:relative">
         <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${ca}/header.png"
              onerror="this.style.display='none'"
-             style="width:100%;height:100%;object-fit:cover;display:block;opacity:0.85">
-        <div style="position:absolute;inset:0;background:linear-gradient(to bottom,rgba(0,0,0,0.25) 0%,rgba(0,0,0,0.55) 60%,rgba(0,0,0,0.9) 100%)"></div>
+             style="width:100%;height:100%;object-fit:cover;display:block;opacity:0.9">
+        <div style="position:absolute;inset:0;background:linear-gradient(to bottom,rgba(0,0,0,0.15) 0%,rgba(0,0,0,0.4) 55%,rgba(0,0,0,0.9) 100%)"></div>
       </div>
       <!-- Info row overlapping banner bottom -->
-      <div style="display:flex;align-items:flex-end;gap:10px;padding:0 14px;margin-top:-36px;position:relative;z-index:2">
+      <div style="display:flex;align-items:flex-end;gap:10px;padding:0 14px;margin-top:-40px;position:relative;z-index:2">
         <!-- Logo -->
         <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${ca}.png"
              onerror="this.style.display='none'"
