@@ -4216,6 +4216,46 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   }
 });
 
+// ─── On-demand scoring — score ANY token live when the user clicks it ─────
+// Fires the full enrich + score pipeline right now, persists the result, and
+// returns the scored candidate so the detail view can re-render with real
+// numbers. Solves the "click a card, see no score" problem instantly.
+app.post('/api/score-now/:ca', async (req, res) => {
+  setCors(res);
+  const ca = (req.params.ca || '').trim();
+  if (!ca || ca.length < 32) return res.status(400).json({ ok: false, error: 'Invalid CA' });
+
+  try {
+    const startMs = Date.now();
+    // Build a minimal candidate seed — enrichCandidate fills the rest
+    const seed = { contractAddress: ca, _discoveredAt: Date.now(), _onDemand: true };
+    let enriched;
+    try {
+      enriched = await enrichCandidate(seed);
+    } catch (err) {
+      return res.status(502).json({ ok: false, error: `Enrichment failed: ${err.message}` });
+    }
+    if (!enriched || !enriched.marketCap) {
+      return res.status(404).json({ ok: false, error: 'Token not found on DexScreener / Helius' });
+    }
+    enriched._discoveredAt = startMs;
+    enriched._onDemand     = true;
+
+    // Run scoring + persist via the same path the scanner uses
+    await processCandidate(enriched, false);
+
+    const ms = Date.now() - startMs;
+    // Pull the freshly-scored row to return
+    const row = dbInstance.prepare(
+      `SELECT * FROM candidates WHERE contract_address=? ORDER BY id DESC LIMIT 1`
+    ).get(ca);
+    res.json({ ok: true, candidate: row, scoredInMs: ms });
+  } catch (err) {
+    console.error('[score-now]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── Send a test Telegram post to verify the pipeline is wired up ────────
 // Hit with POST /api/diagnose/test-telegram — sends a simple message to the
 // configured group. If this works, Telegram is fine and the issue is scoring.

@@ -4679,10 +4679,26 @@ function renderAuditList(){
               if(full){
                 det.innerHTML = buildAuditDetail(normalizeCandidate(full));
               } else {
-                // Use buildAuditDetail with whatever we have — better than minimal fallback
                 det.innerHTML = buildAuditDetail(r);
               }
               det.scrollTop = 0;
+            }
+            // On-demand score if the row has no real composite — same as mobile
+            const targetCa = r.contractAddress || full?.contract_address;
+            const needsScore = !(full?.composite_score || r.compositeScore);
+            if (det && targetCa && needsScore) {
+              _showScoringSpinner(det);
+              try {
+                const r2 = await fetch('/api/score-now/'+encodeURIComponent(targetCa), {
+                  method: 'POST',
+                  signal: AbortSignal.timeout(45000),
+                });
+                const d2 = await r2.json();
+                if (d2?.ok && d2.candidate) {
+                  det.innerHTML = buildAuditDetail(normalizeCandidate(d2.candidate));
+                  det.scrollTop = 0;
+                } else { _hideScoringSpinner(); }
+              } catch (e) { _hideScoringSpinner(); }
             }
           })();
         }
@@ -7843,7 +7859,7 @@ async function _mobileLoadDetail(opts){
   if(!full && ca){
     try{ const d = await apiFetch('/api/external/token/'+encodeURIComponent(ca)); if(d && d.ok && d.candidate) full = d.candidate; }catch(e){}
   }
-  // 5. Last resort: render with whatever the row already has
+  // Render whatever we have first (so the user sees market data immediately)
   const dataToRender = full ? normalizeCandidate(full) : (seed ? (seed._normalized ? seed : normalizeCandidate(seed)) : null);
   if(dataToRender){
     content.innerHTML = buildAuditDetail(dataToRender);
@@ -7851,7 +7867,43 @@ async function _mobileLoadDetail(opts){
     content.innerHTML = '<div class="empty-state" style="padding:40px"><div class="empty-icon">❌</div><div>Analysis not available</div></div>';
   }
   content.scrollTop = 0;
+
+  // ── ON-DEMAND SCORING — if the loaded candidate has no real composite_score,
+  //    fire /api/score-now/:ca and re-render when it returns. The user sees
+  //    the layout immediately, then the scores fill in within seconds.
+  const targetCa = ca || full?.contract_address || full?.contractAddress;
+  const compositeMissing = !dataToRender?.compositeScore;
+  if (targetCa && compositeMissing) {
+    _showScoringSpinner(content);
+    try {
+      const r = await fetch('/api/score-now/'+encodeURIComponent(targetCa), {
+        method: 'POST',
+        signal: AbortSignal.timeout(45000),
+      });
+      const d = await r.json();
+      if (d?.ok && d.candidate) {
+        content.innerHTML = buildAuditDetail(normalizeCandidate(d.candidate));
+        content.scrollTop = 0;
+      } else if (d?.error) {
+        _hideScoringSpinner();
+        console.warn('[score-now]', d.error);
+      }
+    } catch (err) {
+      _hideScoringSpinner();
+      console.warn('[score-now] fetch failed', err.message);
+    }
+  }
 }
+
+function _showScoringSpinner(container){
+  if (!container || document.getElementById('scoreNowSpinner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'scoreNowSpinner';
+  banner.style.cssText = 'position:sticky;top:0;z-index:5;background:linear-gradient(90deg,rgba(0,230,118,0.18),rgba(24,255,255,0.12));border-bottom:1px solid rgba(0,230,118,0.3);padding:8px 14px;font-family:var(--mono);font-size:9px;color:var(--green);letter-spacing:1.5px;display:flex;align-items:center;gap:8px';
+  banner.innerHTML = '<div class="spin-dot" style="background:var(--green);width:6px;height:6px;border-radius:50%;animation:pulse 0.8s ease-in-out infinite"></div> ⚡ SCORING LIVE — full breakdown loading...';
+  container.insertBefore(banner, container.firstChild);
+}
+function _hideScoringSpinner(){ document.getElementById('scoreNowSpinner')?.remove(); }
 
 function _mobileOpenModal(){
   const modal = document.getElementById('auditMobileModal');
