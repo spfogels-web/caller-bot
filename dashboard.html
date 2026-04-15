@@ -7582,19 +7582,44 @@ async function showWalletModal(address){
   const w=statsData?.dbRecord||extData?.dbRecord||{};
   const p=statsData?.inMemory||{};
   const s=extData?.stats||{};
+  const h=extData?.helius||{};   // ← NEW: SOL balance + Helius swap data
   const catColors={WINNER:'var(--gold)',SMART_MONEY:'var(--blue)',MOMENTUM:'var(--cyan)',SNIPER:'var(--orange)',CLUSTER:'var(--red)',RUG:'var(--red)'};
   const cat=w.category||p.category||'NEUTRAL';
   const col=catColors[cat]||'var(--text3)';
-  // Prefer live Solscan stats if the DB record hasn't been re-enriched yet
-  const winRateVal = w.win_rate ?? s.winRate ?? p.winRate10x ?? null;
+  const recentTokens  = extData?.recentTokens || [];
+
+  // ── Compute fallback metrics from Helius data when Solscan is empty ───
+  // recentTokens comes from whichever source populated it (Solscan or Helius).
+  // Win rate = wins / (wins + losses) across tokens that overlap our DB with a resolved outcome.
+  const resolvedInDb = recentTokens.filter(t => t.outcome === 'WIN' || t.outcome === 'LOSS');
+  const heliusWins   = recentTokens.filter(t => t.outcome === 'WIN').length;
+  const heliusLosses = recentTokens.filter(t => t.outcome === 'LOSS').length;
+  const heliusWinRate = resolvedInDb.length ? heliusWins / resolvedInDb.length : null;
+  const heliusInDb    = recentTokens.filter(t => t.inOurDb).length;
+
+  // Prefer: DB record → Solscan stats → Helius-derived → in-memory profile
+  const winRateVal = w.win_rate ?? s.winRate ?? heliusWinRate ?? p.winRate10x ?? null;
   const wr = winRateVal != null ? Math.round(winRateVal*100)+'%' : '—';
   const score = w.score || s.score || p.score || 0;
   const roiVal = w.avg_roi ?? s.avgRoi ?? null;
   const roi = roiVal != null ? (roiVal >= 0 ? '+' : '') + Math.round(roiVal*100) + '%' : '—';
-  const transferCount = s.transferCount ?? w.trade_count ?? null;
-  const overlapCount  = s.overlapCount ?? null;
+  const transferCount = s.transferCount ?? w.trade_count ?? h.swapCount ?? null;
+  const overlapCount  = s.overlapCount ?? heliusInDb ?? null;
+  const resolvedCount = s.decided ?? (resolvedInDb.length || null);
+  const winsDisplay   = (w.wins_found_in || heliusWins || 0);
   const apps = statsData?.appearances || extData?.appearances || [];
-  const recentTokens  = extData?.recentTokens || [];
+
+  // SOL balance bar — shown prominently if we have it
+  const solBalance  = h.solBalance != null ? Number(h.solBalance) : null;
+  const solBalanceTxt = solBalance == null ? null
+    : solBalance >= 1000 ? (solBalance/1000).toFixed(2) + 'K SOL'
+    : solBalance >= 1    ? solBalance.toFixed(2) + ' SOL'
+    : solBalance.toFixed(4) + ' SOL';
+  const solBalanceCol = solBalance == null ? 'var(--text3)'
+    : solBalance >= 100 ? 'var(--gold)'
+    : solBalance >= 10  ? 'var(--green)'
+    : solBalance >= 1   ? 'var(--cyan)' : 'var(--text3)';
+  const solEmoji = solBalance >= 100 ? '🐋' : solBalance >= 10 ? '💎' : '◎';
   const modal=document.createElement('div');
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
   modal.onclick=function(ev){if(ev.target===modal)modal.remove();};
@@ -7609,29 +7634,45 @@ async function showWalletModal(address){
       '</div>'+
       '<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="background:transparent;border:1px solid var(--border);color:var(--text3);border-radius:4px;padding:5px 10px;cursor:pointer;font-family:var(--mono);font-size:10px;flex-shrink:0;margin-left:10px">✕</button>'+
     '</div>'+
+    // ── SOL BALANCE banner — the most important quick-look metric ────────
+    (solBalanceTxt
+      ? '<div style="padding:10px 16px;border-bottom:1px solid var(--border);background:linear-gradient(90deg,rgba(68,138,255,0.08),rgba(0,230,118,0.04));display:flex;align-items:center;justify-content:space-between">'+
+          '<div style="display:flex;align-items:center;gap:10px">'+
+            '<span style="font-size:20px">'+solEmoji+'</span>'+
+            '<div>'+
+              '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">SOL BALANCE</div>'+
+              '<div style="font-family:\'Orbitron\',var(--mono),monospace;font-size:20px;font-weight:900;color:'+solBalanceCol+';letter-spacing:0.5px">'+solBalanceTxt+'</div>'+
+            '</div>'+
+          '</div>'+
+          '<div style="text-align:right">'+
+            '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">RECENT SWAPS</div>'+
+            '<div style="font-family:var(--mono);font-size:14px;font-weight:700;color:'+(h.swapCount>=10?'var(--green)':h.swapCount>0?'var(--cyan)':'var(--text3)')+'">'+(h.swapCount!=null?h.swapCount:'—')+'</div>'+
+          '</div>'+
+        '</div>'
+      : '')+
     // Top row: user-facing score stats (can be — when DB still young)
     '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:16px;border-bottom:1px solid var(--border)">'+
       '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:4px">SCORE</div><div style="font-family:var(--mono);font-size:22px;font-weight:900;color:'+col+'">'+score+'</div></div>'+
       '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:4px">WIN RATE</div><div style="font-family:var(--mono);font-size:22px;font-weight:900;color:var(--gold)">'+wr+'</div></div>'+
       '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:4px">AVG ROI</div><div style="font-family:var(--mono);font-size:22px;font-weight:900;color:var(--green)">'+roi+'</div></div>'+
-      '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:4px">OUR WINS</div><div style="font-family:var(--mono);font-size:22px;font-weight:900;color:'+(w.wins_found_in>0?'var(--green)':'var(--text3)')+'">'+( w.wins_found_in||0)+'</div></div>'+
+      '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:4px">OUR WINS</div><div style="font-family:var(--mono);font-size:22px;font-weight:900;color:'+(winsDisplay>0?'var(--green)':'var(--text3)')+'">'+winsDisplay+'</div></div>'+
     '</div>'+
     // Second row: LIVE SOLSCAN activity — this is the REAL data we have,
     // even when our audit_archive is sparse
     '<div style="padding:12px 16px;border-bottom:1px solid var(--border);background:rgba(24,255,255,0.03)">'+
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'+
-        '<div style="font-family:var(--mono);font-size:8px;color:var(--cyan);letter-spacing:1.5px;font-weight:700">🛰 LIVE SOLSCAN ACTIVITY</div>'+
-        (extData?.source ? '<span style="font-family:var(--mono);font-size:7px;color:var(--text3)">'+esc(extData.source)+'</span>' : '')+
+        '<div style="font-family:var(--mono);font-size:8px;color:var(--cyan);letter-spacing:1.5px;font-weight:700">🛰 LIVE WALLET ACTIVITY</div>'+
+        (extData?.source ? '<span style="font-family:var(--mono);font-size:7px;color:var(--text3)">source: '+esc(extData.source)+'</span>' : '')+
       '</div>'+
       '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">'+
-        '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:8px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:3px">TRANSFERS (90d)</div><div style="font-family:var(--mono);font-size:17px;font-weight:800;color:'+(transferCount>0?'var(--cyan)':'var(--text3)')+'">'+(transferCount!=null?transferCount.toLocaleString():'—')+'</div></div>'+
-        '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:8px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:3px">OUR TOKEN OVERLAP</div><div style="font-family:var(--mono);font-size:17px;font-weight:800;color:'+(overlapCount>0?'var(--green)':'var(--text3)')+'">'+(overlapCount!=null?overlapCount:'—')+'</div></div>'+
-        '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:8px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:3px">RESOLVED</div><div style="font-family:var(--mono);font-size:17px;font-weight:800;color:var(--text1)">'+(s.decided!=null?s.decided:'—')+'</div></div>'+
+        '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:8px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:3px">RECENT SWAPS / TRANSFERS</div><div style="font-family:var(--mono);font-size:17px;font-weight:800;color:'+(transferCount>0?'var(--cyan)':'var(--text3)')+'">'+(transferCount!=null?transferCount.toLocaleString():'—')+'</div></div>'+
+        '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:8px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:3px">OVERLAP WITH OUR CALLS</div><div style="font-family:var(--mono);font-size:17px;font-weight:800;color:'+(overlapCount>0?'var(--green)':'var(--text3)')+'">'+(overlapCount!=null?overlapCount:'—')+'</div></div>'+
+        '<div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:8px;text-align:center"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:3px">RESOLVED (W/L)</div><div style="font-family:var(--mono);font-size:17px;font-weight:800;color:var(--text1)">'+(resolvedCount!=null?resolvedCount:'—')+'</div></div>'+
       '</div>'+
-      (!transferCount && !overlapCount
-        ? '<div style="font-family:var(--mono);font-size:8px;color:var(--orange);margin-top:8px;letter-spacing:0.5px">⚠ Solscan returned no transfer history — wallet may be new, inactive, or Solscan rate-limited. Check Railway logs.</div>'
-        : s.decided === 0
-        ? '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:8px;line-height:1.4">💡 This wallet has traded '+transferCount+' times recently, but none of those tokens are in our audit_archive yet with a WIN/LOSS outcome. As more of our promoted calls resolve, the WIN RATE and SCORE above will populate automatically on the next 6h enrichment cycle.</div>'
+      (!transferCount && !overlapCount && !solBalance
+        ? '<div style="font-family:var(--mono);font-size:8px;color:var(--orange);margin-top:8px;letter-spacing:0.5px">⚠ No wallet history found — wallet is brand new, inactive, or RPC timed out.</div>'
+        : resolvedCount === 0 || resolvedCount == null
+        ? '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:8px;line-height:1.4">💡 This wallet has traded '+(transferCount||0)+' times recently, but none of those tokens are in our audit_archive yet with a WIN/LOSS outcome. As more of our calls resolve, the WIN RATE and SCORE above will populate on the next 6h enrichment cycle.</div>'
         : '')+
     '</div>'+
     // ── RECENT TOKEN ACTIVITY — the real alpha, from Solscan ──────────
