@@ -275,73 +275,76 @@ export function scoreWalletStructure(candidate) {
   const signals   = [];
   const penalties = [];
 
-  // v5: tightened 2h → 1h
+  // v6: leniency mode — dev %, top10, bundle, snipers, insider penalties
+  // all significantly reduced so we get posts flowing + can study outcomes.
+  // We'll tighten back once we have real WIN/LOSS data per band.
   const isVeryNew = (candidate.pairAgeHours ?? 99) < 1;
 
   const devPct = candidate.devWalletPct ?? null;
   if (devPct !== null) {
-    if      (devPct < 1)  { score += 20; signals.push(`Dev wallet ${devPct.toFixed(2)}% — extremely clean`); }
-    else if (devPct < 3)  { score += 15; signals.push(`Dev wallet ${devPct.toFixed(1)}% — healthy`); }
-    else if (devPct < 5)  { score += 8;  signals.push(`Dev wallet ${devPct.toFixed(1)}% — acceptable`); }
-    else if (devPct < 10) { score -= 10; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — elevated`); }
-    else if (devPct < 20) { score -= 25; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — dangerous`); }
-    else                  { score -= 40; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — extreme insider risk`); }
+    if      (devPct < 1)  { score += 18; signals.push(`Dev wallet ${devPct.toFixed(2)}% — extremely clean`); }
+    else if (devPct < 3)  { score += 13; signals.push(`Dev wallet ${devPct.toFixed(1)}% — healthy`); }
+    else if (devPct < 5)  { score += 7;  signals.push(`Dev wallet ${devPct.toFixed(1)}% — acceptable`); }
+    else if (devPct < 10) { score -= 5;  penalties.push(`Dev wallet ${devPct.toFixed(1)}% — elevated`); }     // was -10
+    else if (devPct < 20) { score -= 12; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — dangerous`); }   // was -25
+    else if (devPct < 50) { score -= 22; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — high insider risk`); } // was -40
+    else                  { score -= 30; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — likely pre-launch / extreme`); } // was -40 at >20
   } else {
-    // v5: mild penalty even for very new tokens — unknown dev wallet is never neutral
-    if (!isVeryNew) { score -= 5; penalties.push('Dev wallet % unknown'); }
-    else            { score -= 2; penalties.push('Dev wallet % pending'); }
+    if (!isVeryNew) { score -= 3; penalties.push('Dev wallet % unknown'); }   // was -5
+    // very new: no penalty for missing dev %
   }
 
   const top10 = candidate.top10HolderPct ?? null;
   if (top10 !== null) {
-    if      (top10 < 15)  { score += 20; signals.push(`Top10 holders ${top10.toFixed(1)}% — excellent`); }
-    else if (top10 < 25)  { score += 12; signals.push(`Top10 holders ${top10.toFixed(1)}% — healthy spread`); }
-    else if (top10 < 35)  { score += 5;  signals.push(`Top10 holders ${top10.toFixed(1)}% — moderate`); }
-    else if (top10 < 50)  { score -= 10; penalties.push(`Top10 holders ${top10.toFixed(1)}% — concentrated`); }
-    else if (top10 < 65)  { score -= 25; penalties.push(`Top10 holders ${top10.toFixed(1)}% — high risk`); }
-    else                  { score -= 40; penalties.push(`Top10 holders ${top10.toFixed(1)}% — extreme control`); }
+    if      (top10 < 15)  { score += 18; signals.push(`Top10 holders ${top10.toFixed(1)}% — excellent`); }
+    else if (top10 < 25)  { score += 11; signals.push(`Top10 holders ${top10.toFixed(1)}% — healthy spread`); }
+    else if (top10 < 35)  { score += 4;  signals.push(`Top10 holders ${top10.toFixed(1)}% — moderate`); }
+    else if (top10 < 50)  { score -= 5;  penalties.push(`Top10 holders ${top10.toFixed(1)}% — concentrated`); }  // was -10
+    else if (top10 < 65)  { score -= 12; penalties.push(`Top10 holders ${top10.toFixed(1)}% — high`); }          // was -25
+    else if (top10 < 85)  { score -= 20; penalties.push(`Top10 holders ${top10.toFixed(1)}% — very concentrated`); }
+    else                  { score -= 28; penalties.push(`Top10 holders ${top10.toFixed(1)}% — likely pre-launch`); } // was -40
   } else {
-    if (!isVeryNew) { score -= 5; penalties.push('Top10 holder % unknown'); }
+    if (!isVeryNew) { score -= 3; penalties.push('Top10 holder % unknown'); } // was -5
   }
 
   const bundle = candidate.bundleRisk ?? null;
   if (bundle && bundle !== 'PENDING') {
-    if      (bundle === 'NONE')   { score += 15; signals.push('No bundle activity'); }
-    else if (bundle === 'LOW')    { score += 5;  signals.push('Low bundle activity'); }
-    else if (bundle === 'MEDIUM') { score -= 15; penalties.push('Medium bundle risk'); }
-    else if (bundle === 'HIGH')   { score -= 30; penalties.push('High bundle risk'); }
-    else if (bundle === 'SEVERE') { score -= 45; penalties.push('SEVERE bundle risk'); }
+    if      (bundle === 'NONE')   { score += 13; signals.push('No bundle activity'); }
+    else if (bundle === 'LOW')    { score += 4;  signals.push('Low bundle activity'); }
+    else if (bundle === 'MEDIUM') { score -= 8;  penalties.push('Medium bundle risk'); }   // was -15
+    else if (bundle === 'HIGH')   { score -= 18; penalties.push('High bundle risk'); }     // was -30
+    else if (bundle === 'SEVERE') { score -= 28; penalties.push('SEVERE bundle risk'); }   // was -45
   } else if (bundle === 'PENDING') {
     signals.push('Bundle risk: indexing (too new)');
   } else {
-    if (!isVeryNew) { score -= 3; penalties.push('Bundle risk unverified'); }
+    if (!isVeryNew) { score -= 2; penalties.push('Bundle risk unverified'); } // was -3
   }
 
   const snipers = candidate.sniperWalletCount ?? null;
   if (snipers !== null) {
-    if      (snipers === 0)  { score += 10; signals.push('No sniper wallets'); }
-    else if (snipers <= 3)   { score += 3;  signals.push(`${snipers} sniper(s) — minor`); }
-    else if (snipers <= 10)  { score -= 10; penalties.push(`${snipers} sniper wallets`); }
-    else if (snipers <= 25)  { score -= 20; penalties.push(`${snipers} sniper wallets — heavy`); }
-    else                     { score -= 35; penalties.push(`${snipers} sniper wallets — extreme`); }
+    if      (snipers === 0)  { score += 9;  signals.push('No sniper wallets'); }
+    else if (snipers <= 3)   { score += 2;  signals.push(`${snipers} sniper(s) — minor`); }
+    else if (snipers <= 10)  { score -= 5;  penalties.push(`${snipers} sniper wallets`); }          // was -10
+    else if (snipers <= 25)  { score -= 12; penalties.push(`${snipers} sniper wallets — heavy`); }  // was -20
+    else                     { score -= 20; penalties.push(`${snipers} sniper wallets — extreme`); } // was -35
   }
 
   const bubble = candidate.bubbleMapRisk ?? null;
   if (bubble && bubble !== 'PENDING') {
-    if      (bubble === 'CLEAN')     { score += 15; signals.push('BubbleMap clean'); }
-    else if (bubble === 'MODERATE')  { score += 5;  signals.push('BubbleMap moderate'); }
-    else if (bubble === 'CLUSTERED') { score -= 20; penalties.push('BubbleMap clustered'); }
-    else if (bubble === 'SEVERE')    { score -= 40; penalties.push('BubbleMap SEVERE'); }
+    if      (bubble === 'CLEAN')     { score += 13; signals.push('BubbleMap clean'); }
+    else if (bubble === 'MODERATE')  { score += 4;  signals.push('BubbleMap moderate'); }
+    else if (bubble === 'CLUSTERED') { score -= 12; penalties.push('BubbleMap clustered'); }    // was -20
+    else if (bubble === 'SEVERE')    { score -= 25; penalties.push('BubbleMap SEVERE'); }       // was -40
   } else if (bubble === 'PENDING') {
     signals.push('BubbleMap: indexing (too new)');
   }
 
   const insider = candidate.insiderWalletPct ?? null;
   if (insider !== null) {
-    if      (insider < 5)  { score += 8;  signals.push(`Low insider %: ${insider.toFixed(1)}%`); }
-    else if (insider < 15) { score -= 10; penalties.push(`Insider: ${insider.toFixed(1)}%`); }
-    else if (insider < 30) { score -= 25; penalties.push(`High insider: ${insider.toFixed(1)}%`); }
-    else                   { score -= 40; penalties.push(`Extreme insider: ${insider.toFixed(1)}%`); }
+    if      (insider < 5)  { score += 7;  signals.push(`Low insider %: ${insider.toFixed(1)}%`); }
+    else if (insider < 15) { score -= 5;  penalties.push(`Insider: ${insider.toFixed(1)}%`); }     // was -10
+    else if (insider < 30) { score -= 12; penalties.push(`High insider: ${insider.toFixed(1)}%`); } // was -25
+    else                   { score -= 22; penalties.push(`Extreme insider: ${insider.toFixed(1)}%`); } // was -40
   }
 
   if (candidate.freshWalletInflows === true || candidate.freshWalletInflows === 1) {
