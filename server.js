@@ -4490,20 +4490,26 @@ app.get('/api/diagnose/killswitch', (req, res) => {
 app.get('/api/diagnose/rejections', (req, res) => {
   setCors(res);
   try {
+    // Join scanner_feed for buys_1h/sells_1h/volume_1h (those live on the feed
+     // table, not on candidates). LEFT JOIN by CA so we still return rows even
+     // when the scanner row has been aged out.
     let rejected = dbInstance.prepare(`
-      SELECT contract_address, token, composite_score, final_decision,
-             claude_risk, claude_setup_type, claude_verdict,
-             dev_wallet_pct, top10_holder_pct, mint_authority, freeze_authority, lp_locked,
-             bundle_risk, bubble_map_risk, sniper_wallet_count,
-             buys_1h, sells_1h, buy_sell_ratio_1h, volume_1h, volume_24h,
-             holders, holder_growth_24h, market_cap, liquidity, pair_age_hours,
-             trap_severity, evaluated_at
-      FROM candidates
-      WHERE final_decision IN ('IGNORE','BLOCKLIST','HOLD_FOR_REVIEW')
-        AND composite_score IS NOT NULL
-        AND evaluated_at > datetime('now', '-24 hours')
-      ORDER BY composite_score DESC, evaluated_at DESC
-      LIMIT 10
+      SELECT c.contract_address, c.token, c.composite_score, c.final_decision,
+             c.claude_risk, c.claude_setup_type, c.claude_verdict,
+             c.openai_decision, c.openai_conviction, c.openai_verdict,
+             c.dev_wallet_pct, c.top10_holder_pct, c.mint_authority, c.freeze_authority, c.lp_locked,
+             c.bundle_risk, c.bubble_map_risk, c.sniper_wallet_count,
+             sf.buys_1h, sf.sells_1h, c.buy_sell_ratio_1h, sf.volume_1h, c.volume_24h,
+             c.holders, c.holder_growth_24h, c.market_cap, c.liquidity, c.pair_age_hours,
+             c.trap_severity, c.evaluated_at
+      FROM candidates c
+      LEFT JOIN scanner_feed sf ON sf.contract_address = c.contract_address
+      WHERE c.final_decision IN ('IGNORE','BLOCKLIST','HOLD_FOR_REVIEW','WATCHLIST')
+        AND c.composite_score IS NOT NULL
+        AND c.evaluated_at > datetime('now', '-24 hours')
+      GROUP BY c.id
+      ORDER BY c.composite_score DESC, c.evaluated_at DESC
+      LIMIT 15
     `).all();
 
     // Fallback: if candidates table is empty but scanner_feed has SKIP/DEDUPED
@@ -4575,6 +4581,9 @@ app.get('/api/diagnose/rejections', (req, res) => {
           claude_risk:    r.claude_risk,
         },
         claude: r.claude_verdict ? r.claude_verdict.slice(0, 150) : null,
+        openai: r.openai_verdict ? r.openai_verdict.slice(0, 150) : null,
+        openai_decision: r.openai_decision ?? null,
+        openai_conviction: r.openai_conviction ?? null,
       };
     });
 

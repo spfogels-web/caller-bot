@@ -9563,11 +9563,15 @@ function renderRejectionAudit(data){
     if (m.mcap      != null) metricBits.push(`MCap: <b>${fmt(m.mcap,'$')}</b>`);
     if (m.age_hours != null) metricBits.push(`Age: <b>${m.age_hours < 1 ? Math.round(m.age_hours*60)+'m' : m.age_hours.toFixed(1)+'h'}</b>`);
 
+    const aiLine = s.openai
+      ? `<span style="color:var(--green)">🧠 GPT-4o${s.openai_decision?' '+esc(s.openai_decision):''}${s.openai_conviction?' '+s.openai_conviction+'%':''}:</span> ${esc(s.openai)}`
+      : (s.claude ? `<span style="color:var(--blue)">🤖 Claude:</span> ${esc(s.claude)}` : '');
     return `<div class="rej-row" onclick="openFullCandidateDetail('${esc(s.ca||'')}')">
       <div class="rej-row-token">$${esc(tok)}</div>
       <div class="rej-row-score" style="color:${scCol}">${score}</div>
       <div class="rej-row-reasons">${reasonPills || '<span style="color:var(--text3);font-size:8px">—</span>'}</div>
       <div class="rej-row-metrics">${metricBits.join(' · ')}</div>
+      ${aiLine ? `<div style="grid-column:1/-1;padding-top:6px;font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.5;border-top:1px dashed rgba(255,255,255,0.06);margin-top:4px">${aiLine}</div>` : ''}
     </div>`;
   }).join('');
 }
