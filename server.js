@@ -123,10 +123,10 @@ let heliusListener = null;
 let learningLoopHandles = null;
 
 // v8 pipeline timing budget (ms)
-const PIPELINE_BUDGET_MS  = 55_000; // 55s total (must post or pass within this window)
-const CLAUDE_TIMEOUT_MS   = 20_000;
-const OPENAI_TIMEOUT_MS   = 15_000;
-const ENRICHMENT_TIMEOUT  = 10_000;
+const PIPELINE_BUDGET_MS  = 35_000; // tightened 55→35s — speed is the edge
+const CLAUDE_TIMEOUT_MS   = 12_000; // tightened 20→12s
+const OPENAI_TIMEOUT_MS   = 10_000; // tightened 15→10s
+const ENRICHMENT_TIMEOUT  = 6_000;  // tightened 10→6s — fail fast on slow APIs, score with partial data
 
 // Pre-bonding detection: pump.fun tokens before PumpSwap migration
 const PREBOND_MAX_MCAP    = 69_000;   // pump.fun completes at ~$69K
@@ -2854,10 +2854,11 @@ async function runAutoCallerCycle() {
 
       const enriched = await enrichCandidates(uniqueCandidates, 500);
 
-      // Bumped from 3 → 8. Scoring is CPU-bound and fast; the old batch of 3
-      // throttled throughput to ~0.3 tok/s when scanner found 50+ candidates.
-      // 8 gets us ~1 tok/s while still bounding concurrent Birdeye/Helius calls.
-      const PROCESS_BATCH = 8;
+      // Bumped 8 → 16. With tightened ENRICHMENT_TIMEOUT (6s) and faster
+      // Claude/OpenAI timeouts, we can sustain higher concurrency without
+      // overwhelming downstream APIs. Speed is the edge — score in seconds,
+      // not minutes.
+      const PROCESS_BATCH = 16;
       for (let i = 0; i < enriched.length; i += PROCESS_BATCH) {
         const batch = enriched.slice(i, i + PROCESS_BATCH);
         await Promise.all(batch.map(candidate => processCandidate(candidate, false)));
@@ -6108,15 +6109,21 @@ app.listen(PORT, async () => {
       console.log(`[helius] ⚡ Fast-track candidate: $${candidate.token ?? '?'} (${candidate.stage}) from ${candidate.source}`);
       logEvent('INFO', 'HELIUS_CANDIDATE', `${candidate.token ?? candidate.contractAddress?.slice(0,8)} stage=${candidate.stage}`);
 
-      try {
-        // Enrich immediately — don't wait for next scan cycle
-        const enriched = await enrichCandidate(candidate);
-        enriched._discoveredAt = Date.now();
-        enriched._fastTrack = true;
-        await processCandidate(enriched, false);
-      } catch (err) {
-        console.warn(`[helius] Fast-track failed for ${candidate.contractAddress?.slice(0,8)}: ${err.message}`);
-      }
+      // FIRE-AND-FORGET — don't await. Each new token launches its own
+      // async pipeline so Helius events don't queue serially behind a slow
+      // enrichment. The handler returns immediately, freeing the listener
+      // to accept the next token.
+      const detectedAt = Date.now();
+      (async () => {
+        try {
+          const enriched = await enrichCandidate(candidate);
+          enriched._discoveredAt = detectedAt;
+          enriched._fastTrack = true;
+          await processCandidate(enriched, false);
+        } catch (err) {
+          console.warn(`[helius] Fast-track failed for ${candidate.contractAddress?.slice(0,8)}: ${err.message}`);
+        }
+      })().catch(() => {}); // swallow unhandled
     });
 
     heliusListener.on('connected', () => {
