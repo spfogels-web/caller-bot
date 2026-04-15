@@ -2092,21 +2092,11 @@ async function processCandidate(candidate, isRescan = false) {
   // otherwise stamp now as the point at which processing begins.
   const detectedAtMs = candidate._discoveredAt ?? Date.now();
 
-  // ── PRE-SCORE GATE: skip zero-activity tokens ────────────────────────
-  // Catches pre-launch / just-created tokens where dev holds 100% simply
-  // because nobody has bought yet. These waste pipeline cycles AND always
-  // trip the EXTREME-risk gate (dev=100%), so every one gets BLOCKLISTED
-  // for no useful reason. Rescans will pick them up once buys appear.
-  const hasActivity = (candidate.buys1h ?? candidate.buys_1h ?? 0) > 0
-                   || (candidate.volume1h ?? candidate.volume_1h ?? 0) > 100
-                   || (candidate.holders ?? 0) > 2;
-  const isDeadOnArrival = !hasActivity && (candidate.pairAgeHours ?? 0) > 0.02; // >1.2 min without any buys
-  if (isDeadOnArrival && !isRescan) {
-    console.log(`[auto-caller] skip zero-activity: ${candidate.token ?? ca.slice(0,8)} (no buys, no volume)`);
-    // Re-queue for watchlist rescan so we catch it once trading starts
-    try { addToWatchlist && addToWatchlist(candidate); } catch {}
-    return;
-  }
+  // Pre-score activity gate was removed — it was blocking fast-track
+  // detections because Birdeye hasn't populated buys1h/volume1h on
+  // brand-new pairs yet. We need scoring to actually run so we get posts.
+  // The bonding-curve-filter fix in enricher.js already handles the
+  // pre-launch "dev = 100%" false positive at the data level.
 
   try {
     const isVeryNew = (candidate.pairAgeHours ?? 99) < 1;
