@@ -535,6 +535,13 @@ function runMigrations() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_crosschain_sol ON crosschain_matches(sol_contract)`,
     `DELETE FROM crosschain_matches WHERE detected_at < datetime('now', '-7 days')`,
+    // ── OpenAI final-authority decision columns ──
+    `ALTER TABLE candidates ADD COLUMN openai_decision TEXT`,
+    `ALTER TABLE candidates ADD COLUMN openai_conviction INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN openai_verdict TEXT`,
+    `ALTER TABLE candidates ADD COLUMN openai_agrees_with_claude INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN openai_raw TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_candidates_openai ON candidates(openai_decision)`,
   ];
 
   let added = 0;
@@ -584,7 +591,8 @@ export function insertCandidate(data) {
       breakout_score, recovery_score, holder_dist_score,
       fresh_wallet_inflows, bundle_risk_helius,
       bot_source, sltp,
-      narrative_tags, candidate_type, quick_score, pair_address
+      narrative_tags, candidate_type, quick_score, pair_address,
+      openai_decision, openai_conviction, openai_verdict, openai_agrees_with_claude, openai_raw
     ) VALUES (
       @token, @contract_address, @chain,
       @market_cap, @liquidity, @volume_24h, @price_usd, @pair_age_hours,
@@ -611,7 +619,8 @@ export function insertCandidate(data) {
       @breakout_score, @recovery_score, @holder_dist_score,
       @fresh_wallet_inflows, @bundle_risk_helius,
       @bot_source, @sltp,
-      @narrative_tags, @candidate_type, @quick_score, @pair_address
+      @narrative_tags, @candidate_type, @quick_score, @pair_address,
+      @openai_decision, @openai_conviction, @openai_verdict, @openai_agrees_with_claude, @openai_raw
     )
   `);
 
@@ -710,6 +719,13 @@ export function insertCandidate(data) {
     candidate_type:             data.candidateType             ?? null,
     quick_score:                data.quickScore                ?? null,
     pair_address:               data.pairAddress               ?? null,
+    openai_decision:            data.openaiDecision            ?? null,
+    openai_conviction:          data.openaiConviction          ?? null,
+    openai_verdict:             data.openaiVerdict             ?? null,
+    openai_agrees_with_claude:  data.openaiAgreesWithClaude === true  ? 1
+                              : data.openaiAgreesWithClaude === false ? 0
+                              : null,
+    openai_raw:                 data.openaiRaw                 ?? null,
   });
 
   return result.lastInsertRowid;
