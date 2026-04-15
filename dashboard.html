@@ -2557,6 +2557,84 @@ body::before {
 .bsr-loading-dot:nth-child(3) { background: var(--gold); animation-delay: 0.4s; }
 
 /* ═══════════════════════════════════════════════════
+   📱 MOBILE POLISH — recent additions + pre-existing gaps
+   ═══════════════════════════════════════════════════ */
+@media (max-width: 900px) {
+  /* Calls tab sections */
+  .calls-section { padding: 10px 12px; margin-bottom: 10px; }
+  .calls-section-hdr { font-size: 10px; letter-spacing: 1.5px; padding-bottom: 6px; margin-bottom: 8px; }
+  .calls-section-sub { display: none; }          /* hide sub-label — redundant on small screen */
+  .calls-grid-promoted { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .promo-card { padding: 8px 10px; }
+  .promo-card-token { font-size: 12px; }
+  .promo-card-score { font-size: 16px; }
+
+  /* Live Intelligence feed */
+  .live-intel { padding: 8px 12px; margin-bottom: 10px; }
+  .li-title { font-size: 10px; letter-spacing: 2px; }
+  .li-sub { display: none; }
+  .li-feed { max-height: 90px; }
+  .li-event { font-size: 8px; padding: 3px 6px; }
+  .li-event .li-time { width: 42px; font-size: 6px; }
+
+  /* Brain Analyzer (Smart Money tab) — stack hero vertically */
+  .brain-top { flex-direction: column; align-items: center; text-align: center; gap: 10px; }
+  .brain-visual { width: 90px; height: 90px; }
+  .brain-orb { width: 56px; height: 56px; }
+  .brain-emoji { font-size: 28px; }
+  .brain-ring-1 { width: 72px; height: 72px; }
+  .brain-ring-2 { width: 82px; height: 82px; }
+  .brain-ring-3 { width: 90px; height: 90px; }
+  .brain-title { font-size: 13px; justify-content: center; flex-wrap: wrap; gap: 6px; }
+  .brain-input-row { flex-direction: column; }
+  .brain-analyze-btn { width: 100%; }
+  .brain-stages { gap: 4px; }
+
+  /* Wallet Intel Scanner — same treatment */
+  .ws-top { flex-direction: column; align-items: center; text-align: center; gap: 10px; }
+  .ws-visual { width: 90px; height: 90px; }
+  .ws-orb { width: 56px; height: 56px; }
+  .ws-orb-icon { font-size: 26px; }
+  .ws-title { font-size: 13px; justify-content: center; flex-wrap: wrap; }
+  .ws-scan-any { flex-direction: column; padding: 8px; }
+  .ws-scan-any-input { width: 100%; }
+  .ws-actions { justify-content: center; }
+
+  /* Performance chart — reclaim label width */
+  .perf-bar-label { width: 70px; font-size: 8px; }
+  .perf-bar-value { width: 48px; font-size: 9px; }
+
+  /* Rejection audit — summary chips smaller */
+  .rej-summary { padding: 6px 8px; gap: 4px; }
+  .rej-reason-chip { font-size: 7px; padding: 2px 6px; }
+  .rej-reason-chip b { font-size: 8px; }
+
+  /* Analyzer row — already has its own breakpoint at 700px, but reinforce */
+  .analyzer-feed { gap: 4px; }
+
+  /* Header tab bar — allow horizontal scroll on very narrow */
+  .header-tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+  .header-tabs::-webkit-scrollbar { display: none; }
+
+  /* Pros / Cons 2-col block in detail view — stack on mobile */
+  .au-pros-cons-grid { grid-template-columns: 1fr !important; gap: 6px !important; }
+
+  /* Overall detail modal — a hair smaller padding */
+  .audit-modal-content { padding: 0; }
+}
+
+@media (max-width: 520px) {
+  /* Smallest screens: further compact */
+  .calls-grid-promoted { grid-template-columns: 1fr; }
+  .calls-section-hdr { font-size: 9px; }
+  .brain-stages { grid-template-columns: repeat(3, 1fr); }
+  .ws-stats { grid-template-columns: 1fr 1fr; }
+  .rs-grid { grid-template-columns: 1fr 1fr; }
+  .li-badge { font-size: 7px; padding: 2px 6px; }
+  .li-toggle { font-size: 7px; padding: 3px 7px; }
+}
+
+/* ═══════════════════════════════════════════════════
    📞 CALLS page — PROMOTED + CALLED sections + perf chart
    ═══════════════════════════════════════════════════ */
 .calls-section {
