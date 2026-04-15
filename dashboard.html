@@ -9311,26 +9311,27 @@ async function loadCallsTab(){
     .slice(0, 24);
   renderPromotedSection(promoted, calledCAs);
 
-  // Analyzer feed — union of fully-scored candidates + scanner_feed quick-scores
-  // so we always see every coin the pipeline has touched, not just ones that
-  // made it through full scoring.
-  const scoredCAs = new Set((scored?.rows || []).map(r => r.contract_address));
-  const feedRowsForAnalyzer = (scanner?.rows || [])
-    .filter(r => r.contract_address && !scoredCAs.has(r.contract_address) && (r.quick_score ?? 0) > 0)
-    .map(r => ({
-      contract_address: r.contract_address,
-      token: r.token,
-      composite_score: r.quick_score,     // treat quick_score as the working score
-      final_decision: (r.filter_action === 'PROMOTE' ? 'PENDING' : r.filter_action || 'PENDING'),
-      claude_risk: null,
-      claude_verdict: r.filter_reason || null,
-      bundle_risk: null,
-      sniper_wallet_count: null,
-      dev_wallet_pct: null,
-      evaluated_at: r.scanned_at,
-      _source: 'quick',  // flag so renderer shows '[QUICK]' badge
-    }));
-  const analyzerUnion = [...(scored?.rows || []).map(r => ({...r, _source: 'full'})), ...feedRowsForAnalyzer];
+  // Analyzer feed — combine fully-scored candidates + ALL scanner_feed rows
+  // (including duplicates). Dedupe by CA in render, preferring full over quick.
+  const fullRows = (scored?.rows || []).map(r => ({ ...r, _source: 'full' }));
+  const quickRows = (scanner?.rows || []).map(r => ({
+    contract_address: r.contract_address,
+    token: r.token,
+    composite_score: null,                  // no full score yet
+    quick_score: r.quick_score,             // keep the quick score for display
+    final_decision: r.filter_action || 'PENDING',
+    claude_risk: null,
+    claude_verdict: r.filter_reason || null,
+    bundle_risk: null,
+    sniper_wallet_count: null,
+    dev_wallet_pct: null,
+    evaluated_at: r.scanned_at,
+    _source: 'quick',
+  }));
+  // Prefer full-scored over quick for same CA
+  const seen = new Set(fullRows.map(r => r.contract_address));
+  const analyzerUnion = [...fullRows, ...quickRows.filter(r => !seen.has(r.contract_address))];
+  console.log('[loadCallsTab] analyzer union:', analyzerUnion.length, 'full:', fullRows.length, 'quick:', quickRows.length);
   renderAnalyzerFeed(analyzerUnion, calledCAs);
 
   // Rejection audit — last 10 rejections with reason breakdown
@@ -9562,21 +9563,32 @@ function renderRejectionAudit(data){
 }
 
 // ─── Analyzer YES/NO verdicts ─────────────────────────────────────────
-// For each scored candidate, decide whether the bot would/did call it and
-// WHY, pulling reasons from Claude + scorer signals. Shows the 20 most
-// recent scored candidates.
+// Shows EVERY row with any score (composite OR quick) so the section is
+// never empty when the pipeline has any activity at all.
 function renderAnalyzerFeed(scoredRows, calledCAs){
   const el = document.getElementById('analyzerFeed');
   if (!el) return;
-  // Only rows with a real composite_score — exclude pre-score entries
-  const rows = scoredRows
-    .filter(r => r.composite_score != null && r.composite_score > 0)
-    .sort((a, b) => new Date(b.evaluated_at || 0).getTime() - new Date(a.evaluated_at || 0).getTime())
-    .slice(0, 20);
+  console.log('[analyzer] rows received:', scoredRows?.length || 0, scoredRows?.[0]);
+
+  // Accept rows with any positive score (composite OR quick). Previous filter
+  // was too strict and hid valid scanner_feed evaluations.
+  const rows = (scoredRows || [])
+    .filter(r => r && r.contract_address && (Number(r.composite_score) > 0 || Number(r.quick_score) > 0))
+    .map(r => ({
+      ...r,
+      composite_score: Number(r.composite_score) > 0 ? Number(r.composite_score) : Number(r.quick_score || 0),
+    }))
+    .sort((a, b) => {
+      const ta = new Date(a.evaluated_at || a.scanned_at || a.created_at || 0).getTime();
+      const tb = new Date(b.evaluated_at || b.scanned_at || b.created_at || 0).getTime();
+      return tb - ta;
+    })
+    .slice(0, 25);
 
   setText('analyzerCount', rows.length);
+  const receivedCount = scoredRows?.length || 0;
   if (!rows.length) {
-    el.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">No analyzer decisions yet — waiting for scored candidates.</div>';
+    el.innerHTML = `<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">No analyzer decisions yet. <span style="color:var(--orange)">(raw input: ${receivedCount} rows — if scanner-feed has data but this is 0, something is blocking render)</span></div>`;
     return;
   }
 
