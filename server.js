@@ -93,7 +93,7 @@ const {
   ADMIN_TELEGRAM_ID,
   PORT              = 3000,
   NODE_ENV          = 'development',
-  MIN_SCORE_TO_POST = 50,
+  MIN_SCORE_TO_POST = 42,
   SCAN_INTERVAL_MS  = 90 * 1000,
 } = process.env;
 
@@ -1179,9 +1179,11 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   const setupCheck = candidate.setupType ?? candidate.claudeSetupType ?? '';
   if (setupCheck === 'EXTENDED_AVOID') return 'IGNORE';
 
-  // User direction: lowered 58 → 50 so we actually get posts and have
-  // data to study. Can tighten again once we see what's coming through.
-  const adjustedThreshold = Math.max(50, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
+  // User direction: lowered 50 → 42 because nothing was clearing the risk
+  // gate. Most high-scoring coins currently get risk=EXTREME due to dev%
+  // or bundle flags, which blocks AUTO_POST. Lowering the floor exposes
+  // more borderline-but-clean coins that can actually post.
+  const adjustedThreshold = Math.max(42, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
 
   if (scorerDecision === 'RETEST')    return 'RETEST';
   if (scorerDecision === 'WATCHLIST') return 'WATCHLIST';
@@ -4371,6 +4373,50 @@ app.get('/api/diagnose/posting', (req, res) => {
       },
     };
 
+    // Why-not-posted: for coins scoring >= threshold but not AUTO_POSTing,
+    // break down WHY they were blocked (EXTREME risk, BLOCKLIST decision,
+    // trap triggered, etc). This is the single most useful number when
+    // the user asks "why aren't we posting anything".
+    const whyBlocked = safeAll(`
+      SELECT final_decision, claude_risk, trap_severity, bundle_risk,
+             dev_wallet_pct, top10_holder_pct, COUNT(*) as n
+      FROM candidates
+      WHERE composite_score >= 42
+        AND final_decision != 'AUTO_POST'
+        AND evaluated_at > datetime('now', '-24 hours')
+      GROUP BY final_decision, claude_risk, trap_severity
+      ORDER BY n DESC
+      LIMIT 15
+    `);
+    const scoredButBlocked = safe(`
+      SELECT COUNT(*) as n FROM candidates
+      WHERE composite_score >= 42 AND final_decision != 'AUTO_POST'
+        AND evaluated_at > datetime('now', '-24 hours')
+    `)?.n ?? 0;
+    const extremeRiskCount = safe(`
+      SELECT COUNT(*) as n FROM candidates
+      WHERE composite_score >= 42 AND claude_risk = 'EXTREME'
+        AND evaluated_at > datetime('now', '-24 hours')
+    `)?.n ?? 0;
+    const blocklistCount = safe(`
+      SELECT COUNT(*) as n FROM candidates
+      WHERE composite_score >= 42 AND final_decision = 'BLOCKLIST'
+        AND evaluated_at > datetime('now', '-24 hours')
+    `)?.n ?? 0;
+    const trapCount = safe(`
+      SELECT COUNT(*) as n FROM candidates
+      WHERE composite_score >= 42
+        AND trap_severity IN ('HIGH','CRITICAL','SEVERE')
+        AND evaluated_at > datetime('now', '-24 hours')
+    `)?.n ?? 0;
+    checks.flow_24h.blockReasons = {
+      total_scored_42plus_not_posted: scoredButBlocked,
+      extreme_risk: extremeRiskCount,
+      blocklist: blocklistCount,
+      trap_triggered: trapCount,
+      breakdown_rows: whyBlocked,
+    };
+
     // Compose a verdict so the user sees the diagnosis at a glance
     const reasons = [];
     if (!checks.env.TELEGRAM_BOT_TOKEN_present)     reasons.push('❌ TELEGRAM_BOT_TOKEN env var missing — Telegram silently skipped');
@@ -4382,6 +4428,18 @@ app.get('/api/diagnose/posting', (req, res) => {
     }
     if (checks.flow_24h.auto_post_count > 0 && checks.flow_24h.calls_count === 0) {
       reasons.push('⚠ AUTO_POST decisions exist but NO calls in calls table — post path itself failing silently after decision');
+    }
+    // Why-blocked diagnosis
+    if (scoredButBlocked > 0) {
+      if (extremeRiskCount >= scoredButBlocked * 0.5) {
+        reasons.push(`🚫 ${extremeRiskCount}/${scoredButBlocked} scored-42+ coins blocked by EXTREME risk (usually dev % > 15 or bundle SEVERE). Risk gate is catching rugs — this is correct behavior, but means the gem quality right now is poor.`);
+      }
+      if (blocklistCount >= scoredButBlocked * 0.3) {
+        reasons.push(`⛔ ${blocklistCount}/${scoredButBlocked} hit BLOCKLIST decision (serial rugger, mint active + dev >15%, trap triggered). Scorer's hard-blocks working as intended.`);
+      }
+      if (trapCount >= scoredButBlocked * 0.3) {
+        reasons.push(`🪤 ${trapCount}/${scoredButBlocked} had HIGH/CRITICAL trap severity. Trap detector catching manipulation.`);
+      }
     }
     if (!reasons.length) reasons.push('✓ No obvious blockers found — check Railway logs for [ai-os] PAUSED or sendCallAlert errors');
 
