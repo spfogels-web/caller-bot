@@ -2622,6 +2622,7 @@ body::before {
   <!-- Desktop nav tabs — centered -->
   <nav class="header-tabs">
     <button class="htab active" onclick="switchTab('overview')"><span class="dot"></span>OVERVIEW</button>
+    <button class="htab" onclick="switchTab('calls')"><span class="dot"></span>CALLS <span class="badge" id="tb-calls-badge"></span></button>
     <button class="htab" onclick="switchTab('candidates')"><span class="dot"></span>CANDIDATES <span class="badge" id="tb-candidates-badge"></span></button>
     <button class="htab" onclick="switchTab('auditor')"><span class="dot"></span>AUDITOR <span class="badge" id="tb-auditor-badge"></span></button>
     <button class="htab" onclick="switchTab('smart')"><span class="dot"></span>SMART MONEY</button>
@@ -2641,6 +2642,7 @@ body::before {
     <!-- Mobile nav: native select dropdown - works on all mobile browsers -->
     <select class="mobile-nav-select" onchange="switchTab(this.value);this.blur()" title="Navigate">
       <option value="overview">≡ OVERVIEW</option>
+      <option value="calls">≡ CALLS</option>
       <option value="candidates">≡ CANDIDATES</option>
       <option value="auditor">≡ AUDITOR</option>
       <option value="smart">≡ SMART MONEY</option>
@@ -2833,6 +2835,45 @@ body::before {
 
     <!-- PROMOTED TAB — Full promoted feed -->
     <!-- ═══ CANDIDATES TAB ═══ -->
+    <!-- ═══════════════════════════════════════════════════════════════════════════
+         📞 CALLS TAB — simple feed of posted AUTO_POST calls with outcome
+         ═══════════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-calls">
+      <div style="padding:16px">
+        <!-- Header -->
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+          <div>
+            <div style="font-family:'Orbitron',var(--mono),monospace;font-size:20px;font-weight:900;background:linear-gradient(90deg,#00e676,#ffd740);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:2px">📞 CALLS</div>
+            <div style="font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:2px;margin-top:3px">EVERY POSTED CALL · WITH OUTCOME &amp; PEAK MULTIPLE</div>
+          </div>
+          <button onclick="loadCallsTab()" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:5px;padding:6px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">↻ REFRESH</button>
+        </div>
+
+        <!-- Summary tiles -->
+        <div class="g5" style="margin-bottom:14px">
+          <div class="tile"><div class="tile-label">TOTAL CALLS</div><div class="tile-val" id="callsTotal">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="callsWins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="callsLosses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="callsWinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="callsAvgPeak">—</div></div>
+        </div>
+
+        <!-- Filter row -->
+        <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">
+          <button class="fchip active" onclick="filterCalls(this,'all')">ALL</button>
+          <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
+          <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
+          <button class="fchip" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
+          <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
+        </div>
+
+        <!-- Calls feed -->
+        <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
+          <div style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
+        </div>
+      </div>
+    </div><!-- /calls -->
+
     <div class="tab-panel" id="tab-candidates">
 
       <!-- ALPHA LENNIX AI Chat (glowing) -->
@@ -4060,6 +4101,7 @@ function switchTab(name){
 function refreshTabData(name){
   switch(name){
     case 'overview':    loadOverview();      break;
+    case 'calls':       loadCallsTab();      break;
     case 'candidates':  loadAudit();         break;
     case 'auditor':     loadAuditor();       break;
     case 'analytics':   loadAnalytics();     break;
@@ -4523,7 +4565,10 @@ function renderAuditList(){
     var stage    = r.stage||'?';
     var isNew    = isBrandNew(r.pairAgeHours);
     var clickable = true; // Always clickable — even unscored rows open detail
-    var expanded  = !isScoring && score >= 40;
+    // User direction: candidates page should be very detailed — always
+    // show the expanded layout (sub-scores + signal chips) rather than
+    // collapsing to a 1-liner for lower scores.
+    var expanded  = !isScoring;
 
     var div = document.createElement('div');
     div.className = 'coin-row' + (clickable?' clickable':'') + (expanded?' expanded':'') + (dec==='AUTO_POST'?' promoted':'');
@@ -8543,6 +8588,106 @@ function walletChatQuick(text){
   const input = document.getElementById('walletChatInput');
   if (input) { input.value = text; input.focus(); }
   sendWalletChatMsg();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   📞 CALLS TAB — simple feed of posted calls with outcome
+   ═══════════════════════════════════════════════════════════ */
+var _callsAll = [];
+var _callsFilter = 'all';
+
+async function loadCallsTab(){
+  const feed = document.getElementById('callsFeed');
+  if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>';
+  // Use /api/archive with AUTO_POST decision — that's where every posted call lives
+  const data = await apiFetch('/api/archive?decision=AUTO_POST&limit=300');
+  if (!data || !data.ok) {
+    if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Failed to load calls.</div>';
+    return;
+  }
+  _callsAll = data.rows || [];
+  // Summary tiles
+  const wins = _callsAll.filter(c => c.outcome === 'WIN').length;
+  const losses = _callsAll.filter(c => c.outcome === 'LOSS').length;
+  const resolved = wins + losses;
+  const winRate = resolved > 0 ? Math.round(wins / resolved * 100) + '%' : '—';
+  const peaks = _callsAll.filter(c => c.peak_multiple != null && c.peak_multiple > 0).map(c => c.peak_multiple);
+  const avgPeak = peaks.length > 0 ? (peaks.reduce((a,b)=>a+b,0) / peaks.length).toFixed(2) + 'x' : '—';
+  setText('callsTotal', _callsAll.length.toLocaleString());
+  setText('callsWins', wins);
+  setText('callsLosses', losses);
+  setText('callsWinRate', winRate);
+  setText('callsAvgPeak', avgPeak);
+  setText('tb-calls-badge', _callsAll.length);
+  renderCallsFeed();
+}
+
+function filterCalls(btn, f){
+  document.querySelectorAll('#tab-calls .fchip').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  _callsFilter = f;
+  renderCallsFeed();
+}
+
+function renderCallsFeed(){
+  const feed = document.getElementById('callsFeed');
+  if (!feed) return;
+  let rows = [..._callsAll];
+  if (_callsFilter === 'WIN')     rows = rows.filter(c => c.outcome === 'WIN');
+  else if (_callsFilter === 'LOSS')    rows = rows.filter(c => c.outcome === 'LOSS');
+  else if (_callsFilter === 'PENDING') rows = rows.filter(c => !c.outcome || c.outcome === 'PENDING');
+  else if (_callsFilter === 'gem')     rows = rows.filter(c => c.market_cap >= 7500 && c.market_cap <= 40000);
+
+  if (!rows.length) {
+    feed.innerHTML = '<div style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:var(--text3)">No calls match this filter yet.</div>';
+    return;
+  }
+
+  feed.innerHTML = rows.map(r => {
+    const outcome = r.outcome || 'PENDING';
+    const outCol = outcome === 'WIN' ? 'var(--green)' : outcome === 'LOSS' ? 'var(--red)' : 'var(--text3)';
+    const outIcon = outcome === 'WIN' ? '🏆' : outcome === 'LOSS' ? '💀' : '⏳';
+    const peak = r.peak_multiple;
+    const peakTxt = peak != null ? peak.toFixed(2) + 'x' : '—';
+    const peakCol = peak >= 10 ? 'var(--gold)' : peak >= 5 ? 'var(--green)' : peak >= 2 ? 'var(--cyan)' : 'var(--text3)';
+    const score = r.composite_score || 0;
+    const scCol = scoreCol(score);
+    const mc = r.market_cap || 0;
+    const gemWin = mc >= 7500 && mc <= 40000;
+    const when = r.called_at_et || r.created_at;
+    let timeTxt = '—';
+    if (when) {
+      try {
+        const d = new Date(when.includes('ET') ? when : when + 'Z');
+        timeTxt = d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase() + ' et';
+      } catch(e) {}
+    }
+    const ca = r.contract_address || '';
+
+    return '<div onclick="openFullCandidateDetail(\'' + esc(ca) + '\')" class="call-card" style="background:linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,14,28,0.92));border:1px solid ' + outCol + '44;border-left:4px solid ' + outCol + ';border-radius:10px;padding:12px 14px;cursor:pointer;transition:all 0.15s" onmouseenter="this.style.background=\'rgba(255,255,255,0.03)\';this.style.transform=\'translateX(2px)\'" onmouseleave="this.style.background=\'linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,14,28,0.92))\';this.style.transform=\'none\'">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">' +
+            '<span style="font-family:\'Orbitron\',var(--mono),monospace;font-size:16px;font-weight:900;color:var(--text1);letter-spacing:1px">$' + esc(r.token || '?') + '</span>' +
+            '<span style="font-family:var(--mono);font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;background:' + outCol + '18;border:1px solid ' + outCol + '55;color:' + outCol + ';letter-spacing:1px">' + outIcon + ' ' + outcome + '</span>' +
+            (gemWin ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.3);color:var(--gold)">💎 GEM</span>' : '') +
+            (r.claude_risk ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(68,138,255,0.08);border:1px solid rgba(68,138,255,0.3);color:var(--blue)">🤖 ' + esc(r.claude_risk) + '</span>' : '') +
+            (r.openai_decision ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(0,230,118,0.08);border:1px solid rgba(0,230,118,0.3);color:var(--green)">🧠 ' + esc(r.openai_decision.replace('AUTO_POST','POST')) + (r.openai_conviction ? ' ' + r.openai_conviction + '%' : '') + '</span>' : '') +
+          '</div>' +
+          '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:0.5px">' +
+            'Called: <b style="color:var(--text2)">' + timeTxt + '</b>' +
+            ' · MCap at call: <b style="color:' + (gemWin ? 'var(--gold)' : 'var(--orange)') + '">' + fmt(mc,'$') + '</b>' +
+            (r.peak_mcap ? ' · Peak: <b style="color:' + peakCol + '">' + fmt(r.peak_mcap, '$') + '</b>' : '') +
+            (r.claude_setup_type ? ' · Setup: <b style="color:var(--purple)">' + esc(r.claude_setup_type.replace(/_/g,' ')) + '</b>' : '') +
+          '</div>' +
+        '</div>' +
+        '<div style="text-align:right;flex-shrink:0">' +
+          '<div style="font-family:\'Orbitron\',var(--mono),monospace;font-size:24px;font-weight:900;line-height:1;color:' + scCol + ';text-shadow:0 0 8px ' + scCol + '44">' + score + '</div>' +
+          '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-top:2px">SCORE · <span style="color:' + peakCol + ';font-weight:700">' + peakTxt + '</span> PEAK</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
 }
 
 /* ═══════════════════════════════════════════════════════════
