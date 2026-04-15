@@ -93,7 +93,7 @@ const {
   ADMIN_TELEGRAM_ID,
   PORT              = 3000,
   NODE_ENV          = 'development',
-  MIN_SCORE_TO_POST = 42,
+  MIN_SCORE_TO_POST = 35,
   SCAN_INTERVAL_MS  = 90 * 1000,
 } = process.env;
 
@@ -1179,11 +1179,12 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   const setupCheck = candidate.setupType ?? candidate.claudeSetupType ?? '';
   if (setupCheck === 'EXTENDED_AVOID') return 'IGNORE';
 
-  // User direction: lowered 50 → 42 because nothing was clearing the risk
-  // gate. Most high-scoring coins currently get risk=EXTREME due to dev%
-  // or bundle flags, which blocks AUTO_POST. Lowering the floor exposes
-  // more borderline-but-clean coins that can actually post.
-  const adjustedThreshold = Math.max(42, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
+  // Dropped further to 35. Dual-model scoring is harder than the old
+  // 4-dimension composite (missing data = partial points, not full credit),
+  // so real-world coins cluster in the 25-40 range. Lowering the floor
+  // lets us ACTUALLY post something and gather outcome data — we'd rather
+  // have noisy posts we can learn from than perfect silence.
+  const adjustedThreshold = Math.max(35, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
 
   if (scorerDecision === 'RETEST')    return 'RETEST';
   if (scorerDecision === 'WATCHLIST') return 'WATCHLIST';
@@ -4216,6 +4217,60 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ─── Score distribution diagnostic ────────────────────────────────────────
+// Breaks down every score we produced in the last 24h into buckets so the
+// user can see in one shot: "OK, 80% of scores are 25-40 → threshold of 50
+// will never fire. Drop it to 35."
+app.get('/api/diagnose/distribution', (req, res) => {
+  setCors(res);
+  try {
+    const dist = dbInstance.prepare(`
+      SELECT
+        SUM(CASE WHEN composite_score >= 80 THEN 1 ELSE 0 END) as b80plus,
+        SUM(CASE WHEN composite_score BETWEEN 70 AND 79 THEN 1 ELSE 0 END) as b70_79,
+        SUM(CASE WHEN composite_score BETWEEN 60 AND 69 THEN 1 ELSE 0 END) as b60_69,
+        SUM(CASE WHEN composite_score BETWEEN 50 AND 59 THEN 1 ELSE 0 END) as b50_59,
+        SUM(CASE WHEN composite_score BETWEEN 40 AND 49 THEN 1 ELSE 0 END) as b40_49,
+        SUM(CASE WHEN composite_score BETWEEN 30 AND 39 THEN 1 ELSE 0 END) as b30_39,
+        SUM(CASE WHEN composite_score BETWEEN 20 AND 29 THEN 1 ELSE 0 END) as b20_29,
+        SUM(CASE WHEN composite_score < 20 THEN 1 ELSE 0 END) as bunder20,
+        SUM(CASE WHEN composite_score IS NULL THEN 1 ELSE 0 END) as bunscored,
+        COUNT(*) as total,
+        MAX(composite_score) as max_score,
+        MIN(composite_score) as min_score,
+        AVG(composite_score) as avg_score
+      FROM candidates
+      WHERE evaluated_at > datetime('now', '-24 hours')
+    `).get() || {};
+
+    const top20 = dbInstance.prepare(`
+      SELECT token, contract_address, composite_score, final_decision, claude_risk, market_cap, pair_age_hours
+      FROM candidates
+      WHERE composite_score IS NOT NULL
+        AND evaluated_at > datetime('now', '-24 hours')
+      ORDER BY composite_score DESC
+      LIMIT 20
+    `).all();
+
+    res.json({
+      ok: true,
+      currentThreshold: Math.max(35, Number(MIN_SCORE_TO_POST) || 35),
+      bucket_24h: dist,
+      top_20_scoring_24h: top20,
+      recommendation: (() => {
+        if (dist.b50_59 + dist.b60_69 + dist.b70_79 + dist.b80plus === 0) {
+          return 'Nothing is scoring 50+. Threshold of 35 or lower is the only way to get posts. Consider regime adjustments or widening scanner intake.';
+        }
+        if (dist.b50_59 + dist.b60_69 + dist.b70_79 + dist.b80plus < 5) {
+          return 'Fewer than 5 coins in 24h scored 50+. Keep threshold at 35 to get minimum post volume for learning.';
+        }
+        return 'Score distribution looks healthy. Can push threshold higher (40-45) once you have 20+ resolved outcomes.';
+      })(),
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // ─── On-demand scoring — score ANY token live when the user clicks it ─────
