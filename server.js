@@ -4063,23 +4063,30 @@ app.get('/api/external/token/:ca', async (req, res) => {
     // ── Try Solscan first ──
     if (process.env.SOLSCAN_API_KEY) {
       try {
-        const solRes = await fetch(
-          `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=100&page=1`,
-          {
-            headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' },
-            signal: AbortSignal.timeout(9_000),
-          }
-        );
-        if (solRes.ok) {
-          const solJson = await solRes.json();
-          const items = solJson?.data?.items || solJson?.data || [];
-          if (Array.isArray(items) && items.length) {
-            owners  = items.map(h => h.owner).filter(Boolean);
-            amounts = items.map(h => h.amount ?? h.uiAmount ?? null);
-            holders = items.map((h, i) => ({ address: h.address || owners[i], uiAmount: amounts[i] }));
-          }
-        } else {
-          console.warn(`[external-token] Solscan holders returned ${solRes.status}`);
+        // Solscan caps per-page; paginate up to 60 holders (3 pages of 20).
+        // 60 is the sweet spot: enough depth to see meaningful whale structure
+        // without running into rate limits on busy tokens.
+        const pageSize = 40;
+        const pagesNeeded = 2; // 40 + 20 → ~60
+        let collected = [];
+        for (let p = 1; p <= pagesNeeded; p++) {
+          const r = await fetch(
+            `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=${pageSize}&page=${p}`,
+            { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(9_000) }
+          );
+          if (!r.ok) { console.warn(`[external-token] Solscan holders page ${p} returned ${r.status}`); break; }
+          const j = await r.json();
+          const arr = j?.data?.items || j?.data || [];
+          if (!Array.isArray(arr) || arr.length === 0) break;
+          collected = collected.concat(arr);
+          if (arr.length < pageSize) break; // no more pages
+        }
+        const items = collected.slice(0, 60);
+        if (items.length) {
+          owners  = items.map(h => h.owner).filter(Boolean);
+          amounts = items.map(h => h.amount ?? h.uiAmount ?? null);
+          holders = items.map((h, i) => ({ address: h.address || owners[i], uiAmount: amounts[i] }));
+          console.log(`[external-token] Solscan holders: ${items.length} fetched across ${pagesNeeded} pages`);
         }
       } catch (err) {
         console.warn('[external-token] Solscan holders failed:', err.message);
@@ -4368,12 +4375,10 @@ app.get('/api/external/wallet/:address', async (req, res) => {
     //    fresh wallet actually show data instead of the empty "no transfer
     //    history" state.
     let heliusData = null;
-    const solscanEmpty = !stats || (
-      (stats.total_transfers ?? 0) === 0 &&
-      (stats.swap_count ?? 0) === 0 &&
-      recentTokens.length === 0
-    );
-    if (solscanEmpty && HELIUS_API_KEY) {
+    // Always run Helius — it's fast, free-tier-safe, and gives us SOL balance
+    // + recent swaps even when Solscan returns partial data. Running both in
+    // parallel would be ideal but the code path is already sequential.
+    if (HELIUS_API_KEY) {
       try {
         // SOL balance
         const balRes = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
