@@ -93,7 +93,7 @@ const {
   ADMIN_TELEGRAM_ID,
   PORT              = 3000,
   NODE_ENV          = 'development',
-  MIN_SCORE_TO_POST = 58,
+  MIN_SCORE_TO_POST = 50,
   SCAN_INTERVAL_MS  = 90 * 1000,
 } = process.env;
 
@@ -1179,9 +1179,9 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   const setupCheck = candidate.setupType ?? candidate.claudeSetupType ?? '';
   if (setupCheck === 'EXTENDED_AVOID') return 'IGNORE';
 
-  // User direction: anything scoring 58+ should AUTO_POST. We can tighten
-  // again later if it pushes too much trash. Floor raised 34 → 58.
-  const adjustedThreshold = Math.max(58, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
+  // User direction: lowered 58 → 50 so we actually get posts and have
+  // data to study. Can tighten again once we see what's coming through.
+  const adjustedThreshold = Math.max(50, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
 
   if (scorerDecision === 'RETEST')    return 'RETEST';
   if (scorerDecision === 'WATCHLIST') return 'WATCHLIST';
