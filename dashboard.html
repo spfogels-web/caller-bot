@@ -4528,6 +4528,7 @@ function filterAuditList(){
   renderAuditList();
 }
 
+let _renderedRows = {};   // CA -> row DOM element, used for in-place patching
 function renderAuditList(){
   const el=document.getElementById('auditList');
   if(!el)return;
@@ -4573,10 +4574,28 @@ function renderAuditList(){
     return;
   }
 
-  el.innerHTML='';
-  var isMobile = window.innerWidth <= 900;
+  // Partition: scored rows (real composite) vs pending rows (no score yet)
+  // Scored get the full expanded card. Pending render as a compact list so
+  // they don't dominate the view while waiting for the background scorer.
+  const scoredRows  = slice.filter(r => r.compositeScore != null && r.compositeScore > 0);
+  const pendingRows = slice.filter(r => !(r.compositeScore != null && r.compositeScore > 0));
+  const isMobile = window.innerWidth <= 900;
 
-  slice.forEach(function(r){
+  // Build scored + pending sections independently, then mount in one pass
+  // (avoids the multi-step re-render flash the user was seeing).
+  let html = '';
+  if (scoredRows.length) {
+    html += '<div class="coin-section-header" style="background:rgba(0,230,118,0.06);border-bottom:1px solid rgba(0,230,118,0.2);padding:6px 12px;font-family:var(--mono);font-size:8px;font-weight:700;color:var(--green);letter-spacing:2px;display:flex;justify-content:space-between;align-items:center">'+
+      '<span>📊 SCORED · '+scoredRows.length+'</span>'+
+      '<span style="color:var(--text3);letter-spacing:1px;font-weight:400">full analysis ready · click any row</span>'+
+    '</div>';
+  }
+  // Mount scored section
+  el.innerHTML = html;
+  // Remember which rows are currently rendered so auto-score can patch in place
+  _renderedRows = {};
+
+  scoredRows.forEach(function(r){
     // Only use the REAL composite score for the row display. quick_score
     // is a pre-screening number that often shows 100 — misleading users
     // when the real composite turns out to be 48. Show '⏳ SCORING' until
@@ -4792,7 +4811,82 @@ function renderAuditList(){
       });
     }
     el.appendChild(div);
+    if (r.contractAddress) _renderedRows[r.contractAddress] = div;
   });
+
+  // ── PENDING (unscored) SECTION — compact list ───────────────────────────
+  if (pendingRows.length) {
+    const pendHeader = document.createElement('div');
+    pendHeader.className = 'coin-section-header';
+    pendHeader.style.cssText = 'background:rgba(24,255,255,0.04);border-top:1px solid rgba(24,255,255,0.15);border-bottom:1px solid rgba(24,255,255,0.15);padding:6px 12px;font-family:var(--mono);font-size:8px;font-weight:700;color:var(--cyan);letter-spacing:2px;display:flex;justify-content:space-between;align-items:center;margin-top:8px';
+    pendHeader.innerHTML =
+      '<span>⏳ SCORING · '+pendingRows.length+'</span>'+
+      '<span style="color:var(--text3);letter-spacing:1px;font-weight:400">awaiting enrichment · scores fill in</span>';
+    el.appendChild(pendHeader);
+
+    pendingRows.forEach(function(r){
+      const tok = r.token || '?';
+      const avatarChar = (tok.replace(/[^A-Za-z0-9]/g,'').charAt(0) || '?').toUpperCase();
+      const avatarColors = ['#00e676','#18ffff','#e040fb','#ffd740','#ff6d00','#448aff','#ff1744','#9c27b0'];
+      let colorIdx = 0;
+      for (let ci=0; ci<tok.length; ci++) colorIdx = (colorIdx + tok.charCodeAt(ci)) % avatarColors.length;
+      const avatarBg = avatarColors[colorIdx];
+      const mc = r.marketCap != null ? fmt(r.marketCap,'$') : '—';
+      const age = r.pairAgeHours != null
+        ? (r.pairAgeHours < 0.083 ? '<5m' : r.pairAgeHours < 1 ? Math.round(r.pairAgeHours*60)+'m' : r.pairAgeHours.toFixed(1)+'h')
+        : '—';
+      const stage = r.stage || '?';
+
+      const div = document.createElement('div');
+      div.className = 'coin-row coin-row-pending clickable';
+      div.dataset.ca = r.contractAddress || '';
+      div.dataset.id = String(r.id || '');
+      div.style.cssText = 'padding:6px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(255,255,255,0.03);cursor:pointer;transition:background 0.1s';
+      div.innerHTML =
+        '<div style="position:relative;width:22px;height:22px;flex-shrink:0">'+
+          '<div class="coin-avatar-fallback" style="background:linear-gradient(135deg,'+avatarBg+','+avatarBg+'80);position:absolute;inset:0;width:22px;height:22px;font-size:9px">'+avatarChar+'</div>'+
+          '<img src="https://dd.dexscreener.com/ds-data/tokens/solana/'+(r.contractAddress||'')+'.png" onerror="this.remove()" style="position:absolute;inset:0;width:22px;height:22px;border-radius:50%;border:1px solid rgba(255,255,255,0.08);object-fit:cover">'+
+        '</div>'+
+        '<div style="flex:1;min-width:0;display:flex;align-items:center;gap:6px">'+
+          '<span style="font-family:var(--mono);font-size:10px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:95px">$'+esc(tok)+'</span>'+
+          '<span style="font-family:var(--mono);font-size:8px;color:var(--text3)">'+esc(stage)+' · '+mc+' · '+age+'</span>'+
+        '</div>'+
+        '<div class="score-pending" data-ca="'+esc(r.contractAddress||'')+'" style="flex-shrink:0">'+
+          '<span style="font-family:var(--mono);font-size:8px;padding:2px 7px;border-radius:3px;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.25);color:var(--cyan);letter-spacing:1px">⏳</span>'+
+        '</div>';
+
+      div.addEventListener('mouseenter', function(){ this.style.background='rgba(255,255,255,0.03)'; });
+      div.addEventListener('mouseleave', function(){ this.style.background=''; });
+      div.addEventListener('click', function(ev){
+        ev.preventDefault();
+        document.querySelectorAll('.coin-row').forEach(function(el){ el.classList.remove('selected'); el.style.background=''; });
+        div.classList.add('selected');
+        if (isMobile) { showCoinDetail(r); }
+        else {
+          const det = document.getElementById('auditDetailContent');
+          if (det) { det.innerHTML = '<div class="spinner" style="padding:40px"><div class="spin-dot" style="background:var(--cyan)"></div></div>'; }
+          if (r.contractAddress && typeof _mobileLoadDetail !== 'function') {
+            // desktop path — try to load
+            (async function(){
+              try {
+                const data = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(r.contractAddress));
+                if (data?.candidate && det) { det.innerHTML = buildAuditDetail(normalizeCandidate(data.candidate)); }
+              } catch {}
+            })();
+          } else if (r.contractAddress) {
+            (async function(){
+              try {
+                const data = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(r.contractAddress));
+                if (data?.candidate && det) { det.innerHTML = buildAuditDetail(normalizeCandidate(data.candidate)); }
+              } catch {}
+            })();
+          }
+        }
+      });
+      el.appendChild(div);
+      if (r.contractAddress) _renderedRows[r.contractAddress] = div;
+    });
+  }
 }
 
 
@@ -5835,8 +5929,14 @@ document.getElementById('promotedModal')?.addEventListener('click',e=>{if(e.targ
 function startAutoRefresh(){
   if(refreshTimer)clearInterval(refreshTimer);
   refreshTimer=setInterval(()=>{
+    // Skip refresh on candidates tab if auto-scoring is mid-flight
+    // (prevents double re-renders / flashing when rows are being patched)
+    if (currentTab === 'candidates' && _autoScoreBusy.size > 0) {
+      loadPromotedSidebar();
+      return;
+    }
     refreshTabData(currentTab);
-    loadPromotedSidebar(); // sidebar always refreshes
+    loadPromotedSidebar();
   },15000);
 }
 
@@ -8826,9 +8926,11 @@ async function autoScorePendingRows(){
     .map(el => el.dataset.ca)
     .filter(ca => ca && !_autoScoreBusy.has(ca));
   if (!pending.length) return;
-  // Take up to N at a time
   const queue = pending.slice(0, AUTO_SCORE_CONCURRENCY);
   queue.forEach(ca => _autoScoreBusy.add(ca));
+
+  // Track if anything actually scored so we only re-render once at the end
+  let anyUpdated = false;
 
   await Promise.all(queue.map(async ca => {
     try {
@@ -8837,12 +8939,29 @@ async function autoScorePendingRows(){
         signal: AbortSignal.timeout(45000),
       });
       const d = await r.json();
-      if (d?.ok && d.candidate) {
-        // Reload the candidates list so the new score slots in
-        if (typeof loadAudit === 'function') loadAudit();
+      if (d?.ok && d.candidate && d.candidate.composite_score != null) {
+        // Merge the new score into the in-memory list instead of reloading
+        const idx = allCandidatesData.findIndex(r => r.contractAddress === ca);
+        if (idx >= 0) {
+          allCandidatesData[idx] = normalizeCandidate({
+            ...d.candidate,
+            // Preserve any existing fields we had
+            ...allCandidatesData[idx],
+            compositeScore:  d.candidate.composite_score,
+            finalDecision:   d.candidate.final_decision || allCandidatesData[idx].finalDecision,
+            subScores:       d.candidate.sub_scores || allCandidatesData[idx].subScores,
+          });
+          anyUpdated = true;
+        }
       }
     } catch {} finally { _autoScoreBusy.delete(ca); }
   }));
+
+  // Single debounced re-render when the whole batch finishes — this is the
+  // ONLY time the list updates, instead of flashing on every /api/score-now
+  if (anyUpdated && currentTab === 'candidates') {
+    renderAuditList();
+  }
 }
 
 // Run auto-scoring on an interval whenever the candidates tab is open
