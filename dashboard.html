@@ -2557,6 +2557,100 @@ body::before {
 .bsr-loading-dot:nth-child(3) { background: var(--gold); animation-delay: 0.4s; }
 
 /* ═══════════════════════════════════════════════════
+   📡 LIVE INTELLIGENCE — real-time pipeline event feed
+   ═══════════════════════════════════════════════════ */
+.live-intel {
+  position: relative;
+  background:
+    radial-gradient(ellipse at top left, rgba(0,230,118,0.1) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(4,6,11,0.97), rgba(8,14,28,0.95));
+  border: 1px solid rgba(0,230,118,0.3);
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.live-intel::before {
+  content: ''; position: absolute; top:0; left:0; right:0; height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(0,230,118,0.7), rgba(24,255,255,0.5), rgba(255,215,64,0.4), transparent);
+  animation: brainScanLine 3s ease-in-out infinite;
+}
+.li-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+.li-pulse {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 10px var(--green);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.li-title {
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 11px; font-weight: 900; letter-spacing: 2.5px;
+  background: linear-gradient(90deg, #00e676, #18ffff, #ffd740);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.li-sub { font-family: var(--mono); font-size: 8px; color: var(--text3); letter-spacing: 1px; margin-top: 1px; }
+.li-badge {
+  font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 1.5px;
+  padding: 3px 9px; border-radius: 12px;
+  background: rgba(0,230,118,0.1); border: 1px solid rgba(0,230,118,0.3); color: var(--green);
+}
+.li-toggle {
+  background: rgba(24,255,255,0.1); border: 1px solid rgba(24,255,255,0.3);
+  color: var(--cyan); border-radius: 6px; padding: 4px 10px;
+  font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 1px;
+  cursor: pointer; transition: all 0.15s;
+}
+.li-toggle:hover { background: rgba(24,255,255,0.18); box-shadow: 0 0 10px rgba(24,255,255,0.3); }
+
+.li-feed {
+  display: flex; flex-direction: column-reverse;
+  gap: 4px;
+  max-height: 112px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.li-feed::-webkit-scrollbar { width: 3px; }
+.li-feed::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+.li-event {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px;
+  background: rgba(0,0,0,0.3);
+  border-left: 2px solid var(--evt-col);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 9px;
+  animation: liFadeIn 0.4s ease;
+}
+@keyframes liFadeIn { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: translateX(0); } }
+.li-event .li-time { font-size: 7px; color: var(--text3); letter-spacing: 1px; flex-shrink: 0; width: 50px; }
+.li-event .li-text { color: var(--text1); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.li-event .li-token { font-weight: 700; }
+.li-empty { font-family: var(--mono); font-size: 8px; color: var(--text3); text-align: center; padding: 8px; letter-spacing: 1px; }
+
+/* ═══════════════════════════════════════════════════
+   🤖 Alpha Lennix drawer (collapsible)
+   ═══════════════════════════════════════════════════ */
+.lennix-drawer {
+  background: linear-gradient(135deg, rgba(4,6,11,0.97), rgba(10,16,32,0.95));
+  border: 1px solid rgba(24,255,255,0.3);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  animation: liFadeIn 0.25s ease;
+}
+.lennix-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+
+/* ═══════════════════════════════════════════════════
+   Coin-row avatar fallback (initial letter + color)
+   ═══════════════════════════════════════════════════ */
+.coin-avatar-fallback {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 12px; font-weight: 900; color: #fff;
+  flex-shrink: 0; border: 1px solid rgba(255,255,255,0.12);
+}
+
+/* ═══════════════════════════════════════════════════
    AUDITOR ROW — responsive grid
    ═══════════════════════════════════════════════════ */
 .au-row {
@@ -2874,19 +2968,37 @@ body::before {
 
     <div class="tab-panel" id="tab-candidates">
 
-      <!-- ALPHA LENNIX AI Chat (glowing) -->
-      <div class="ai-chat-bar" style="margin-bottom:14px">
-        <div class="ai-chat-header">
-          <div style="display:flex;align-items:center;gap:10px">
-            <div class="ai-pulse-dot"></div>
+      <!-- ═══ 📡 LIVE INTELLIGENCE — real-time pipeline event feed ═══ -->
+      <div class="live-intel" id="liveIntel">
+        <div class="li-header">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="li-pulse"></div>
             <div>
-              <div style="font-family:var(--mono);font-size:10px;font-weight:700;color:var(--cyan);letter-spacing:2px">🤖 ALPHA LENNIX</div>
-              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">Ask about any token · score · pattern · regime</div>
+              <div class="li-title">📡 LIVE INTELLIGENCE</div>
+              <div class="li-sub" id="liSummary">Pipeline events · real-time</div>
             </div>
           </div>
-          <div class="ai-status-badge">LIVE</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="li-badge" id="liTickerBadge">0 events / hr</span>
+            <button class="li-toggle" onclick="toggleLennix()">🤖 ASK LENNIX</button>
+          </div>
         </div>
-        <div id="auditChatMessages" class="ai-chat-messages">
+        <div id="liFeed" class="li-feed">
+          <div class="li-empty">Starting up — events appear as the pipeline fires...</div>
+        </div>
+      </div>
+
+      <!-- Collapsible Alpha Lennix chat — hidden by default, opens on demand -->
+      <div id="lennixDrawer" class="lennix-drawer" style="display:none">
+        <div class="lennix-head">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="ai-pulse-dot"></div>
+            <div style="font-family:var(--mono);font-size:10px;font-weight:700;color:var(--cyan);letter-spacing:2px">🤖 ALPHA LENNIX</div>
+            <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px">Ask about any token / score / pattern</div>
+          </div>
+          <button onclick="toggleLennix()" style="background:transparent;border:none;color:var(--text3);cursor:pointer;font-family:var(--mono);font-size:14px">✕</button>
+        </div>
+        <div id="auditChatMessages" class="ai-chat-messages" style="max-height:240px">
           <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:4px 0">Ask about any coin, score, or market pattern...</div>
         </div>
         <div class="ai-chat-input-row">
@@ -4505,9 +4617,9 @@ function renderAuditList(){
       }catch(ex){}
     }
 
-    // Score block — show ⏳ SCORING for unscored rows, else full score + decision
+    // Score block — show ⏳ SCORING badge (clickable to trigger) for unscored rows
     var scoreBlock = isScoring
-      ? '<div style="text-align:right;flex-shrink:0">'+
+      ? '<div class="score-pending" data-ca="'+esc(r.contractAddress||'')+'" style="text-align:right;flex-shrink:0">'+
           '<div style="font-family:var(--mono);font-size:9px;font-weight:700;padding:4px 9px;border-radius:4px;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.25);color:var(--cyan);letter-spacing:1px">⏳ SCORING</div>'+
         '</div>'
       : '<div style="text-align:right;flex-shrink:0">'+
@@ -4515,12 +4627,24 @@ function renderAuditList(){
           '<div style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:'+decCol2+'18;border:1px solid '+decCol2+'44;color:'+decCol2+';margin-top:3px">'+esc(dec)+'</div>'+
         '</div>';
 
+    // Avatar fallback — use initial letter in a colored circle when image fails
+    var tokenSym = (r.token || '?').toString();
+    var avatarChar = tokenSym.replace(/[^A-Za-z0-9]/g,'').charAt(0).toUpperCase() || '?';
+    // Deterministic color per token (so same token always same color)
+    var avatarColors = ['#00e676','#18ffff','#e040fb','#ffd740','#ff6d00','#448aff','#ff1744','#9c27b0'];
+    var colorIdx = 0;
+    for (var ci=0; ci<tokenSym.length; ci++) colorIdx = (colorIdx + tokenSym.charCodeAt(ci)) % avatarColors.length;
+    var avatarBg = avatarColors[colorIdx];
+
     var headerHTML =
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
         '<div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">'+
-          '<img src="https://dd.dexscreener.com/ds-data/tokens/solana/'+(r.contractAddress||'')+'.png"'+
-               ' onerror="this.style.opacity=0"'+
-               ' style="width:34px;height:34px;border-radius:50%;border:1px solid rgba(255,255,255,0.1);flex-shrink:0;object-fit:cover">'+
+          '<div style="position:relative;width:34px;height:34px;flex-shrink:0">'+
+            '<div class="coin-avatar-fallback" style="background:linear-gradient(135deg,'+avatarBg+','+avatarBg+'80);position:absolute;inset:0">'+avatarChar+'</div>'+
+            '<img src="https://dd.dexscreener.com/ds-data/tokens/solana/'+(r.contractAddress||'')+'.png"'+
+                 ' onerror="this.remove()"'+
+                 ' style="position:absolute;inset:0;width:34px;height:34px;border-radius:50%;border:1px solid rgba(255,255,255,0.1);object-fit:cover;background:var(--surface)">'+
+          '</div>'+
           '<div style="min-width:0;flex:1">'+
             '<div style="display:flex;align-items:center;gap:5px;margin-bottom:2px;flex-wrap:wrap">'+
               '<span style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px">$'+esc(r.token||'?')+'</span>'+
@@ -8549,6 +8673,136 @@ function walletChatQuick(text){
   if (input) { input.value = text; input.focus(); }
   sendWalletChatMsg();
 }
+
+/* ═══════════════════════════════════════════════════════════
+   📡 LIVE INTELLIGENCE — real-time pipeline event feed
+   ═══════════════════════════════════════════════════════════ */
+let _liSeen = new Set();              // keyed by (type|id) to dedupe across ticks
+let _liEvents = [];                   // in-memory event list
+const LI_MAX_EVENTS = 40;
+let _liFirstLoad = true;
+
+function _liPushEvent(type, token, detail, color){
+  const id = type + '|' + (token || '') + '|' + (detail || '');
+  if (_liSeen.has(id)) return false;
+  _liSeen.add(id);
+  _liEvents.unshift({ at: Date.now(), type, token, detail, color });
+  if (_liEvents.length > LI_MAX_EVENTS) _liEvents.length = LI_MAX_EVENTS;
+  // Cap dedupe set too (so ancient events eventually flush)
+  if (_liSeen.size > 300) {
+    const arr = [..._liSeen]; _liSeen = new Set(arr.slice(-200));
+  }
+  return true;
+}
+
+function renderLiveIntel(){
+  const feed = document.getElementById('liFeed');
+  if (!feed) return;
+  if (!_liEvents.length) {
+    feed.innerHTML = '<div class="li-empty">Monitoring pipeline — events will appear as they fire...</div>';
+    return;
+  }
+  feed.innerHTML = _liEvents.slice(0, 12).map(e => {
+    const timeTxt = timeAgo(new Date(e.at).toISOString());
+    return '<div class="li-event" style="--evt-col:'+e.color+'">'+
+      '<span class="li-time">'+esc(timeTxt)+'</span>'+
+      '<span class="li-text">'+e.detail+'</span>'+
+    '</div>';
+  }).join('');
+  const hourCount = _liEvents.filter(e => Date.now() - e.at < 3_600_000).length;
+  setText('liTickerBadge', hourCount + ' events / hr');
+  setText('liSummary', _liEvents.length + ' total tracked · updates every 10s');
+}
+
+async function pollLiveIntel(){
+  try {
+    // Pull recent scored candidates + auto-posts
+    const [scanner, momentum] = await Promise.all([
+      apiFetch('/api/scanner?limit=50'),
+      apiFetch('/api/momentum/hot').catch(()=>null),
+    ]);
+    const rows = (scanner?.rows || []);
+    // Promoted / auto-posted
+    rows.filter(r => r.final_decision === 'AUTO_POST')
+        .slice(0, 8)
+        .forEach(r => {
+          _liPushEvent('promo', r.token, '🚀 <span class="li-token" style="color:var(--green)">$'+esc(r.token||'?')+'</span> promoted · score <b>'+(r.composite_score||'?')+'</b> · mcap '+fmt(r.market_cap,'$'), 'var(--green)');
+        });
+    // Scored (composite became available)
+    rows.filter(r => r.composite_score != null && r.composite_score >= 40 && r.final_decision !== 'AUTO_POST')
+        .slice(0, 10)
+        .forEach(r => {
+          _liPushEvent('scored', r.token, '✓ Scored <span class="li-token" style="color:var(--cyan)">$'+esc(r.token||'?')+'</span> · <b>'+r.composite_score+'</b>/100 · '+esc(r.final_decision||'—'), 'var(--cyan)');
+        });
+    // Claude verdicts (risk available)
+    rows.filter(r => r.claude_verdict && r.claude_risk)
+        .slice(0, 5)
+        .forEach(r => {
+          _liPushEvent('claude', r.token, '🤖 Claude reviewed <span class="li-token" style="color:var(--blue)">$'+esc(r.token||'?')+'</span> · risk <b>'+esc(r.claude_risk)+'</b>', 'var(--blue)');
+        });
+    // Momentum spikes
+    if (momentum?.spikes) {
+      momentum.spikes.slice(0, 5).forEach(s => {
+        const tok = s.token || (s.contract_address||'').slice(0,6);
+        const flag = s.spike_flag;
+        const icon = flag === 'BREAKOUT' ? '💥' : flag === 'PRICE_SPIKE' ? '📈' : '⚡';
+        const pct = s.delta_mcap_pct != null ? ' +'+Math.round(s.delta_mcap_pct)+'%' : '';
+        _liPushEvent('spike-'+(s.id||tok), tok, icon+' <span class="li-token" style="color:var(--gold)">$'+esc(tok)+'</span> '+esc(flag.replace('_',' '))+pct, 'var(--gold)');
+      });
+    }
+    _liFirstLoad = false;
+    renderLiveIntel();
+  } catch (err) { /* silent */ }
+}
+
+// Start the live-intel loop
+document.addEventListener('DOMContentLoaded', () => {
+  pollLiveIntel();
+  setInterval(pollLiveIntel, 10_000);
+});
+
+function toggleLennix(){
+  const drawer = document.getElementById('lennixDrawer');
+  if (!drawer) return;
+  drawer.style.display = drawer.style.display === 'none' ? 'block' : 'none';
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ⚡ AUTO-SCORE — fire /api/score-now on any rendered SCORING row
+   so the user sees real numbers within seconds instead of a
+   persistent '⏳ SCORING' badge.
+   ═══════════════════════════════════════════════════════════ */
+let _autoScoreBusy = new Set();
+const AUTO_SCORE_CONCURRENCY = 3;  // cap parallel /api/score-now calls
+
+async function autoScorePendingRows(){
+  const pending = [...document.querySelectorAll('.score-pending')]
+    .map(el => el.dataset.ca)
+    .filter(ca => ca && !_autoScoreBusy.has(ca));
+  if (!pending.length) return;
+  // Take up to N at a time
+  const queue = pending.slice(0, AUTO_SCORE_CONCURRENCY);
+  queue.forEach(ca => _autoScoreBusy.add(ca));
+
+  await Promise.all(queue.map(async ca => {
+    try {
+      const r = await fetch('/api/score-now/'+encodeURIComponent(ca), {
+        method: 'POST',
+        signal: AbortSignal.timeout(45000),
+      });
+      const d = await r.json();
+      if (d?.ok && d.candidate) {
+        // Reload the candidates list so the new score slots in
+        if (typeof loadAudit === 'function') loadAudit();
+      }
+    } catch {} finally { _autoScoreBusy.delete(ca); }
+  }));
+}
+
+// Run auto-scoring on an interval whenever the candidates tab is open
+setInterval(() => {
+  if (currentTab === 'candidates') autoScorePendingRows();
+}, 8_000);
 
 /* ═══════════════════════════════════════════════════════════
    📞 CALLS TAB — simple feed of posted calls with outcome
