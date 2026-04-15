@@ -8604,8 +8604,8 @@ async function analyzeSeedContract(ca){
             const catCols = { WINNER:'#ffd740', SMART_MONEY:'#18ffff', MOMENTUM:'#00e676', SNIPER:'#ff6d00', CLUSTER:'#e040fb', NEUTRAL:'#8899bb' };
             return '<div style="padding:0 12px 10px">'+
               '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">'+
-                '<span>👥 TOP HOLDERS ('+wi.holdersList.length+')</span>'+
-                '<span style="color:var(--cyan)">'+(wi.holdersList.filter(h=>h.inDb).length)+' in DB</span>'+
+                '<span>🐋 TOP HOLDERS — ranked by SOL balance ('+wi.holdersList.length+')</span>'+
+                '<span><span style="color:var(--gold)">'+(wi.holdersList.filter(h=>h.isMegaWhale).length)+' 🐋</span> · <span style="color:var(--green)">'+(wi.holdersList.filter(h=>h.isWhale && !h.isMegaWhale).length)+' 💎</span> · <span style="color:var(--cyan)">'+(wi.holdersList.filter(h=>h.inDb).length)+' in DB</span></span>'+
               '</div>'+
               '<div style="display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto;border:1px solid rgba(255,255,255,0.05);border-radius:6px;padding:6px;background:rgba(0,0,0,0.3)">'+
               wi.holdersList.map(function(h){
@@ -8616,12 +8616,18 @@ async function analyzeSeedContract(ca){
                 const badge  = h.inDb
                   ? '<span style="font-family:var(--mono);font-size:7px;padding:1px 6px;border-radius:3px;background:'+col+'22;border:1px solid '+col+'55;color:'+col+';white-space:nowrap">'+(h.category||'NEUT')+'</span>'
                   : '<span style="font-family:var(--mono);font-size:7px;padding:1px 6px;border-radius:3px;background:rgba(136,153,187,0.1);border:1px dashed rgba(136,153,187,0.3);color:var(--text3);white-space:nowrap">NEW</span>';
+                // SOL balance chip — color-coded so whales pop visually
+                const sol = h.solBalance;
+                const solCol = h.isMegaWhale ? '#ffd740' : h.isWhale ? '#00e676' : (sol > 1 ? '#18ffff' : '#8899bb');
+                const solTxt = sol == null ? '—' : sol >= 1000 ? (sol/1000).toFixed(1)+'K' : sol >= 1 ? sol.toFixed(1) : sol.toFixed(3);
+                const solChip = '<span style="font-family:var(--mono);font-size:7px;padding:1px 6px;border-radius:3px;background:'+solCol+'18;border:1px solid '+solCol+'55;color:'+solCol+';white-space:nowrap;font-weight:700" title="SOL balance">'+(h.isMegaWhale?'🐋 ':h.isWhale?'💎 ':'◎ ')+solTxt+'</span>';
                 const actionBtn = h.inDb
                   ? '<button onclick="event.stopPropagation();showWalletModal(\''+h.address+'\')" style="background:rgba(24,255,255,0.12);border:1px solid rgba(24,255,255,0.35);color:var(--cyan);border-radius:4px;padding:3px 8px;font-family:var(--mono);font-size:7px;cursor:pointer;font-weight:700;white-space:nowrap">👁 VIEW</button>'
                   : '<button onclick="event.stopPropagation();addHolderToDb(\''+h.address+'\',this)" style="background:linear-gradient(135deg,rgba(0,230,118,0.2),rgba(24,255,255,0.1));border:1px solid rgba(0,230,118,0.4);color:var(--green);border-radius:4px;padding:3px 8px;font-family:var(--mono);font-size:7px;cursor:pointer;font-weight:700;white-space:nowrap">+ ADD</button>';
                 return '<div style="display:flex;align-items:center;gap:6px;padding:5px 6px;background:rgba(0,0,0,0.3);border-radius:4px;border-left:2px solid '+col+'">'+
                   '<span style="font-family:var(--mono);font-size:8px;color:var(--text3);width:24px;flex-shrink:0">'+rank+'</span>'+
                   '<span style="font-family:var(--mono);font-size:9px;color:'+(h.label?col:'var(--text1)')+';flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:'+(h.label?'700':'400')+'" title="'+esc(h.address)+'">'+display+'</span>'+
+                  solChip+
                   badge+
                   actionBtn+
                 '</div>';

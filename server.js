@@ -4064,7 +4064,7 @@ app.get('/api/external/token/:ca', async (req, res) => {
     if (process.env.SOLSCAN_API_KEY) {
       try {
         const solRes = await fetch(
-          `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=20&page=1`,
+          `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=100&page=1`,
           {
             headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' },
             signal: AbortSignal.timeout(9_000),
@@ -4128,6 +4128,38 @@ app.get('/api/external/token/:ca', async (req, res) => {
       } catch (err) { console.warn('[external-token] Helius getTokenLargestAccounts failed:', err.message); }
     }
 
+    // ── Batch-fetch SOL balance for every holder so the UI can surface whales ──
+    // One Helius getMultipleAccounts call returns lamports for up to 100 wallets
+    // at once. Cheap, reliable, and it's what makes "find the whales" possible.
+    const solBalances = new Map(); // address → SOL
+    if (owners.length && HELIUS_API_KEY) {
+      try {
+        // Split into chunks of 100 (RPC max)
+        const chunks = [];
+        for (let i = 0; i < owners.length; i += 100) chunks.push(owners.slice(i, i + 100));
+        for (const chunk of chunks) {
+          const bRes = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0', id: 'balances', method: 'getMultipleAccounts',
+              params: [chunk, { commitment: 'confirmed' }],
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!bRes.ok) { console.warn(`[external-token] balance batch HTTP ${bRes.status}`); continue; }
+          const bJson = await bRes.json();
+          const values = bJson?.result?.value || [];
+          values.forEach((acc, idx) => {
+            const lamports = acc?.lamports ?? 0;
+            if (lamports) solBalances.set(chunk[idx], lamports / 1e9);
+          });
+        }
+      } catch (err) {
+        console.warn('[external-token] SOL balance batch failed:', err.message);
+      }
+    }
+
     // ── Populate holderStats + classify against tracked_wallets ──
     if (owners.length || holders.length) {
       try {
@@ -4154,10 +4186,14 @@ app.get('/api/external/token/:ca', async (req, res) => {
             else if (tw.category === 'CLUSTER')     clusters++;
             if (tw.label) matchedLabels.push(tw.label);
           }
+          const solBal = solBalances.get(owner) ?? null;
           holdersList.push({
             rank:     i + 1,
             address:  owner,
             balance:  amounts[i] ?? holders[i]?.uiAmount ?? null,
+            solBalance: solBal,
+            isWhale:  solBal != null && solBal >= 10,  // 10+ SOL = whale signal
+            isMegaWhale: solBal != null && solBal >= 100,
             inDb:     !!tw,
             label:    tw?.label || null,
             category: tw?.category || null,
@@ -4166,6 +4202,16 @@ app.get('/api/external/token/:ca', async (req, res) => {
             score:    tw?.score ?? null,
           });
         }
+
+        // Re-rank: whales with the most SOL first, then in-DB wallets, then the rest.
+        // Rank labels (#1 #2 ...) follow the new order so the UI shows the
+        // meaningful "most significant holder" list — not just biggest token balance.
+        holdersList.sort((a, b) => {
+          const aScore = (a.solBalance || 0) * (a.inDb ? 1.5 : 1);
+          const bScore = (b.solBalance || 0) * (b.inDb ? 1.5 : 1);
+          return bScore - aScore;
+        });
+        holdersList.forEach((h, i) => { h.rank = i + 1; });
         // Percentage held by top 10 (rough, based on whatever balance data we have)
         const totalTop10 = holders.slice(0, 10).reduce((s, h) => s + (h.uiAmount || 0), 0);
         const totalAll   = holders.reduce((s, h) => s + (h.uiAmount || 0), 0);
@@ -4317,14 +4363,97 @@ app.get('/api/external/wallet/:address', async (req, res) => {
       } catch (err) { console.warn('[external-wallet] recent tokens fetch failed:', err.message); }
     }
 
+    // ── Helius fallback: if Solscan gave us nothing useful, hit Helius for
+    //    SOL balance + recent SWAP activity. This is what makes clicking a
+    //    fresh wallet actually show data instead of the empty "no transfer
+    //    history" state.
+    let heliusData = null;
+    const solscanEmpty = !stats || (
+      (stats.total_transfers ?? 0) === 0 &&
+      (stats.swap_count ?? 0) === 0 &&
+      recentTokens.length === 0
+    );
+    if (solscanEmpty && HELIUS_API_KEY) {
+      try {
+        // SOL balance
+        const balRes = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc:'2.0', id:'bal', method:'getBalance', params:[address] }),
+          signal: AbortSignal.timeout(6_000),
+        });
+        const balJson = balRes.ok ? await balRes.json() : null;
+        const solBalance = (balJson?.result?.value ?? 0) / 1e9;
+
+        // Recent swaps via Enhanced Transactions
+        const swRes = await fetch(
+          `https://api.helius.xyz/v0/addresses/${address}/transactions?type=SWAP&api-key=${HELIUS_API_KEY}&limit=25`,
+          { signal: AbortSignal.timeout(9_000) }
+        );
+        const swArr = swRes.ok ? await swRes.json() : [];
+        const swaps = Array.isArray(swArr) ? swArr : [];
+
+        // Extract tokens recently bought
+        const byMint = new Map();
+        for (const tx of swaps) {
+          for (const t of (tx.tokenTransfers ?? [])) {
+            if (t.toUserAccount !== address) continue;
+            if (!t.mint) continue;
+            if (['So11111111111111111111111111111111111111112',
+                 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+                 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'].includes(t.mint)) continue;
+            const e = byMint.get(t.mint) || { address: t.mint, count: 0, lastSeen: 0 };
+            e.count++;
+            if (tx.timestamp && tx.timestamp > e.lastSeen) e.lastSeen = tx.timestamp;
+            byMint.set(t.mint, e);
+          }
+        }
+        const helTokens = [...byMint.values()].sort((a,b) => b.lastSeen - a.lastSeen).slice(0, 20);
+
+        // Cross-reference helius tokens with our DB so the UI can tag winners
+        for (const t of helTokens) {
+          try {
+            const ours = dbInstance.prepare(
+              `SELECT token, composite_score, final_decision FROM candidates
+               WHERE contract_address=? ORDER BY id DESC LIMIT 1`
+            ).get(t.address) || dbInstance.prepare(
+              `SELECT token, composite_score, final_decision, outcome, peak_multiple
+               FROM audit_archive WHERE contract_address=? LIMIT 1`
+            ).get(t.address);
+            if (ours) {
+              t.symbol       = ours.token || null;
+              t.ourScore     = ours.composite_score ?? null;
+              t.ourDecision  = ours.final_decision ?? null;
+              t.outcome      = ours.outcome ?? null;
+              t.peakMultiple = ours.peak_multiple ?? null;
+              t.inOurDb      = true;
+            }
+          } catch {}
+        }
+
+        heliusData = {
+          solBalance,
+          isWhale: solBalance >= 10,
+          isMegaWhale: solBalance >= 100,
+          swapCount: swaps.length,
+          recentTokens: helTokens,
+        };
+        // If Solscan gave us empty tokens but Helius found some, promote them
+        if (!recentTokens.length && helTokens.length) recentTokens = helTokens;
+      } catch (err) {
+        console.warn('[external-wallet] Helius fallback failed:', err.message);
+      }
+    }
+
     res.json({
       ok: true,
       address,
       stats,
+      helius: heliusData,
       dbRecord: existing,
       appearances,
       recentTokens,
-      source: stats ? 'solscan' : 'db-only',
+      source: heliusData ? 'helius+solscan' : (stats ? 'solscan' : 'db-only'),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
