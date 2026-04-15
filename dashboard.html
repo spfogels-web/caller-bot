@@ -7320,28 +7320,27 @@ function _setWalletScannerStatus(label, cls, msg) {
 }
 
 // Scan every tracked_wallets row for its SOL balance via Helius, promote
-// mega-whales (≥100 SOL) to SMART_MONEY, and surface the top 100.
+// mega-whales (≥100 SOL) to SMART_MONEY, and surface the top ones.
 async function scanAllWhales(btn){
   const orig = btn?.textContent;
   if (btn){ btn.disabled = true; btn.textContent = '⏳ SCANNING…'; }
   _setWalletScannerStatus && _setWalletScannerStatus('SCANNING', 'scanning', '🐋 Scanning tracked_wallets for SOL balances…');
   try {
-    const res = await fetch('/api/wallets/scan-whales?minSol=5&max=3000', { method:'POST' });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || 'scan failed');
-    const msg = `✓ Scanned ${data.scanned} wallets · ${data.megaWhales} 🐋 mega (≥100 SOL) · ${data.whales} 💎 whales (≥10) · ${data.promoted} auto-promoted to SMART_MONEY`;
+    const res = await fetch('/api/wallets/scan-whales?minSol=5&max=2000', { method:'POST' });
+    let data;
+    try { data = await res.json(); } catch (e) {
+      const txt = await res.text().catch(() => '');
+      throw new Error('Server returned non-JSON (' + res.status + '): ' + txt.slice(0, 200));
+    }
+    if (!data || !data.ok) throw new Error((data && data.error) || 'scan failed');
+    const msg = '✓ Scanned ' + data.scanned + ' · ' + data.megaWhales + ' 🐋 mega · ' + data.whales + ' 💎 whales · ' + data.promoted + ' promoted to SMART_MONEY';
     _setWalletScannerStatus && _setWalletScannerStatus('COMPLETE', 'done', msg);
-    // Reload tiles so promotions show up
+    console.log('[scan-whales] result', data);
     if (typeof loadWalletTiles === 'function') loadWalletTiles();
     if (typeof loadWalletRankings === 'function') loadWalletRankings();
-    // Show top whales in a modal-lite alert so the user sees the best finds
-    const top = (data.topN || []).slice(0, 15)
-      .map((w,i) => `#${i+1}  ${w.solBalance.toFixed(1)} SOL  ${w.category || 'NEUTRAL'}  ${w.address.slice(0,8)}…`)
-      .join('\n');
-    if (top) alert(`🐋 TOP WHALES IN YOUR DB\n\n${top}\n\n${data.promoted} auto-promoted to SMART_MONEY.\nOpen the Wallet Rankings tiles to label them WINNER.`);
   } catch (err) {
+    console.error('[scan-whales] error', err);
     _setWalletScannerStatus && _setWalletScannerStatus('ERROR', 'error', '✗ Scan failed: ' + err.message);
-    alert('Whale scan failed: ' + err.message);
   } finally {
     if (btn){ btn.disabled = false; btn.textContent = orig || '🐋 SCAN FOR WHALES'; }
   }
@@ -8590,7 +8589,16 @@ async function analyzeSeedContract(ca){
     if (!c) {
       try {
         const ext = await apiFetch('/api/external/token/'+encodeURIComponent(ca));
-        if (ext?.ok && ext.candidate) { c = ext.candidate; source = ext.source || 'live'; }
+        if (ext?.ok && ext.candidate) {
+          c = ext.candidate;
+          source = ext.source || 'live';
+          // Brain Analyzer auto-inserts holders into tracked_wallets. Kick the
+          // Smart Money tab to refresh in the background so the user sees them
+          // when they switch tabs.
+          if (typeof loadWalletTiles === 'function') loadWalletTiles();
+          if (typeof loadWalletRankings === 'function') loadWalletRankings();
+          if (typeof loadSmartMoneySummary === 'function') loadSmartMoneySummary();
+        }
       } catch {}
     }
 

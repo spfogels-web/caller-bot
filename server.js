@@ -6481,23 +6481,25 @@ app.get('/api/v8/dune-wallet-status', (req, res) => {
 
 // Get all tracked wallets with filtering
 // Smart Money rankings — sorted by score, win rate, or category
-// Scan the entire tracked_wallets DB for the biggest SOL balances. Uses
-// Helius getMultipleAccounts in chunks of 100 — one batched RPC call per
-// chunk — so it's fast even on multi-thousand-wallet databases.
+// Scan the entire tracked_wallets DB for the biggest SOL balances.
 app.post('/api/wallets/scan-whales', async (req, res) => {
   setCors(res);
   try {
     if (!HELIUS_API_KEY) return res.status(500).json({ ok: false, error: 'HELIUS_API_KEY missing' });
-    const minSol = Number(req.query.minSol ?? 5);   // minimum SOL to count
-    const maxWallets = Math.min(Number(req.query.max ?? 2000), 5000);
+    const minSol = Number(req.query.minSol ?? 5);
+    const maxWallets = Math.min(Number(req.query.max ?? 2000), 3000);
 
     const rows = dbInstance.prepare(`
       SELECT address, label, category FROM tracked_wallets
-      WHERE is_blacklist = 0 AND address IS NOT NULL
+      WHERE is_blacklist = 0 AND address IS NOT NULL AND length(address) >= 32
+      ORDER BY updated_at DESC
       LIMIT ?
     `).all(maxWallets);
 
-    const results = [];
+    // Accumulate whales only — keeps result small regardless of DB size.
+    let megaCount = 0, whaleCount = 0, scannedCount = 0;
+    const whales = []; // { address, label, category, solBalance }
+
     for (let i = 0; i < rows.length; i += 100) {
       const chunk = rows.slice(i, i + 100);
       try {
@@ -6513,51 +6515,58 @@ app.post('/api/wallets/scan-whales', async (req, res) => {
         if (!r.ok) { console.warn(`[scan-whales] chunk ${i} HTTP ${r.status}`); continue; }
         const j = await r.json();
         const values = j?.result?.value || [];
-        values.forEach((acc, idx) => {
-          const sol = (acc?.lamports ?? 0) / 1e9;
+        for (let idx = 0; idx < values.length; idx++) {
+          scannedCount++;
+          const sol = (values[idx]?.lamports ?? 0) / 1e9;
           if (sol >= minSol) {
-            results.push({
+            if (sol >= 100) megaCount++;
+            else if (sol >= 10) whaleCount++;
+            whales.push({
               address:  chunk[idx].address,
-              label:    chunk[idx].label,
-              category: chunk[idx].category,
-              solBalance: sol,
-              isMegaWhale: sol >= 100,
-              isWhale:     sol >= 10,
+              label:    chunk[idx].label || null,
+              category: chunk[idx].category || 'NEUTRAL',
+              solBalance: Number(sol.toFixed(4)),
             });
           }
-        });
+        }
       } catch (err) {
         console.warn(`[scan-whales] chunk ${i} failed:`, err.message);
       }
     }
 
-    results.sort((a, b) => b.solBalance - a.solBalance);
+    // Sort by SOL desc. Plain numeric comparator — safe for up to ~10k entries.
+    whales.sort((a, b) => (b.solBalance || 0) - (a.solBalance || 0));
 
-    // Auto-label the top mega-whales (≥100 SOL) as SMART_MONEY if they're
-    // still NEUTRAL, so they get picked up by the smart-money watcher.
+    // Auto-promote mega-whales (≥100 SOL) — one prepared stmt, plain loop.
     let promoted = 0;
-    try {
-      const upd = dbInstance.prepare(`
-        UPDATE tracked_wallets SET category='SMART_MONEY', updated_at=datetime('now')
-        WHERE address=? AND category IN ('NEUTRAL','MOMENTUM')
-      `);
-      for (const w of results.filter(r => r.isMegaWhale)) {
-        const info = upd.run(w.address);
-        if (info.changes) promoted++;
-      }
-    } catch (err) { console.warn('[scan-whales] promote failed:', err.message); }
+    const upd = dbInstance.prepare(`
+      UPDATE tracked_wallets SET category='SMART_MONEY', updated_at=datetime('now')
+      WHERE address=? AND category IN ('NEUTRAL','MOMENTUM')
+    `);
+    for (const w of whales) {
+      if (w.solBalance < 100) break; // whales sorted desc, stop at first non-mega
+      try { if (upd.run(w.address).changes) promoted++; } catch {}
+    }
+
+    // Cap response so we can't accidentally overflow a JSON parser.
+    const topN = whales.slice(0, 50);
+
+    console.log(`[scan-whales] scanned=${scannedCount} mega=${megaCount} whale=${whaleCount} promoted=${promoted}`);
 
     res.json({
       ok: true,
-      scanned:  rows.length,
-      found:    results.length,
-      megaWhales: results.filter(r => r.isMegaWhale).length,
-      whales:     results.filter(r => r.isWhale && !r.isMegaWhale).length,
+      scanned:    scannedCount,
+      found:      whales.length,
+      megaWhales: megaCount,
+      whales:     whaleCount,
       promoted,
       minSol,
-      topN: results.slice(0, 100),
+      topN,
     });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  } catch (err) {
+    console.error('[scan-whales] top-level error:', err.stack || err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 app.get('/api/wallets/rankings', (req, res) => {
