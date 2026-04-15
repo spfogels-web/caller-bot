@@ -40,16 +40,31 @@ const getBirdeyeKey = () => process.env.BIRDEYE_API_KEY ?? '';
 const getHeliusKey  = () => process.env.HELIUS_API_KEY  ?? '';
 
 const LP_PROGRAM_IDS = new Set([
-  'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',
-  '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP',
-  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+  'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',     // Orca Whirlpool
+  '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP',     // Orca
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',     // Raydium
+  'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',     // Raydium CLMM
+  'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',     // Raydium CPMM
+  'routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS',     // Raydium Route
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',     // Jupiter
+  'MoonCVVNZFSYkqNXP6bxHLPL6QQXiB9AFMKSq3hRMBm',     // Moonshot
+  '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',     // pump.fun v1
+  'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',     // pump.fun AMM (post-migration)
+  'TSWAPaqyCSx2KABk68Shruf4rp7CxcAi343YCz73zk',     // Tensor
+  'So11111111111111111111111111111111111111112',     // Wrapped SOL
+  'BSfD6SHZigAfDWSjzD5Q41jw8LmKwtmjskPH9XW1mrRW',     // pump.fun fee recipient
+]);
+// Extra owners that should ALWAYS be treated as 'not a dev wallet' even though
+// their token-account addresses vary per token. We resolve the owner of each
+// token account via getMultipleAccounts and filter by this set.
+const CONTRACT_OWNERS = new Set([
+  '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',     // pump.fun curve owns its token accounts
+  'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',     // pump.fun AMM
+  'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',     // Orca
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',     // Raydium pool token accounts
   'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',
-  'routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS',
-  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',
+  'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',
   'MoonCVVNZFSYkqNXP6bxHLPL6QQXiB9AFMKSq3hRMBm',
-  '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-  'TSWAPaqyCSx2KABk68Shruf4rp7CxcAi343YCz73zk',
-  'So11111111111111111111111111111111111111112',
 ]);
 
 // Known burn/lock addresses for LP token detection
@@ -238,7 +253,42 @@ async function enrichWithHelius(ca, pairAddress = null) {
     const totalSupply = Number(supplyInfo.amount);
 
     if (totalSupply > 0) {
-      const realHolders = holders.filter(h => !LP_PROGRAM_IDS.has(h.address));
+      // BUGFIX: terminal shows Dev 5% but we were reporting 59%. Root cause:
+      // the pump.fun bonding curve holds most tokens pre-migration as a PDA
+      // whose *address* varies per token (not in LP_PROGRAM_IDS), but whose
+      // *owner* is always the pump.fun program. Same for Raydium pool token
+      // accounts. We now resolve each top holder's owner via getMultipleAccounts
+      // and filter out any owned by a known contract program.
+      let resolvedOwners = {};
+      try {
+        const topAddrs = holders.slice(0, 20).map(h => h.address);
+        const ownerRes = await heliusRpc(
+          'getMultipleAccounts',
+          [topAddrs, { encoding: 'jsonParsed', commitment: 'confirmed' }],
+          'holderOwners'
+        );
+        const accounts = ownerRes?.result?.value ?? [];
+        accounts.forEach((acct, i) => {
+          const owner = acct?.data?.parsed?.info?.owner;
+          if (owner) resolvedOwners[topAddrs[i]] = owner;
+        });
+      } catch (err) {
+        console.warn('[enricher:helius] getMultipleAccounts failed:', err.message);
+      }
+
+      const isContractAccount = (holderAddress) => {
+        // Explicit block-list of LP/program addresses we know
+        if (LP_PROGRAM_IDS.has(holderAddress)) return true;
+        // NEW: check resolved owner against known contract programs
+        const owner = resolvedOwners[holderAddress];
+        if (owner && CONTRACT_OWNERS.has(owner)) return true;
+        // Pair-address check — if we know the pair, exclude it too
+        if (pairAddress && holderAddress === pairAddress) return true;
+        return false;
+      };
+
+      const realHolders = holders.filter(h => !isContractAccount(h.address));
+      result.contractHoldersFiltered = holders.length - realHolders.length;
 
       const top10    = realHolders.slice(0, 10);
       const top10Amt = top10.reduce((s, h) => s + Number(h.amount), 0);
