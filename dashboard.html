@@ -7350,21 +7350,29 @@ function _setWalletScannerStatus(label, cls, msg) {
 
 // Scan every tracked_wallets row for its SOL balance via Helius, promote
 // mega-whales (≥100 SOL) to SMART_MONEY, and surface the top ones.
+// Page through tracked_wallets in 20-at-a-time scans. Each click picks up
+// where the previous one left off. After a full pass it resets to 0.
+let _scanWhalesOffset = 0;
 async function scanAllWhales(btn){
   const orig = btn?.textContent;
   if (btn){ btn.disabled = true; btn.textContent = '⏳ SCANNING…'; }
-  _setWalletScannerStatus && _setWalletScannerStatus('SCANNING', 'scanning', '🐋 Scanning tracked_wallets for SOL balances…');
+  const offset = _scanWhalesOffset;
+  _setWalletScannerStatus && _setWalletScannerStatus('SCANNING', 'scanning', '🐋 Scanning wallets ' + offset + '-' + (offset+20) + '…');
   try {
-    const res = await fetch('/api/wallets/scan-whales?minSol=5&max=2000', { method:'POST' });
+    const res = await fetch('/api/wallets/scan-whales?minSol=1&max=20&offset=' + offset, { method:'POST' });
     let data;
     try { data = await res.json(); } catch (e) {
       const txt = await res.text().catch(() => '');
       throw new Error('Server returned non-JSON (' + res.status + '): ' + txt.slice(0, 200));
     }
     if (!data || !data.ok) throw new Error((data && data.error) || 'scan failed');
-    const msg = '✓ Scanned ' + data.scanned + ' · ' + data.megaWhales + ' 🐋 mega · ' + data.whales + ' 💎 whales · ' + data.promoted + ' promoted to SMART_MONEY';
+    // Advance offset. If we scanned fewer than 20, we've reached the end.
+    if ((data.scanned || 0) < 20) _scanWhalesOffset = 0;
+    else                          _scanWhalesOffset = offset + 20;
+    const rangeTxt = offset + '-' + (offset + (data.scanned || 0));
+    const msg = '✓ Scanned ' + rangeTxt + ' · found ' + data.found + ' (' + data.megaWhales + ' 🐋 · ' + data.whales + ' 💎) · ' + data.promoted + ' promoted — click again to continue';
     _setWalletScannerStatus && _setWalletScannerStatus('COMPLETE', 'done', msg);
-    console.log('[scan-whales] result', data);
+    console.log('[scan-whales] batch result', data);
     if (typeof loadWalletTiles === 'function') loadWalletTiles();
     if (typeof loadWalletRankings === 'function') loadWalletRankings();
   } catch (err) {

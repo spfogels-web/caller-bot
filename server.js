@@ -6486,15 +6486,19 @@ app.post('/api/wallets/scan-whales', async (req, res) => {
   setCors(res);
   try {
     if (!HELIUS_API_KEY) return res.status(500).json({ ok: false, error: 'HELIUS_API_KEY missing' });
-    const minSol = Number(req.query.minSol ?? 5);
-    const maxWallets = Math.min(Number(req.query.max ?? 2000), 3000);
+    const minSol = Number(req.query.minSol ?? 1);
+    // Hard cap at 20 per scan per user request — user clicks multiple times
+    // to cycle through the DB. Keeps Helius response small and JSON parse safe.
+    const maxWallets = Math.min(Number(req.query.max ?? 20), 20);
+    // `offset` lets the UI page through: first 20, next 20, etc.
+    const offset = Math.max(0, Number(req.query.offset ?? 0));
 
     const rows = dbInstance.prepare(`
       SELECT address, label, category FROM tracked_wallets
       WHERE is_blacklist = 0 AND address IS NOT NULL AND length(address) >= 32
       ORDER BY updated_at DESC
-      LIMIT ?
-    `).all(maxWallets);
+      LIMIT ? OFFSET ?
+    `).all(maxWallets, offset);
 
     // Accumulate whales only — keeps result small regardless of DB size.
     let megaCount = 0, whaleCount = 0, scannedCount = 0;
@@ -6508,7 +6512,13 @@ app.post('/api/wallets/scan-whales', async (req, res) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             jsonrpc: '2.0', id: 'whales', method: 'getMultipleAccounts',
-            params: [chunk.map(w => w.address), { commitment: 'confirmed' }],
+            // dataSlice length 0 means we only get lamports back — no data blob.
+            // Keeps the response small and JSON-parse-safe.
+            params: [chunk.map(w => w.address), {
+              commitment: 'confirmed',
+              encoding: 'base64',
+              dataSlice: { offset: 0, length: 0 },
+            }],
           }),
           signal: AbortSignal.timeout(12_000),
         });
