@@ -4136,30 +4136,6 @@ app.get('/api/external/token/:ca', async (req, res) => {
       } catch (err) { console.warn('[external-token] Helius getTokenLargestAccounts failed:', err.message); }
     }
 
-    // ── Auto-insert every resolved holder into tracked_wallets ─────────────
-    // User-requested: a Brain Analyzer scan should populate the DB so the
-    // Smart Money page has something to work with. NEUTRAL + source='brain_scan'
-    // so we can filter/promote later. INSERT OR IGNORE avoids clobbering
-    // existing labels or categories.
-    if (owners.length) {
-      try {
-        const ins = dbInstance.prepare(`
-          INSERT OR IGNORE INTO tracked_wallets
-            (address, category, source, updated_at, last_seen)
-          VALUES (?, 'NEUTRAL', 'brain_scan', datetime('now'), datetime('now'))
-        `);
-        const tx = dbInstance.transaction((addrs) => {
-          let n = 0;
-          for (const a of addrs) { if (a) n += ins.run(a).changes; }
-          return n;
-        });
-        const inserted = tx(owners);
-        console.log(`[external-token] Auto-added ${inserted}/${owners.length} holders to tracked_wallets`);
-      } catch (err) {
-        console.warn('[external-token] auto-insert failed:', err.message);
-      }
-    }
-
     // ── Batch-fetch SOL balance for every holder so the UI can surface whales ──
     // One Helius getMultipleAccounts call returns lamports for up to 100 wallets
     // at once. Cheap, reliable, and it's what makes "find the whales" possible.
@@ -4189,6 +4165,40 @@ app.get('/api/external/token/:ca', async (req, res) => {
         }
       } catch (err) {
         console.warn('[external-token] SOL balance batch failed:', err.message);
+      }
+    }
+
+    // ── Auto-insert every resolved holder into tracked_wallets with SOL ─────
+    // User-requested: Brain Analyzer scans should populate the Wallet Database
+    // AND carry SOL balance so the tiles show it without an extra click.
+    // INSERT OR IGNORE keeps existing labels/categories untouched; the
+    // UPDATE afterward refreshes sol_balance even on pre-existing rows.
+    if (owners.length) {
+      try {
+        const ins = dbInstance.prepare(`
+          INSERT OR IGNORE INTO tracked_wallets
+            (address, category, source, updated_at, last_seen)
+          VALUES (?, 'NEUTRAL', 'brain_scan', datetime('now'), datetime('now'))
+        `);
+        const updSol = dbInstance.prepare(`
+          UPDATE tracked_wallets
+          SET sol_balance = ?, sol_scanned_at = datetime('now')
+          WHERE address = ?
+        `);
+        const tx = dbInstance.transaction((addrs) => {
+          let inserted = 0, updated = 0;
+          for (const a of addrs) {
+            if (!a) continue;
+            inserted += ins.run(a).changes;
+            const sol = solBalances.get(a);
+            if (sol != null) updated += updSol.run(Number(sol.toFixed(6)), a).changes;
+          }
+          return { inserted, updated };
+        });
+        const { inserted, updated } = tx(owners);
+        console.log(`[external-token] Auto-added ${inserted} new · refreshed SOL on ${updated} rows (out of ${owners.length})`);
+      } catch (err) {
+        console.warn('[external-token] auto-insert failed:', err.message);
       }
     }
 
