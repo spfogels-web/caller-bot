@@ -6481,6 +6481,64 @@ app.get('/api/v8/dune-wallet-status', (req, res) => {
 
 // Get all tracked wallets with filtering
 // Smart Money rankings — sorted by score, win rate, or category
+// ─── DB Backup ───────────────────────────────────────────────────────────────
+// One-click backup: streams a fresh consistent copy of the SQLite DB to the
+// browser. Uses better-sqlite3's online backup so it's safe even while the
+// bot is writing. Store these snapshots anywhere (Google Drive, Dropbox, etc).
+app.get('/api/db/backup', async (req, res) => {
+  setCors(res);
+  try {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const tmpPath = path.join(
+      process.env.RAILWAY_VOLUME_MOUNT_PATH || '/tmp',
+      `backup-${ts}.db`
+    );
+    await dbInstance.backup(tmpPath);
+    const stat = await import('fs').then(fs => fs.statSync(tmpPath));
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="caller-bot-${ts}.db"`);
+    res.setHeader('Content-Length', stat.size);
+    const fs = await import('fs');
+    const stream = fs.createReadStream(tmpPath);
+    stream.pipe(res);
+    stream.on('end',   () => { try { fs.unlinkSync(tmpPath); } catch {} });
+    stream.on('error', () => { try { fs.unlinkSync(tmpPath); } catch {} });
+    logEvent('INFO', 'DB_BACKUP', `Manual backup streamed (${Math.round(stat.size/1024/1024)}MB)`);
+  } catch (err) {
+    console.error('[db-backup] failed:', err.stack || err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Quick health check — tells you if the DB is persistent and how big it is.
+app.get('/api/db/health', (req, res) => {
+  setCors(res);
+  try {
+    const dbPath = process.env.DATABASE_PATH
+      ?? (process.env.RAILWAY_VOLUME_MOUNT_PATH
+          ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'caller-bot.db')
+          : 'caller-bot.db');
+    const persistent = dbPath.startsWith('/data') || !!process.env.DATABASE_PATH;
+    let size = 0;
+    try { size = require('fs').statSync(dbPath).size; } catch {}
+    const rowCounts = {};
+    for (const t of ['tracked_wallets','audit_archive','calls','candidates','scanner_feed','smart_money_alerts']) {
+      try { rowCounts[t] = dbInstance.prepare(`SELECT COUNT(*) as n FROM ${t}`).get().n; }
+      catch { rowCounts[t] = null; }
+    }
+    res.json({
+      ok: true,
+      dbPath,
+      persistent,
+      sizeBytes: size,
+      sizeMB: +(size / 1024 / 1024).toFixed(2),
+      rowCounts,
+      warning: persistent ? null :
+        '⚠️  Volume not mounted — data will be lost on next redeploy. Add a Railway Volume at /data and set DATABASE_PATH=/data/caller-bot.db',
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // Scan the entire tracked_wallets DB for the biggest SOL balances.
 app.post('/api/wallets/scan-whales', async (req, res) => {
   setCors(res);
