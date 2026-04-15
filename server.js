@@ -4258,6 +4258,156 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   }
 });
 
+// ─── 🚨 KILLSWITCH AUDIT — checks EVERY known post-killer in one shot ────────
+// User reports 'something is killing every post'. This endpoint runs through
+// the 13 known kill paths and tells you exactly which one(s) are firing.
+app.get('/api/diagnose/killswitch', (req, res) => {
+  setCors(res);
+  try {
+    const safe = (sql, ...p) => { try { return dbInstance.prepare(sql).get(...p); } catch { return null; } };
+    const verdict = []; // each: { path, firing, detail }
+
+    // K1 — Telegram env vars missing
+    const tgToken = !!TELEGRAM_BOT_TOKEN;
+    const tgGroup = !!TELEGRAM_GROUP_CHAT_ID;
+    verdict.push({
+      id: 'K1', name: 'Telegram env vars',
+      firing: !tgToken || !tgGroup,
+      detail: `TELEGRAM_BOT_TOKEN=${tgToken?'✓':'✗MISSING'} · TELEGRAM_GROUP_CHAT_ID=${tgGroup?'✓':'✗MISSING'}`,
+    });
+
+    // K2 — pausePosting config override
+    const pausePosting = !!(AI_CONFIG_OVERRIDES?.pausePosting);
+    verdict.push({
+      id: 'K2', name: 'pausePosting override',
+      firing: pausePosting,
+      detail: pausePosting ? '⏸ AI_CONFIG_OVERRIDES.pausePosting is TRUE — posts silently skipped' : 'not set',
+    });
+
+    // K3 — freeze_active kill-switch
+    const freezeRow = safe(`SELECT value FROM agent_system_state WHERE key='freeze_active'`);
+    const freezeActive = freezeRow?.value === 'true';
+    verdict.push({
+      id: 'K3', name: 'freeze_active',
+      firing: freezeActive,
+      detail: freezeActive ? '🥶 agent_system_state.freeze_active=true — whole agent system halted' : 'not set',
+    });
+
+    // K4 — Active mode minScore too high
+    const modeName   = activeMode?.name ?? '?';
+    const modeMinScore = activeMode?.minScore ?? null;
+    // Only flag this if there are recent candidates and none scored above the mode's min
+    const recentMax = safe(`SELECT MAX(composite_score) as m FROM candidates WHERE evaluated_at > datetime('now','-24 hours')`)?.m ?? 0;
+    const blockedByMode = modeMinScore != null && recentMax > 0 && recentMax < modeMinScore;
+    verdict.push({
+      id: 'K4', name: 'Active mode minScore',
+      firing: blockedByMode,
+      detail: `mode=${modeName} minScore=${modeMinScore ?? 'n/a'} · last 24h max score=${recentMax}${blockedByMode ? ' · NOTHING meets mode bar' : ''}`,
+    });
+
+    // K5 — Dynamic threshold at 999 (scorer hard-block)
+    const thresholdRow = safe(`SELECT MAX(dynamic_threshold) as m FROM candidates WHERE evaluated_at > datetime('now','-1 hour')`);
+    const maxThreshold = thresholdRow?.m ?? 0;
+    verdict.push({
+      id: 'K5', name: 'Scorer dynamicThreshold >= 999',
+      firing: maxThreshold >= 999,
+      detail: `max dynamic_threshold in last hour = ${maxThreshold}${maxThreshold >= 999 ? ' · scorer hard-blocking' : ''}`,
+    });
+
+    // K6 — Blocklist too aggressive?
+    const blocklistSize = safe(`SELECT COUNT(*) as n FROM blocklist`)?.n ?? 0;
+
+    // K7 — audit_archive has AUTO_POST decisions but no posted=1 candidates
+    const archiveAutoPost = safe(`SELECT COUNT(*) as n FROM audit_archive WHERE final_decision='AUTO_POST' AND created_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const actualPosted    = safe(`SELECT COUNT(*) as n FROM candidates WHERE posted=1 AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+    verdict.push({
+      id: 'K7', name: 'AUTO_POST decided but not actually posted',
+      firing: archiveAutoPost > 0 && actualPosted === 0,
+      detail: `archive AUTO_POSTs 24h=${archiveAutoPost} · candidates.posted=1 24h=${actualPosted}${archiveAutoPost > actualPosted ? ' · POST SEND IS FAILING AFTER DECISION' : ''}`,
+    });
+
+    // K8 — Claude downgrade rate: how often Claude flipped AUTO_POST → WATCHLIST
+    const claudeDowngrades = safe(`
+      SELECT COUNT(*) as n FROM candidates
+      WHERE claude_risk = 'EXTREME' AND composite_score >= 42
+        AND final_decision IN ('WATCHLIST','IGNORE','HOLD_FOR_REVIEW')
+        AND evaluated_at > datetime('now', '-24 hours')
+    `)?.n ?? 0;
+    verdict.push({
+      id: 'K8', name: 'Claude downgrading AUTO_POST candidates',
+      firing: claudeDowngrades >= 3,
+      detail: `Claude flagged EXTREME + downgraded ${claudeDowngrades} high-score coins in last 24h${claudeDowngrades >= 3 ? ' · Claude prompt still too strict' : ''}`,
+    });
+
+    // K9 — OpenAI overriding AUTO_POST to IGNORE
+    const openaiIgnores = safe(`
+      SELECT COUNT(*) as n FROM candidates
+      WHERE openai_decision = 'IGNORE' AND composite_score >= 42
+        AND evaluated_at > datetime('now', '-24 hours')
+    `)?.n ?? 0;
+    verdict.push({
+      id: 'K9', name: 'OpenAI overriding to IGNORE',
+      firing: openaiIgnores >= 3,
+      detail: `GPT-4o IGNORE'd ${openaiIgnores} scored coins in last 24h${openaiIgnores >= 3 ? ' · OpenAI is the final authority and is killing posts' : ''}`,
+    });
+
+    // K10 — isRecentlySeen dedupe too aggressive
+    const feed24h = safe(`SELECT COUNT(*) as n FROM scanner_feed WHERE scanned_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const deduped24h = safe(`SELECT COUNT(*) as n FROM scanner_feed WHERE filter_action='DEDUPED' AND scanned_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const dedupedRatio = feed24h > 0 ? deduped24h / feed24h : 0;
+    verdict.push({
+      id: 'K10', name: 'Dedupe cache too aggressive',
+      firing: dedupedRatio > 0.5,
+      detail: `${deduped24h}/${feed24h} scanner rows DEDUPED (${Math.round(dedupedRatio*100)}%)${dedupedRatio > 0.5 ? ' · cache cooldown may be too long' : ''}`,
+    });
+
+    // K11 — No candidates being scored at all (pipeline broken)
+    const scored24h = safe(`SELECT COUNT(*) as n FROM candidates WHERE composite_score IS NOT NULL AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+    verdict.push({
+      id: 'K11', name: 'No scored candidates in 24h',
+      firing: scored24h === 0,
+      detail: `scored candidates last 24h = ${scored24h}${scored24h === 0 ? ' · processCandidate not running OR crashing silently' : ''}`,
+    });
+
+    // K12 — Trap detector auto-killing everything
+    const trapCritical = safe(`SELECT COUNT(*) as n FROM candidates WHERE trap_severity IN ('CRITICAL','HIGH') AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+    verdict.push({
+      id: 'K12', name: 'Trap detector CRITICAL/HIGH',
+      firing: scored24h > 0 && trapCritical / scored24h > 0.5,
+      detail: `${trapCritical}/${scored24h} hit CRITICAL/HIGH trap severity${trapCritical / Math.max(1, scored24h) > 0.5 ? ' · trap detector over-triggering' : ''}`,
+    });
+
+    // K13 — MIN_SCORE_TO_POST env var vs code default
+    verdict.push({
+      id: 'K13', name: 'MIN_SCORE_TO_POST env override',
+      firing: Number(MIN_SCORE_TO_POST) > 40,
+      detail: `current MIN_SCORE_TO_POST = ${MIN_SCORE_TO_POST}${Number(MIN_SCORE_TO_POST) > 40 ? ' · env var is set higher than code default of 35, consider deleting' : ''}`,
+    });
+
+    // Summary verdict: which killswitch is the primary culprit?
+    const firing = verdict.filter(v => v.firing);
+    const primary = firing.length
+      ? `🎯 PRIMARY SUSPECT: ${firing[0].name} (${firing[0].id}) — ${firing[0].detail}`
+      : '✓ No obvious kill-switches firing. Posts should flow. Check Railway logs for silent errors.';
+
+    res.json({
+      ok: true,
+      firing_count: firing.length,
+      primary_suspect: primary,
+      kill_paths: verdict,
+      recentMax,
+      scored24h,
+      archiveAutoPost,
+      actualPosted,
+      blocklistSize,
+      activeMode: { name: modeName, minScore: modeMinScore },
+      MIN_SCORE_TO_POST: Number(MIN_SCORE_TO_POST),
+      AI_CONFIG_OVERRIDES,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // ─── Last 10 rejected candidates with the metric breakdown that killed them ──
 // Per OpenAI brainstorm direction: log detailed breakdowns so we can see which
 // filter is disproportionately blocking calls.
