@@ -1192,17 +1192,43 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   const allowedRisks = ['LOW', 'MEDIUM', 'HIGH'];
   // Standard path: score >= threshold AND risk <= HIGH
   if (finalScore >= adjustedThreshold && allowedRisks.includes(risk)) return 'AUTO_POST';
-  // ── HIGH-SCORE OVERRIDE ─────────────────────────────────────────────
-  // User direction: the risk gate was rejecting 100% of scored coins
-  // (every one was tagged EXTREME). Allow EXTREME-risk coins through
-  // IF the composite score is strong (>= 50). Posts get a ⚠ HIGH RISK
-  // badge in Telegram so we can still study the outcome. Better to post
-  // questionable calls and learn than to post nothing.
+  // High-score EXTREME override (still useful as a backup path)
   if (finalScore >= 50 && risk === 'EXTREME') return 'AUTO_POST';
+  // ── 10-METRIC COMPENSATE-PASS OVERRIDE ──────────────────────────────
+  // Per OpenAI brainstorm direction: a coin can compensate for weaker
+  // areas by excelling in others. Score 7+ out of 10 binary criteria → AUTO_POST.
+  // Lets clean coins through even when one dimension trips a hard guard.
+  const compensate = computeCompensatePass(candidate, scoreResult);
+  if (compensate.passed) {
+    candidate._compensatePassCount = compensate.count;
+    candidate._compensateCriteria  = compensate.criteria;
+    return 'AUTO_POST';
+  }
   // Borderline coins (17-34 under threshold) still get watchlisted
   if (finalScore >= adjustedThreshold - 18) return 'WATCHLIST';
   if (finalScore >= adjustedThreshold - 28) return 'HOLD_FOR_REVIEW';
   return 'IGNORE';
+}
+
+// ─── 10-criteria compensate-pass scorer ───────────────────────────────
+// Each criterion is a binary 0/1. Coin passes if it scores 7+ overall.
+// Cleanly bypasses the "one bad dimension kills it" problem.
+function computeCompensatePass(candidate, scoreResult) {
+  const c = candidate || {};
+  const criteria = [
+    { name: 'dev_clean',       passed: (c.devWalletPct ?? 100) < 5 },
+    { name: 'top10_healthy',   passed: (c.top10HolderPct ?? 100) < 50 },
+    { name: 'lp_locked',       passed: c.lpLocked === 1 },
+    { name: 'mint_revoked',    passed: c.mintAuthority === 0 },
+    { name: 'freeze_revoked',  passed: c.freezeAuthority === 0 },
+    { name: 'volume_present',  passed: (c.volume1h ?? 0) > 5_000 || (c.volume24h ?? 0) > 25_000 },
+    { name: 'holders_growing', passed: (c.holders ?? 0) > 20 },
+    { name: 'buy_ratio_pos',   passed: (c.buySellRatio1h ?? 0) > 0.5 },
+    { name: 'no_severe_bundle',passed: !['SEVERE','HIGH'].includes(c.bundleRisk) },
+    { name: 'composite_decent', passed: (scoreResult?.score ?? 0) >= 40 },
+  ];
+  const count = criteria.filter(c => c.passed).length;
+  return { passed: count >= 7, count, criteria };
 }
 
 // ─── Telegram Helpers ─────────────────────────────────────────────────────────
@@ -4230,6 +4256,89 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ─── Last 10 rejected candidates with the metric breakdown that killed them ──
+// Per OpenAI brainstorm direction: log detailed breakdowns so we can see which
+// filter is disproportionately blocking calls.
+app.get('/api/diagnose/rejections', (req, res) => {
+  setCors(res);
+  try {
+    const rejected = dbInstance.prepare(`
+      SELECT contract_address, token, composite_score, final_decision,
+             claude_risk, claude_setup_type, claude_verdict,
+             dev_wallet_pct, top10_holder_pct, mint_authority, freeze_authority, lp_locked,
+             bundle_risk, bubble_map_risk, sniper_wallet_count,
+             buys_1h, sells_1h, buy_sell_ratio_1h, volume_1h, volume_24h,
+             holders, holder_growth_24h, market_cap, liquidity, pair_age_hours,
+             trap_severity, evaluated_at
+      FROM candidates
+      WHERE final_decision IN ('IGNORE','BLOCKLIST','HOLD_FOR_REVIEW')
+        AND composite_score IS NOT NULL
+        AND evaluated_at > datetime('now', '-24 hours')
+      ORDER BY composite_score DESC, evaluated_at DESC
+      LIMIT 10
+    `).all();
+
+    // Aggregate the most common rejection reasons across the batch
+    const reasonCounts = {};
+    const enriched = rejected.map(r => {
+      const reasons = [];
+      if (r.claude_risk === 'EXTREME')      { reasons.push('claude_extreme');     reasonCounts.claude_extreme = (reasonCounts.claude_extreme||0) + 1; }
+      if (r.bundle_risk === 'SEVERE')       { reasons.push('bundle_severe');      reasonCounts.bundle_severe  = (reasonCounts.bundle_severe||0)  + 1; }
+      if (r.bundle_risk === 'HIGH')         { reasons.push('bundle_high');        reasonCounts.bundle_high    = (reasonCounts.bundle_high||0)    + 1; }
+      if ((r.dev_wallet_pct ?? 0) > 15)     { reasons.push('dev_high');           reasonCounts.dev_high       = (reasonCounts.dev_high||0)       + 1; }
+      if ((r.top10_holder_pct ?? 0) > 70)   { reasons.push('top10_high');         reasonCounts.top10_high     = (reasonCounts.top10_high||0)     + 1; }
+      if ((r.sniper_wallet_count ?? 0) > 25){ reasons.push('snipers_heavy');      reasonCounts.snipers_heavy  = (reasonCounts.snipers_heavy||0)  + 1; }
+      if (r.mint_authority === 1)           { reasons.push('mint_active');        reasonCounts.mint_active    = (reasonCounts.mint_active||0)    + 1; }
+      if (r.lp_locked === 0)                { reasons.push('lp_unlocked');        reasonCounts.lp_unlocked    = (reasonCounts.lp_unlocked||0)    + 1; }
+      if (['HIGH','CRITICAL','SEVERE'].includes(r.trap_severity)) { reasons.push('trap_'+r.trap_severity.toLowerCase()); reasonCounts['trap_'+r.trap_severity.toLowerCase()] = (reasonCounts['trap_'+r.trap_severity.toLowerCase()]||0)+1; }
+      if ((r.composite_score ?? 0) < 35)    { reasons.push('below_threshold');    reasonCounts.below_threshold= (reasonCounts.below_threshold||0)+ 1; }
+
+      return {
+        token: r.token,
+        ca: r.contract_address,
+        score: r.composite_score,
+        decision: r.final_decision,
+        rejection_reasons: reasons,
+        metrics: {
+          dev_pct:        r.dev_wallet_pct,
+          top10_pct:      r.top10_holder_pct,
+          liq_mcap_ratio: (r.liquidity && r.market_cap) ? +(r.liquidity/r.market_cap).toFixed(3) : null,
+          holders:        r.holders,
+          holder_growth:  r.holder_growth_24h,
+          buys_1h:        r.buys_1h,
+          sells_1h:       r.sells_1h,
+          buy_ratio:      r.buy_sell_ratio_1h,
+          vol_1h:         r.volume_1h,
+          vol_24h:        r.volume_24h,
+          age_hours:      r.pair_age_hours,
+          mcap:           r.market_cap,
+          mint_revoked:   r.mint_authority === 0,
+          lp_locked:      r.lp_locked === 1,
+          bundle_risk:    r.bundle_risk,
+          claude_risk:    r.claude_risk,
+        },
+        claude: r.claude_verdict ? r.claude_verdict.slice(0, 150) : null,
+      };
+    });
+
+    // Recommendation: which filter is disproportionately killing things?
+    const sorted = Object.entries(reasonCounts).sort((a,b) => b[1] - a[1]);
+    const topReason = sorted[0];
+    const recommendation = topReason
+      ? `Top rejection cause: '${topReason[0]}' hit ${topReason[1]}/${rejected.length} times. Consider loosening that gate.`
+      : 'No rejections in the last 24h.';
+
+    res.json({
+      ok: true,
+      rejection_count: rejected.length,
+      reason_summary:  reasonCounts,
+      recommendation,
+      rejected_samples: enriched,
+      generated_at:    new Date().toISOString(),
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // ─── Score distribution diagnostic ────────────────────────────────────────
