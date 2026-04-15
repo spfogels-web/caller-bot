@@ -9311,8 +9311,27 @@ async function loadCallsTab(){
     .slice(0, 24);
   renderPromotedSection(promoted, calledCAs);
 
-  // Analyzer feed — verdicts per scored candidate
-  renderAnalyzerFeed(scored?.rows || [], calledCAs);
+  // Analyzer feed — union of fully-scored candidates + scanner_feed quick-scores
+  // so we always see every coin the pipeline has touched, not just ones that
+  // made it through full scoring.
+  const scoredCAs = new Set((scored?.rows || []).map(r => r.contract_address));
+  const feedRowsForAnalyzer = (scanner?.rows || [])
+    .filter(r => r.contract_address && !scoredCAs.has(r.contract_address) && (r.quick_score ?? 0) > 0)
+    .map(r => ({
+      contract_address: r.contract_address,
+      token: r.token,
+      composite_score: r.quick_score,     // treat quick_score as the working score
+      final_decision: (r.filter_action === 'PROMOTE' ? 'PENDING' : r.filter_action || 'PENDING'),
+      claude_risk: null,
+      claude_verdict: r.filter_reason || null,
+      bundle_risk: null,
+      sniper_wallet_count: null,
+      dev_wallet_pct: null,
+      evaluated_at: r.scanned_at,
+      _source: 'quick',  // flag so renderer shows '[QUICK]' badge
+    }));
+  const analyzerUnion = [...(scored?.rows || []).map(r => ({...r, _source: 'full'})), ...feedRowsForAnalyzer];
+  renderAnalyzerFeed(analyzerUnion, calledCAs);
 
   // Rejection audit — last 10 rejections with reason breakdown
   renderRejectionAudit(rejections);
@@ -9604,8 +9623,11 @@ function renderAnalyzerFeed(scoredRows, calledCAs){
     const score = r.composite_score || 0;
     const scCol = score >= 80 ? 'var(--gold)' : score >= 65 ? 'var(--green)' : score >= 50 ? 'var(--cyan)' : score >= 35 ? 'var(--blue)' : 'var(--text3)';
     const tok = r.token || (r.contract_address || '').slice(0,6);
+    const sourceTag = r._source === 'quick'
+      ? '<span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-left:5px">[QUICK]</span>'
+      : '<span style="font-family:var(--mono);font-size:7px;color:var(--green);letter-spacing:1px;margin-left:5px">[FULL]</span>';
     return `<div class="analyzer-row" style="--v-col:${v.col}" onclick="openFullCandidateDetail('${esc(r.contract_address||'')}')">
-      <div class="analyzer-row-token">$${esc(tok)}</div>
+      <div class="analyzer-row-token">$${esc(tok)}${sourceTag}</div>
       <div class="analyzer-row-verdict">${v.label}</div>
       <div class="analyzer-row-reason">${v.reason}</div>
       <div class="analyzer-row-score" style="color:${scCol}">${score}</div>

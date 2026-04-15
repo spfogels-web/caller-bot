@@ -4264,7 +4264,7 @@ app.get('/api/external/wallet/:address', async (req, res) => {
 app.get('/api/diagnose/rejections', (req, res) => {
   setCors(res);
   try {
-    const rejected = dbInstance.prepare(`
+    let rejected = dbInstance.prepare(`
       SELECT contract_address, token, composite_score, final_decision,
              claude_risk, claude_setup_type, claude_verdict,
              dev_wallet_pct, top10_holder_pct, mint_authority, freeze_authority, lp_locked,
@@ -4279,6 +4279,35 @@ app.get('/api/diagnose/rejections', (req, res) => {
       ORDER BY composite_score DESC, evaluated_at DESC
       LIMIT 10
     `).all();
+
+    // Fallback: if candidates table is empty but scanner_feed has SKIP/DEDUPED
+    // decisions, surface those so the audit isn't blank when the full scoring
+    // pipeline hasn't caught up yet.
+    if (!rejected.length) {
+      try {
+        const feedRejected = dbInstance.prepare(`
+          SELECT contract_address, token, quick_score as composite_score,
+                 filter_action as final_decision,
+                 NULL as claude_risk, NULL as claude_setup_type,
+                 filter_reason as claude_verdict,
+                 NULL as dev_wallet_pct, NULL as top10_holder_pct,
+                 NULL as mint_authority, NULL as freeze_authority, NULL as lp_locked,
+                 NULL as bundle_risk, NULL as bubble_map_risk, NULL as sniper_wallet_count,
+                 buys_1h, sells_1h, buy_ratio_1h as buy_sell_ratio_1h,
+                 volume_1h, volume_24h,
+                 NULL as holders, NULL as holder_growth_24h,
+                 market_cap, liquidity, pair_age_hours,
+                 NULL as trap_severity, scanned_at as evaluated_at
+          FROM scanner_feed
+          WHERE filter_action IN ('SKIP','DEDUPED','IGNORE','BLOCKLIST')
+            AND quick_score IS NOT NULL
+            AND scanned_at > datetime('now', '-24 hours')
+          ORDER BY quick_score DESC, scanned_at DESC
+          LIMIT 10
+        `).all();
+        rejected = feedRejected;
+      } catch (e) { /* schema may differ, fall through silently */ }
+    }
 
     // Aggregate the most common rejection reasons across the batch
     const reasonCounts = {};
