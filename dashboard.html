@@ -8958,7 +8958,21 @@ async function triggerBrainAnalysis() {
   if (!candidate) {
     try {
       const data = await apiFetch('/api/external/token/' + encodeURIComponent(ca));
-      if (data?.ok && data.candidate) candidate = data.candidate;
+      if (data?.ok && data.candidate) {
+        candidate = data.candidate;
+        // Log the auto-ingest result so we can see exactly what happened
+        if (data.walletsIngested) {
+          console.log('[brain-analyzer] walletsIngested:', data.walletsIngested);
+          const wi = data.walletsIngested;
+          if (wi.attempted === 0) {
+            console.warn('[brain-analyzer] ⚠ 0 holders resolved — Solscan and Helius both returned empty. Check SOLSCAN_API_KEY on Railway.');
+          } else if (wi.error) {
+            console.error('[brain-analyzer] ⚠ auto-insert error:', wi.error);
+          } else {
+            console.log('[brain-analyzer] ✓ ' + wi.inserted + ' new / ' + wi.updated + ' updated (of ' + wi.attempted + ')');
+          }
+        }
+      }
     } catch {}
   }
 

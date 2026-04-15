@@ -4173,6 +4173,7 @@ app.get('/api/external/token/:ca', async (req, res) => {
     // AND carry SOL balance so the tiles show it without an extra click.
     // INSERT OR IGNORE keeps existing labels/categories untouched; the
     // UPDATE afterward refreshes sol_balance even on pre-existing rows.
+    let _autoInsertResult = { attempted: owners.length, inserted: 0, updated: 0, error: null };
     if (owners.length) {
       try {
         const ins = dbInstance.prepare(`
@@ -4196,10 +4197,15 @@ app.get('/api/external/token/:ca', async (req, res) => {
           return { inserted, updated };
         });
         const { inserted, updated } = tx(owners);
-        console.log(`[external-token] Auto-added ${inserted} new · refreshed SOL on ${updated} rows (out of ${owners.length})`);
+        _autoInsertResult.inserted = inserted;
+        _autoInsertResult.updated  = updated;
+        console.log(`[external-token] ca=${ca.slice(0,8)} Auto-added ${inserted} new · refreshed SOL on ${updated} rows (out of ${owners.length})`);
       } catch (err) {
+        _autoInsertResult.error = err.message;
         console.warn('[external-token] auto-insert failed:', err.message);
       }
+    } else {
+      console.warn(`[external-token] ca=${ca.slice(0,8)} owners list is EMPTY — nothing to insert. Solscan/Helius both returned no holders.`);
     }
 
     // ── Populate holderStats + classify against tracked_wallets ──
@@ -4307,7 +4313,12 @@ app.get('/api/external/token/:ca', async (req, res) => {
       );
     } catch {}
 
-    res.json({ ok: true, candidate: merged, source: row ? 'db+live' : 'live-only' });
+    res.json({
+      ok: true,
+      candidate: merged,
+      source: row ? 'db+live' : 'live-only',
+      walletsIngested: _autoInsertResult,
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
