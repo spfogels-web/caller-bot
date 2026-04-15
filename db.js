@@ -554,6 +554,10 @@ function runMigrations() {
     `ALTER TABLE calls ADD COLUMN outcome_set_at TEXT`,
     `ALTER TABLE calls ADD COLUMN last_snapshot_at TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_calls_outcome_source ON calls(outcome_source)`,
+    // ── SOL balance cache on tracked_wallets ──
+    `ALTER TABLE tracked_wallets ADD COLUMN sol_balance REAL`,
+    `ALTER TABLE tracked_wallets ADD COLUMN sol_scanned_at TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_tw_sol_balance ON tracked_wallets(sol_balance DESC)`,
   ];
 
   let added = 0;

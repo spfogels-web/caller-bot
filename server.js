@@ -6525,9 +6525,17 @@ app.post('/api/wallets/scan-whales', async (req, res) => {
         if (!r.ok) { console.warn(`[scan-whales] chunk ${i} HTTP ${r.status}`); continue; }
         const j = await r.json();
         const values = j?.result?.value || [];
+        // Persist SOL balance to every scanned row so the Wallet Database
+        // tiles can show it without re-querying Helius.
+        const updSol = dbInstance.prepare(`
+          UPDATE tracked_wallets
+          SET sol_balance = ?, sol_scanned_at = datetime('now')
+          WHERE address = ?
+        `);
         for (let idx = 0; idx < values.length; idx++) {
           scannedCount++;
           const sol = (values[idx]?.lamports ?? 0) / 1e9;
+          try { updSol.run(Number(sol.toFixed(6)), chunk[idx].address); } catch {}
           if (sol >= minSol) {
             if (sol >= 100) megaCount++;
             else if (sol >= 10) whaleCount++;
@@ -6584,7 +6592,8 @@ app.get('/api/wallets/rankings', (req, res) => {
   try {
     const { limit = 200, category } = req.query;
     let q = `SELECT address, label, category, win_rate, avg_roi, trade_count, score,
-               wins_found_in, losses_in, source, notes, dune_data, updated_at
+               wins_found_in, losses_in, source, notes, dune_data, updated_at,
+               sol_balance, sol_scanned_at
              FROM tracked_wallets WHERE is_blacklist=0`;
     const params = [];
     if (category) { q += ' AND category=?'; params.push(category); }

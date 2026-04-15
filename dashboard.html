@@ -4121,6 +4121,7 @@ body::before {
                 <option value="NEUTRAL">⏳ UNCLASSIFIED</option>
               </select>
               <select id="wtSortBy" onchange="renderWalletTiles()" class="wt-select">
+                <option value="solBalance">SORT: SOL BALANCE</option>
                 <option value="score">SORT: SCORE</option>
                 <option value="winRate">SORT: WIN RATE</option>
                 <option value="avgRoi">SORT: AVG ROI</option>
@@ -7539,6 +7540,7 @@ function renderWalletTiles(){
   });
 
   rows.sort((a,b)=>{
+    if(sortBy==='solBalance') return (b.sol_balance||0) - (a.sol_balance||0);
     if(sortBy==='winRate') return (b.win_rate||0) - (a.win_rate||0);
     if(sortBy==='avgRoi')  return (b.avg_roi||0)  - (a.avg_roi||0);
     if(sortBy==='recent')  return new Date(b.updated_at||0).getTime() - new Date(a.updated_at||0).getTime();
@@ -7571,20 +7573,33 @@ function renderWalletTiles(){
     const sc    = w.score || 0;
     const seen  = w.updated_at ? timeAgo(w.updated_at) : '—';
     // Tier class + tier badge so the top-tier tiles really pop
-    const tier = cat === 'WINNER' ? 'tier-winner'
-               : cat === 'SMART_MONEY' ? 'tier-smart'
+    const sol = w.sol_balance != null ? Number(w.sol_balance) : null;
+    const isMega  = sol != null && sol >= 100;
+    const isWhale = sol != null && sol >= 10;
+    const tier = isMega ? 'tier-winner'
+               : cat === 'WINNER' ? 'tier-winner'
+               : (isWhale || cat === 'SMART_MONEY') ? 'tier-smart'
                : '';
-    const tierBadge = cat === 'WINNER' ? '🏆'
+    const tierBadge = isMega ? '🐋'
+                   : cat === 'WINNER' ? '🏆'
+                   : isWhale ? '💎'
                    : cat === 'SMART_MONEY' ? '⚡'
                    : cat === 'MOMENTUM' ? '🚀'
                    : cat === 'SNIPER' ? '🎯'
                    : cat === 'CLUSTER' ? '🕸️'
                    : cat === 'RUG' ? '⛔'
                    : '';
+    // SOL balance display — color-coded, replaces the ROI tile when we have data.
+    const solTxt = sol == null ? '—'
+                 : sol >= 1000 ? (sol/1000).toFixed(1) + 'K'
+                 : sol >= 10   ? sol.toFixed(1)
+                 : sol >= 1    ? sol.toFixed(2)
+                 : sol.toFixed(3);
+    const solCol = isMega ? '#ffd740' : isWhale ? '#00e676' : (sol > 1 ? '#18ffff' : '#8899bb');
     // Glow on high-signal numbers so the eye goes there first
     const scoreGlow = sc >= 70 ? ' glow' : '';
     const wrGlow    = (w.win_rate ?? 0) >= 0.5 ? ' glow' : '';
-    const roiGlow   = (w.avg_roi  ?? 0) >= 1    ? ' glow' : '';
+    const solGlow   = isWhale ? ' glow' : '';
     return `<div class="wt-tile ${tier}" style="--tile-cat-col:${col}" onclick="showWalletModal('${esc(addr)}')">
       ${tierBadge ? `<span class="wt-tier-badge">${tierBadge}</span>` : ''}
       <div class="wt-tile-head">
@@ -7592,9 +7607,9 @@ function renderWalletTiles(){
         <span class="wt-tile-cat">${lbl}</span>
       </div>
       <div class="wt-tile-stats">
+        <div class="wt-tile-stat"><div class="wt-tile-stat-label">◎ SOL</div><div class="wt-tile-stat-val${solGlow}" style="color:${solCol}">${solTxt}</div></div>
         <div class="wt-tile-stat"><div class="wt-tile-stat-label">SCORE</div><div class="wt-tile-stat-val${scoreGlow}" style="color:${col}">${sc}</div></div>
         <div class="wt-tile-stat"><div class="wt-tile-stat-label">WIN%</div><div class="wt-tile-stat-val${wrGlow}" style="color:${wrCol}">${wr}</div></div>
-        <div class="wt-tile-stat"><div class="wt-tile-stat-label">ROI</div><div class="wt-tile-stat-val${roiGlow}" style="color:${roiCol}">${roi}</div></div>
       </div>
       <div class="wt-tile-foot">
         <span>${esc(short)}</span>
