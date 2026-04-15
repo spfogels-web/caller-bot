@@ -2557,6 +2557,89 @@ body::before {
 .bsr-loading-dot:nth-child(3) { background: var(--gold); animation-delay: 0.4s; }
 
 /* ═══════════════════════════════════════════════════
+   📞 CALLS page — PROMOTED + CALLED sections + perf chart
+   ═══════════════════════════════════════════════════ */
+.calls-section {
+  background: linear-gradient(135deg, rgba(4,6,11,0.95), rgba(8,14,28,0.92));
+  border: 1px solid rgba(255,255,255,0.06);
+  border-left: 3px solid var(--hdr-col, var(--text3));
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.calls-section-hdr {
+  display: flex; justify-content: space-between; align-items: center;
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 11px; font-weight: 900; color: var(--hdr-col); letter-spacing: 2px;
+  padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 10px; flex-wrap: wrap; gap: 8px;
+}
+.calls-section-sub {
+  font-family: var(--mono); font-size: 8px; font-weight: 400;
+  color: var(--text3); letter-spacing: 1px;
+}
+.calls-grid-promoted {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.promo-card {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,109,0,0.2);
+  border-left: 3px solid #ff6d00;
+  border-radius: 8px; padding: 10px 12px;
+  cursor: pointer; transition: all 0.15s;
+}
+.promo-card:hover { transform: translateY(-1px); border-color: rgba(255,109,0,0.45); box-shadow: 0 4px 14px rgba(255,109,0,0.15); }
+.promo-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.promo-card-token { font-family: 'Orbitron', var(--mono), monospace; font-size: 13px; font-weight: 900; color: var(--text1); }
+.promo-card-score { font-family: 'Orbitron', var(--mono), monospace; font-size: 18px; font-weight: 900; }
+.promo-card-meta { font-family: var(--mono); font-size: 8px; color: var(--text3); letter-spacing: 0.5px; }
+.promo-card-meta b { color: var(--text2); font-weight: 700; }
+.promo-card-status {
+  display: inline-block; margin-top: 5px;
+  font-family: var(--mono); font-size: 7px; font-weight: 700; letter-spacing: 1px;
+  padding: 2px 6px; border-radius: 3px;
+}
+.promo-awaiting { background: rgba(24,255,255,0.1); border: 1px solid rgba(24,255,255,0.3); color: var(--cyan); }
+.promo-called   { background: rgba(0,230,118,0.12); border: 1px solid rgba(0,230,118,0.4); color: var(--green); }
+
+/* Performance chart — horizontal bars per call, peak_multiple as width */
+.perf-chart {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 280px; overflow-y: auto;
+  padding-right: 4px;
+}
+.perf-chart::-webkit-scrollbar { width: 4px; }
+.perf-chart::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+.perf-bar-row {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 9px;
+}
+.perf-bar-label {
+  width: 90px; flex-shrink: 0;
+  color: var(--text1); font-weight: 700;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.perf-bar-track {
+  flex: 1; height: 14px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px; overflow: hidden;
+  position: relative;
+}
+.perf-bar-fill {
+  height: 100%; border-radius: 3px;
+  transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
+}
+.perf-bar-baseline {
+  position: absolute; top: 0; bottom: 0;
+  width: 1px; background: rgba(136,153,187,0.4);
+}
+.perf-bar-value {
+  width: 60px; text-align: right; flex-shrink: 0;
+  font-weight: 800;
+}
+
+/* ═══════════════════════════════════════════════════
    📡 LIVE INTELLIGENCE — real-time pipeline event feed
    ═══════════════════════════════════════════════════ */
 .live-intel {
@@ -2950,18 +3033,43 @@ body::before {
           <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="callsAvgPeak">—</div></div>
         </div>
 
-        <!-- Filter row -->
-        <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">
-          <button class="fchip active" onclick="filterCalls(this,'all')">ALL</button>
-          <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
-          <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
-          <button class="fchip" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
-          <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
+        <!-- ═══ 🔥 PROMOTED (scanner's top picks — awaiting full decision) ═══ -->
+        <div class="calls-section">
+          <div class="calls-section-hdr" style="--hdr-col:#ff6d00">
+            <span>🔥 PROMOTED · <span id="promotedCount">0</span></span>
+            <span class="calls-section-sub">scanner picks · not yet called · moves to CALLED on AUTO_POST</span>
+          </div>
+          <div id="promotedFeed" class="calls-grid-promoted">
+            <div style="grid-column:1/-1;text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading promoted coins...</div>
+          </div>
         </div>
 
-        <!-- Calls feed -->
-        <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
-          <div style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
+        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
+        <div id="perfChartSection" class="calls-section" style="display:none">
+          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
+            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
+            <span class="calls-section-sub">latest calls left-to-right</span>
+          </div>
+          <div id="perfChart" class="perf-chart"></div>
+        </div>
+
+        <!-- ═══ 📞 CALLED (actual AUTO_POSTs with outcome) ═══ -->
+        <div class="calls-section" style="margin-top:4px">
+          <div class="calls-section-hdr" style="--hdr-col:#00e676">
+            <span>📞 CALLED · <span id="calledCount">0</span></span>
+            <span class="calls-section-sub">every AUTO_POST · outcome + peak tracked</span>
+          </div>
+          <!-- Filter row -->
+          <div style="display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 10px 0">
+            <button class="fchip active" onclick="filterCalls(this,'all')">ALL</button>
+            <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
+            <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
+            <button class="fchip" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
+            <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
+          </div>
+          <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
+            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
+          </div>
         </div>
       </div>
     </div><!-- /calls -->
@@ -8978,13 +9086,27 @@ var _callsFilter = 'all';
 async function loadCallsTab(){
   const feed = document.getElementById('callsFeed');
   if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>';
-  // Use /api/archive with AUTO_POST decision — that's where every posted call lives
-  const data = await apiFetch('/api/archive?decision=AUTO_POST&limit=300');
-  if (!data || !data.ok) {
+  // Parallel: actual AUTO_POSTs (archive) + scanner-feed PROMOTED picks
+  const [archive, scanner] = await Promise.all([
+    apiFetch('/api/archive?decision=AUTO_POST&limit=300'),
+    apiFetch('/api/scanner-feed?limit=120').catch(() => null),
+  ]);
+  if (!archive || !archive.ok) {
     if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Failed to load calls.</div>';
     return;
   }
-  _callsAll = data.rows || [];
+  _callsAll = archive.rows || [];
+
+  // Render PROMOTED section — scanner's top picks, dedupe against already-called CAs
+  const calledCAs = new Set(_callsAll.map(c => c.contract_address));
+  const promoted = (scanner?.rows || [])
+    .filter(r => r.filter_action === 'PROMOTE')
+    .sort((a, b) => (b.quick_score || 0) - (a.quick_score || 0))
+    .slice(0, 24);
+  renderPromotedSection(promoted, calledCAs);
+
+  // Render performance chart from resolved/peak calls
+  renderPerfChart(_callsAll);
   // Summary tiles
   const wins = _callsAll.filter(c => c.outcome === 'WIN').length;
   const losses = _callsAll.filter(c => c.outcome === 'LOSS').length;
@@ -9066,6 +9188,72 @@ function renderCallsFeed(){
         '</div>' +
       '</div>' +
     '</div>';
+  }).join('');
+}
+
+// ─── PROMOTED grid + performance chart ────────────────────────────
+function renderPromotedSection(promoted, calledCAs){
+  const el = document.getElementById('promotedFeed');
+  setText('promotedCount', promoted.length);
+  setText('calledCount', _callsAll.length);
+  if (!el) return;
+  if (!promoted.length) {
+    el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">No promoted coins right now — scanner will flag as they appear.</div>';
+    return;
+  }
+  el.innerHTML = promoted.map(r => {
+    const tok = r.token || (r.contract_address||'').slice(0,6);
+    const qs = r.quick_score || 0;
+    const col = qs >= 80 ? 'var(--gold)' : qs >= 65 ? 'var(--green)' : qs >= 50 ? 'var(--cyan)' : 'var(--orange)';
+    const mc = r.market_cap ? fmt(r.market_cap, '$') : '—';
+    const liq = r.liquidity ? fmt(r.liquidity, '$') : '—';
+    const age = r.pair_age_hours != null
+      ? (r.pair_age_hours < 1 ? Math.round(r.pair_age_hours * 60) + 'm' : r.pair_age_hours.toFixed(1) + 'h')
+      : '—';
+    const wasCalled = calledCAs.has(r.contract_address);
+    const statusBadge = wasCalled
+      ? '<span class="promo-card-status promo-called">✓ CALLED</span>'
+      : '<span class="promo-card-status promo-awaiting">⏳ AWAITING CALL</span>';
+    const gemWin = (r.market_cap||0) >= 7500 && (r.market_cap||0) <= 40000;
+    return `<div class="promo-card" onclick="openFullCandidateDetail('${esc(r.contract_address||'')}')">
+      <div class="promo-card-head">
+        <span class="promo-card-token">$${esc(tok)}${gemWin?' 💎':''}</span>
+        <span class="promo-card-score" style="color:${col}">${qs}</span>
+      </div>
+      <div class="promo-card-meta">MCap: <b>${mc}</b> · Liq: <b>${liq}</b> · Age: <b>${age}</b></div>
+      ${statusBadge}
+    </div>`;
+  }).join('');
+}
+
+function renderPerfChart(calls){
+  const section = document.getElementById('perfChartSection');
+  const chart = document.getElementById('perfChart');
+  if (!section || !chart) return;
+  const withPeaks = calls.filter(c => c.peak_multiple != null && c.peak_multiple > 0);
+  if (!withPeaks.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+
+  const topRecent = withPeaks
+    .sort((a, b) => (new Date(b.created_at || 0).getTime()) - (new Date(a.created_at || 0).getTime()))
+    .slice(0, 30);
+  const maxPeak = Math.max(...topRecent.map(c => c.peak_multiple), 2);
+  const barScale = 100 / maxPeak;
+
+  chart.innerHTML = topRecent.map(c => {
+    const peak = c.peak_multiple;
+    const widthPct = Math.min(100, peak * barScale);
+    const col = peak >= 10 ? '#ffd740' : peak >= 5 ? '#00e676' : peak >= 2 ? '#18ffff' : peak >= 1 ? '#448aff' : '#ff1744';
+    const gradient = `linear-gradient(90deg, ${col}55, ${col})`;
+    const baselinePct = 1 / maxPeak * 100;
+    return `<div class="perf-bar-row" onclick="openFullCandidateDetail('${esc(c.contract_address||'')}')" style="cursor:pointer">
+      <span class="perf-bar-label" style="color:${col}">$${esc(c.token || '?')}</span>
+      <div class="perf-bar-track">
+        <div class="perf-bar-fill" style="width:${widthPct}%;background:${gradient}"></div>
+        <div class="perf-bar-baseline" style="left:${baselinePct}%" title="1x (entry)"></div>
+      </div>
+      <span class="perf-bar-value" style="color:${col}">${peak.toFixed(2)}x</span>
+    </div>`;
   }).join('');
 }
 
