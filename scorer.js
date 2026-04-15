@@ -1,3 +1,5 @@
+import { runDualModel } from './scorer-dual.js';
+
 /**
  * ─────────────────────────────────────────────────────────────────────────────
  *  scorer.js — Multi-dimensional scoring engine v5 (GEM QUALITY UPDATE)
@@ -753,12 +755,35 @@ export function computeFullScore(candidate) {
     return Math.round(base * sf);
   })();
 
+  // ── DUAL-MODEL OVERLAY ─────────────────────────────────────────────────
+  // Route to DISCOVERY (0-60 min) or RUNNER (60 min–4 hr) scoring. The new
+  // model's normalized 0-100 replaces `score` as the canonical number, while
+  // the existing sub-scores / signals / penalties / structureGrade / etc.
+  // stay intact so every downstream consumer (UI, Claude prompts, DB) keeps
+  // working unchanged. `composite` remains exposed as `legacyScore`.
+  const dual = runDualModel(candidate);
+  const legacyScore = composite;
+  const finalScore  = dual.finalScore ?? composite;
+
   return {
-    score:   composite,
+    score:   finalScore,    // NEW: dual-model canonical score
+    legacyScore,            // KEPT: original 4-dimension composite for comparison
     risk,
     decision,
     setupType,
     stage,
+    // Dual-model fields (per new spec)
+    finalScore,
+    modelUsed:      dual.modelUsed,
+    confidence:     dual.confidence,
+    action:         dual.action,
+    reasons:        dual.reasons,
+    risks:          dual.risks,
+    ageMinutes:     dual.ageMinutes,
+    discoveryScore: dual.discoveryScore,
+    runnerScore:    dual.runnerScore,
+    dualParts:      dual.parts,
+    dualThresholds: dual.thresholds,
     subScores: {
       launchQuality:   launchResult.score,
       walletStructure: walletResult.score,
@@ -771,12 +796,14 @@ export function computeFullScore(candidate) {
       market:  marketResult.signals,
       social:  socialResult.signals,
       stealth: stealthResult.signals,
+      dualModel: dual.reasons || [],
     },
     penalties: {
       launch: launchResult.penalties,
       wallet: walletResult.penalties,
       market: marketResult.penalties,
       social: socialResult.penalties,
+      dualModel: dual.risks || [],
     },
     structureGrade:  walletResult.structureGrade,
     trapDetector: {
@@ -790,19 +817,21 @@ export function computeFullScore(candidate) {
     stealthDetected: stealthResult.isStealthy,
     stealthBonus:    stealthResult.bonus,
     bullCase: [
+      ...(dual.reasons || []),          // dual-model reasons bubble up first
       ...launchResult.signals,
       ...walletResult.signals,
       ...marketResult.signals,
       ...socialResult.signals,
       ...stealthResult.signals,
-    ].slice(0, 6),
+    ].slice(0, 8),
     redFlags: [
+      ...(dual.risks || []),
       ...launchResult.penalties,
       ...walletResult.penalties,
       ...marketResult.penalties,
       ...socialResult.penalties,
       ...trapResult.traps,
-    ].slice(0, 8),
+    ].slice(0, 10),
     stageAdjustment: stageAdj,
   };
 }
