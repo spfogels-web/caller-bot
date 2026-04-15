@@ -9004,6 +9004,14 @@ async function triggerBrainAnalysis() {
 
     _setBrainStatus('COMPLETE', 'done');
     _setBrainProgress(100, '✓ Scan complete · ' + (candidate.token ? '$' + candidate.token : ca.slice(0, 8)));
+
+    // Refresh Wallet Database — the server just auto-inserted the scanned
+    // holders with SOL balance, but the tile grid won't show them until we
+    // reload. No click required from the user.
+    if (typeof loadWalletTiles === 'function') loadWalletTiles();
+    if (typeof loadWalletRankings === 'function') loadWalletRankings();
+    if (typeof loadSmartMoneySummary === 'function') loadSmartMoneySummary();
+    if (typeof loadWinnerWallets === 'function') loadWinnerWallets();
   } else {
     BRAIN_STAGES_ORDER.forEach(s => _setBrainStage(s, 'done', '—'));
     _setBrainStatus('NO DATA', 'error');
