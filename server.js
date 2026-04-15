@@ -1190,9 +1190,16 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   if (scorerDecision === 'WATCHLIST') return 'WATCHLIST';
 
   const allowedRisks = ['LOW', 'MEDIUM', 'HIGH'];
-  // HARD AUTO-POST: score >= 58 AND risk not EXTREME. No other gates.
+  // Standard path: score >= threshold AND risk <= HIGH
   if (finalScore >= adjustedThreshold && allowedRisks.includes(risk)) return 'AUTO_POST';
-  // Borderline coins (40-57) still get watchlisted so they keep getting rescans
+  // ── HIGH-SCORE OVERRIDE ─────────────────────────────────────────────
+  // User direction: the risk gate was rejecting 100% of scored coins
+  // (every one was tagged EXTREME). Allow EXTREME-risk coins through
+  // IF the composite score is strong (>= 50). Posts get a ⚠ HIGH RISK
+  // badge in Telegram so we can still study the outcome. Better to post
+  // questionable calls and learn than to post nothing.
+  if (finalScore >= 50 && risk === 'EXTREME') return 'AUTO_POST';
+  // Borderline coins (17-34 under threshold) still get watchlisted
   if (finalScore >= adjustedThreshold - 18) return 'WATCHLIST';
   if (finalScore >= adjustedThreshold - 28) return 'HOLD_FOR_REVIEW';
   return 'IGNORE';
