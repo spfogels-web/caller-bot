@@ -482,6 +482,59 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_momentum_spike ON momentum_snapshots(spike_flag)`,
     // Keep momentum history bounded — drop older than 6h
     `DELETE FROM momentum_snapshots WHERE created_at < datetime('now', '-6 hours')`,
+    // ── Dev behavioral fingerprints ──
+    `CREATE TABLE IF NOT EXISTS dev_fingerprints (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      deployer_address    TEXT    NOT NULL UNIQUE,
+      total_launches      INTEGER DEFAULT 0,
+      wins                INTEGER DEFAULT 0,
+      losses              INTEGER DEFAULT 0,
+      pending             INTEGER DEFAULT 0,
+      avg_peak_multiple   REAL,
+      best_peak_multiple  REAL,
+      worst_loss_multiple REAL,
+      avg_composite_score REAL,
+      win_rate            REAL,
+      fingerprint_score   INTEGER,     -- 0-100 trust score
+      grade               TEXT,        -- ELITE | PROVEN | NEUTRAL | SUSPECT | RUGGER
+      first_seen_at       TEXT,
+      last_launch_at      TEXT,
+      tags                TEXT,        -- JSON: patterns spotted
+      refreshed_at        TEXT    DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_devfp_addr  ON dev_fingerprints(deployer_address)`,
+    `CREATE INDEX IF NOT EXISTS idx_devfp_grade ON dev_fingerprints(grade)`,
+    `CREATE INDEX IF NOT EXISTS idx_devfp_score ON dev_fingerprints(fingerprint_score DESC)`,
+    // ── Pre-launch suspect wallets (funded by exchanges, could be new devs) ──
+    `CREATE TABLE IF NOT EXISTS prelaunch_suspects (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      wallet          TEXT    NOT NULL,
+      funded_at       TEXT    NOT NULL,
+      funded_amount   REAL,
+      source_exchange TEXT,
+      expires_at      TEXT    NOT NULL,   -- 6h after funded_at
+      consumed        INTEGER DEFAULT 0,  -- 1 if we've seen them launch a token
+      launched_ca     TEXT,
+      created_at      TEXT    DEFAULT (datetime('now'))
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_prelaunch_wallet ON prelaunch_suspects(wallet)`,
+    `CREATE INDEX IF NOT EXISTS idx_prelaunch_expires     ON prelaunch_suspects(expires_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_prelaunch_consumed    ON prelaunch_suspects(consumed)`,
+    `DELETE FROM prelaunch_suspects WHERE expires_at < datetime('now')`,
+    // ── Cross-chain migration matches (ETH/Base → Solana) ──
+    `CREATE TABLE IF NOT EXISTS crosschain_matches (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      sol_contract        TEXT    NOT NULL,
+      source_chain        TEXT    NOT NULL,   -- 'ethereum' | 'base'
+      source_contract     TEXT,
+      match_type          TEXT    NOT NULL,   -- 'symbol' | 'name' | 'exact'
+      match_confidence    REAL,
+      source_symbol       TEXT,
+      source_price_change REAL,
+      detected_at         TEXT    DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_crosschain_sol ON crosschain_matches(sol_contract)`,
+    `DELETE FROM crosschain_matches WHERE detected_at < datetime('now', '-7 days')`,
   ];
 
   let added = 0;

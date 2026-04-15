@@ -2102,6 +2102,53 @@ async function processCandidate(candidate, isRescan = false) {
     const scoreResult = computeFullScore(enrichedCandidate);
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
+
+    // ── Dev fingerprint adjustment: boost ELITE/PROVEN devs, penalize RUGGERs ──
+    try {
+      const deployer = enrichedCandidate.deployerVerdict || enrichedCandidate.deployer_verdict;
+      if (deployer) {
+        const { getDevFingerprint, devScoreAdjustment } = await import('./dev-fingerprint.js');
+        const fp = getDevFingerprint(deployer, dbInstance);
+        const adj = devScoreAdjustment(fp);
+        if (adj.delta !== 0) {
+          scoreResult.score = Math.max(0, Math.min(100, scoreResult.score + adj.delta));
+          scoreResult.devFingerprint = { ...fp, adjustment: adj };
+          (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+          if (adj.delta > 0) scoreResult.signals.launch.push(adj.reason);
+          else (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), adj.reason];
+        }
+      }
+    } catch {}
+
+    // ── Pre-launch suspect: this dev was just funded by an exchange? ──
+    try {
+      const deployer = enrichedCandidate.deployerVerdict || enrichedCandidate.deployer_verdict;
+      if (deployer) {
+        const { isPreLaunchSuspect, markSuspectConsumed } = await import('./pre-launch-detector.js');
+        const suspect = isPreLaunchSuspect(deployer, dbInstance);
+        if (suspect) {
+          scoreResult.score = Math.min(100, scoreResult.score + 12);
+          scoreResult.preLaunchPredicted = true;
+          (scoreResult.signals = scoreResult.signals || {}).launch =
+            [...(scoreResult.signals.launch || []),
+             `🎯 PRE_LAUNCH_PREDICTED — dev funded by ${suspect.source_exchange} ${suspect.funded_amount}◎ within last 6h`];
+          markSuspectConsumed(deployer, ca, dbInstance);
+        }
+      }
+    } catch {}
+
+    // ── Cross-chain match: is this a migration of a hot ETH/Base token? ──
+    try {
+      const { getCrossChainMatch } = await import('./cross-chain-tracker.js');
+      const match = getCrossChainMatch(ca, dbInstance);
+      if (match && match.match_confidence >= 0.85) {
+        scoreResult.score = Math.min(100, scoreResult.score + 8);
+        scoreResult.crossChainMatch = match;
+        (scoreResult.signals = scoreResult.signals || {}).social =
+          [...(scoreResult.signals.social || []),
+           `🌉 CROSS-CHAIN MATCH — $${match.source_symbol} on ${match.source_chain} up ${Math.round(match.source_price_change||0)}% (${Math.round(match.match_confidence*100)}% match)`];
+      }
+    } catch {}
     let regimeAdj = { adjustedScore: scoreResult.score, thresholdAdjust: 0, regimeNotes: [] };
     try {
       const ra = applyRegimeAdjustments(scoreResult.score, enrichedCandidate, scoreResult);
@@ -4169,6 +4216,60 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   }
 });
 
+// ─── Dev Fingerprint API ──────────────────────────────────────────────────
+app.get('/api/dev-fingerprint/:address', async (req, res) => {
+  setCors(res);
+  try {
+    const { getDevFingerprint } = await import('./dev-fingerprint.js');
+    const fp = getDevFingerprint(req.params.address, dbInstance);
+    res.json({ ok: true, fingerprint: fp });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.get('/api/dev-fingerprints/top', (req, res) => {
+  setCors(res);
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const grade = req.query.grade;
+    let q = `SELECT * FROM dev_fingerprints WHERE total_launches >= 1`;
+    const params = [];
+    if (grade) { q += ` AND grade = ?`; params.push(grade); }
+    q += ` ORDER BY fingerprint_score DESC LIMIT ?`;
+    params.push(limit);
+    const rows = dbInstance.prepare(q).all(...params);
+    const counts = dbInstance.prepare(
+      `SELECT grade, COUNT(*) as n FROM dev_fingerprints GROUP BY grade`
+    ).all();
+    res.json({ ok: true, devs: rows, byGrade: Object.fromEntries(counts.map(c => [c.grade, c.n])) });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ─── Pre-launch suspect wallets ───────────────────────────────────────────
+app.get('/api/prelaunch/suspects', (req, res) => {
+  setCors(res);
+  try {
+    const rows = dbInstance.prepare(
+      `SELECT * FROM prelaunch_suspects WHERE expires_at > datetime('now') ORDER BY funded_at DESC LIMIT 100`
+    ).all();
+    res.json({ ok: true, suspects: rows, count: rows.length });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ─── Cross-chain migration matches ────────────────────────────────────────
+app.get('/api/crosschain/matches', (req, res) => {
+  setCors(res);
+  try {
+    const rows = dbInstance.prepare(`
+      SELECT m.*, c.token, c.token_name, c.composite_score, c.final_decision, c.market_cap
+      FROM crosschain_matches m
+      LEFT JOIN candidates c ON c.contract_address = m.sol_contract
+      WHERE m.detected_at > datetime('now', '-24 hours')
+      ORDER BY m.match_confidence DESC LIMIT 50
+    `).all();
+    res.json({ ok: true, matches: rows, count: rows.length });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // ─── Momentum / Hot Movers — parallel tracker surface ─────────────────────
 // Returns the most recent spike flags (PRICE_SPIKE / VOLUME_SPIKE / BREAKOUT)
 // from the momentum_snapshots table. Powers the "hot now" widget.
@@ -6043,14 +6144,30 @@ app.listen(PORT, async () => {
   }
 
   // ── Momentum Tracker: parallel price/volume spike detection (every 15s) ───
-  // Separate async lane that watches the top 40 scored candidates for rapid
-  // mcap / volume breakouts — sub-minute reaction window.
   try {
     const { startMomentumTracker } = await import('./momentum-tracker.js');
     startMomentumTracker(dbInstance);
     console.log('[startup] ✓ Momentum tracker active — 15s tick, top 40 candidates');
   } catch (err) {
     console.warn('[startup] Momentum tracker failed to start:', err.message);
+  }
+
+  // ── Pre-Launch Detector: watch exchange wallets for fresh dev funding ────
+  try {
+    const { startPreLaunchDetector } = await import('./pre-launch-detector.js');
+    startPreLaunchDetector(dbInstance);
+    console.log('[startup] ✓ Pre-launch detector active — 90s tick, watching exchange hot wallets');
+  } catch (err) {
+    console.warn('[startup] Pre-launch detector failed to start:', err.message);
+  }
+
+  // ── Cross-Chain Tracker: ETH/Base trending → Solana migration matches ────
+  try {
+    const { startCrossChainTracker } = await import('./cross-chain-tracker.js');
+    startCrossChainTracker(dbInstance);
+    console.log('[startup] ✓ Cross-chain tracker active — 5min tick, ETH + Base');
+  } catch (err) {
+    console.warn('[startup] Cross-chain tracker failed to start:', err.message);
   }
 
   // ── v8.0: Survivor Detection (every 30min) ────────────────────────────────
