@@ -2400,6 +2400,26 @@ async function processCandidate(candidate, isRescan = false) {
     // Mark discovery time for pipeline budget tracking
     if (!enrichedCandidate._discoveredAt) enrichedCandidate._discoveredAt = Date.now();
 
+    // ── Smart Money Watcher override ─────────────────────────────────────────
+    // Cluster of ≥3 WINNER wallets in 10min is the highest-conviction signal
+    // we have — force AUTO_POST regardless of scorer / Claude / OpenAI. A
+    // single WINNER buy still defers to the AI stack, but we tag the caption
+    // so the TG alert shouts BIG WALLET ALERT.
+    const sm = enrichedCandidate._smartMoney;
+    if (sm?.kind === 'cluster') {
+      if (finalDecision !== 'AUTO_POST') {
+        logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (cluster=${sm.clusterSize})`);
+        console.log(`[smart-money] 🐋🐋🐋 CLUSTER OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (cluster=${sm.clusterSize})`);
+      }
+      finalDecision = 'AUTO_POST';
+    } else if (sm?.kind === 'single') {
+      // Soft promote: if score is reasonable, allow the post even if OpenAI was lukewarm
+      if (finalDecision === 'WATCHLIST' && (scoreResult?.score ?? 0) >= 45) {
+        logEvent('INFO', 'SMART_MONEY_PROMOTE', `${enrichedCandidate.token ?? ca.slice(0,6)} WATCHLIST → AUTO_POST (single winner, score ${scoreResult.score})`);
+        finalDecision = 'AUTO_POST';
+      }
+    }
+
     // Attach scoreResult breakdown directly to enrichedCandidate
     // so db.js insertCandidate picks them up if columns exist
     enrichedCandidate.subScores       = scoreResult.subScores;
@@ -2968,7 +2988,24 @@ async function runAutoCallerCycle() {
  * Build the enhanced v8 Telegram caption that includes OpenAI decision verdict.
  */
 function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
-  const basePart = buildCallAlertCaption(candidate, verdict, scoreResult);
+  let basePart = buildCallAlertCaption(candidate, verdict, scoreResult);
+
+  // ── Smart-money alert banner (prepended) ────────────────────────────────
+  // User request: never reveal which wallet bought. Just flag it loudly.
+  const sm = candidate._smartMoney;
+  if (sm?.kind === 'cluster') {
+    basePart =
+      `🐋🐋🐋 <b>WHALE CLUSTER ALERT</b> 🐋🐋🐋\n` +
+      `<i>${sm.clusterSize} tracked winner wallets bought this coin in the last 10 minutes. Forced auto-post.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
+  } else if (sm?.kind === 'single') {
+    basePart =
+      `🐋 <b>BIG WALLET ALERT</b>\n` +
+      `<i>A tracked winner wallet just bought this coin. Full analysis below.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
+  }
 
   // Append OpenAI layer if available
   if (!openAIDecision) return basePart;
@@ -6880,6 +6917,32 @@ app.listen(PORT, async () => {
   // ── v8.0: Start Learning Loop ─────────────────────────────────────────────
   learningLoopHandles = startLearningLoop(dbInstance, CLAUDE_API_KEY);
   console.log('[startup] ✓ Learning loop active — outcome tracking + missed winner detection');
+
+  // ── Smart Money Watcher: live feed of WINNER-tier wallet buys ─────────────
+  // Polls Helius Enhanced Transactions for the top N tracked wallets and
+  // emits an alert when one (or a cluster of 3+) buys a fresh coin. The alert
+  // runs that coin through the normal scoring pipeline with a forced tag so
+  // the TG message is prefixed with a BIG WALLET / WHALE CLUSTER header.
+  try {
+    const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
+    startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {
+      try {
+        console.log(`[smart-money→pipeline] $${ca.slice(0,8)} kind=${kind} cluster=${clusterSize} — pushing into processCandidate`);
+        await processCandidate({
+          contractAddress: ca,
+          chain:           'solana',
+          candidateType:   kind === 'cluster' ? 'SMART_MONEY_CLUSTER' : 'SMART_MONEY_SINGLE',
+          _smartMoney:     { kind, clusterSize, detectedAt: Date.now() },
+          _discoveredAt:   Date.now(),
+        });
+      } catch (err) {
+        console.warn('[smart-money→pipeline] processCandidate failed:', err.message);
+      }
+    });
+    console.log('[startup] ✓ Smart Money watcher active — WINNER-tier wallets polled every 90s');
+  } catch (err) {
+    console.warn('[startup] Smart Money watcher failed to start:', err.message);
+  }
 
   // ── Smart Money: Solscan wallet enrichment loop (every 6h) ────────────────
   // Backfills tracked_wallets with real win-rate / ROI based on overlap with
