@@ -4216,6 +4216,59 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   }
 });
 
+// ─── Send a test Telegram post to verify the pipeline is wired up ────────
+// Hit with POST /api/diagnose/test-telegram — sends a simple message to the
+// configured group. If this works, Telegram is fine and the issue is scoring.
+app.post('/api/diagnose/test-telegram', async (req, res) => {
+  setCors(res);
+  try {
+    const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour12: true });
+    const text = `🧪 <b>TEST POST from PULSE CALLER</b>\n\nIf you're seeing this, Telegram posting works.\n\n⏰ ${now} ET\n📡 Bot is online and able to post AUTO_POST calls when a candidate scores ≥ ${MIN_SCORE_TO_POST}.`;
+    if (!TELEGRAM_BOT_TOKEN) return res.status(503).json({ ok: false, error: 'TELEGRAM_BOT_TOKEN missing in Railway env vars' });
+    if (!TELEGRAM_GROUP_CHAT_ID) return res.status(503).json({ ok: false, error: 'TELEGRAM_GROUP_CHAT_ID missing in Railway env vars' });
+    await sendTelegramGroupMessage(text);
+    res.json({ ok: true, sentTo: TELEGRAM_GROUP_CHAT_ID, message: text });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ─── Force-post the highest-scoring candidate from the last N hours ──────
+// Use when you just want to SEE a post happen. Skips the score threshold
+// and posts whatever the top scored candidate is.
+// POST /api/diagnose/force-post?hours=6   (default 6h window)
+app.post('/api/diagnose/force-post', async (req, res) => {
+  setCors(res);
+  try {
+    const hours = Math.min(parseInt(req.query.hours) || 6, 48);
+    const row = dbInstance.prepare(`
+      SELECT * FROM candidates
+      WHERE composite_score IS NOT NULL
+        AND evaluated_at > datetime('now', ?)
+        AND contract_address IS NOT NULL
+      ORDER BY composite_score DESC
+      LIMIT 1
+    `).get(`-${hours} hours`);
+    if (!row) return res.status(404).json({ ok: false, error: `No scored candidate found in the last ${hours}h` });
+
+    if (!TELEGRAM_BOT_TOKEN) return res.status(503).json({ ok: false, error: 'TELEGRAM_BOT_TOKEN missing' });
+    if (!TELEGRAM_GROUP_CHAT_ID) return res.status(503).json({ ok: false, error: 'TELEGRAM_GROUP_CHAT_ID missing' });
+
+    const score = row.composite_score;
+    const mcap  = row.market_cap ? `$${Math.round(row.market_cap / 1000)}K` : '?';
+    const liq   = row.liquidity  ? `$${Math.round(row.liquidity  / 1000)}K` : '?';
+    const stage = row.stage || '?';
+    const text =
+      `🧪 <b>FORCE POST — $${row.token || '?'}</b>  (manual trigger)\n\n` +
+      `Score: <b>${score}/100</b>  ·  Stage: ${stage}  ·  Decision: ${row.final_decision || 'n/a'}\n` +
+      `MCap: ${mcap}  ·  Liq: ${liq}\n\n` +
+      `<code>${row.contract_address}</code>\n\n` +
+      `<a href="https://dexscreener.com/solana/${row.contract_address}">DexScreener</a> · ` +
+      `<a href="https://pump.fun/${row.contract_address}">Pump.fun</a>\n\n` +
+      `⚠ This was force-posted via /api/diagnose/force-post — not a real AUTO_POST decision.`;
+    await sendTelegramGroupMessage(text);
+    res.json({ ok: true, posted: { token: row.token, ca: row.contract_address, score }, message: text });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // ─── DIAGNOSTIC: why is nothing posting? Surfaces all silent guards ──────
 app.get('/api/diagnose/posting', (req, res) => {
   setCors(res);
