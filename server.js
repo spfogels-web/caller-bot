@@ -6572,51 +6572,41 @@ app.post('/api/wallets/scan-whales', async (req, res) => {
     let megaCount = 0, whaleCount = 0, scannedCount = 0;
     const whales = []; // { address, label, category, solBalance }
 
-    for (let i = 0; i < rows.length; i += 100) {
-      const chunk = rows.slice(i, i + 100);
+    // One getBalance call per wallet. Each response is 3 fields. No batching,
+    // no large payloads, no chance of stack-overflow on parse. Slower per
+    // click, but it actually finishes.
+    const updSol = dbInstance.prepare(`
+      UPDATE tracked_wallets
+      SET sol_balance = ?, sol_scanned_at = datetime('now')
+      WHERE address = ?
+    `);
+    for (const row of rows) {
+      scannedCount++;
+      let sol = 0;
       try {
         const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0', id: 'whales', method: 'getMultipleAccounts',
-            // dataSlice length 0 means we only get lamports back — no data blob.
-            // Keeps the response small and JSON-parse-safe.
-            params: [chunk.map(w => w.address), {
-              commitment: 'confirmed',
-              encoding: 'base64',
-              dataSlice: { offset: 0, length: 0 },
-            }],
-          }),
-          signal: AbortSignal.timeout(12_000),
+          body: JSON.stringify({ jsonrpc:'2.0', id:'bal', method:'getBalance', params:[row.address] }),
+          signal: AbortSignal.timeout(5_000),
         });
-        if (!r.ok) { console.warn(`[scan-whales] chunk ${i} HTTP ${r.status}`); continue; }
-        const j = await r.json();
-        const values = j?.result?.value || [];
-        // Persist SOL balance to every scanned row so the Wallet Database
-        // tiles can show it without re-querying Helius.
-        const updSol = dbInstance.prepare(`
-          UPDATE tracked_wallets
-          SET sol_balance = ?, sol_scanned_at = datetime('now')
-          WHERE address = ?
-        `);
-        for (let idx = 0; idx < values.length; idx++) {
-          scannedCount++;
-          const sol = (values[idx]?.lamports ?? 0) / 1e9;
-          try { updSol.run(Number(sol.toFixed(6)), chunk[idx].address); } catch {}
-          if (sol >= minSol) {
-            if (sol >= 100) megaCount++;
-            else if (sol >= 10) whaleCount++;
-            whales.push({
-              address:  chunk[idx].address,
-              label:    chunk[idx].label || null,
-              category: chunk[idx].category || 'NEUTRAL',
-              solBalance: Number(sol.toFixed(4)),
-            });
-          }
+        if (r.ok) {
+          const j = await r.json();
+          sol = (j?.result?.value ?? 0) / 1e9;
         }
       } catch (err) {
-        console.warn(`[scan-whales] chunk ${i} failed:`, err.message);
+        console.warn(`[scan-whales] getBalance ${row.address.slice(0,8)} failed: ${err.message}`);
+      }
+      try { updSol.run(Number(sol.toFixed(6)), row.address); } catch {}
+      if (sol >= minSol) {
+        if (sol >= 100) megaCount++;
+        else if (sol >= 10) whaleCount++;
+        whales.push({
+          address:  row.address,
+          label:    row.label || null,
+          category: row.category || 'NEUTRAL',
+          solBalance: Number(sol.toFixed(4)),
+        });
       }
     }
 
