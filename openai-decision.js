@@ -59,23 +59,32 @@ DECISION MEANINGS:
 - RETEST = The setup is time-sensitive. Re-evaluate in exactly N minutes. Used when bonding curve is accelerating or wallets are accumulating.
 - IGNORE = Not worth any further attention. Structural failure, manipulation, or zero edge.
 
-HARD RULES (override everything):
-✗ Never POST if deployer risk score > 75 (known rugger)
-✗ Never POST if cluster risk score > 70 (coordinated manipulation)
-✗ Never POST if top holder > 25% (extreme concentration)
-✗ Never POST if bonding curve is already > 85% complete (too late)
-✗ Never POST if evidence is CRITICAL missing data on key safety fields
-✗ Never POST if rug wallet count > 2
+CONTEXT — FRESH PUMP.FUN REALITY:
+Most candidates are $5K-$40K mcap, <2 hours old, still on the bonding curve.
+At that stage, "perfect" structure is RARE: the bonding curve itself often
+shows as a top holder, LP isn't locked yet, mint may still be active, and
+holder count can be under 50. These are NOT automatic disqualifiers. What
+matters is: is there real organic demand forming RIGHT NOW, and can we get
+in before the run.
 
-QUALITY BAR FOR POST:
-- Wallet verdict: BULLISH or VERY_BULLISH preferred; NEUTRAL acceptable with other strong signals
-- Deployer: CLEAN or NEUTRAL (never DANGEROUS)
-- Momentum: ACCELERATING or stable with strong volume velocity
-- Buy/sell ratio > 0.60 sustained
-- Volume velocity > 0.25
-- Either LP locked OR mint revoked (both is better)
-- At least 20 unique holders
-- Market cap < $100K preferred, < $150K maximum
+Your job is to call the REAL gems early. If you wait for all confirmations,
+you miss every 10x. Lean toward POST when momentum + buys dominate and no
+single catastrophic red flag exists.
+
+HARD RULES (only these block POST):
+✗ Deployer risk score > 85 (confirmed rugger — different from unknown deployer)
+✗ Rug wallet count > 3
+✗ Bonding curve already > 90% complete (migration imminent, too late to enter)
+✗ Top single holder > 40% that is NOT the bonding curve PDA or pump.fun program
+
+QUALITY BAR FOR POST (lenient — calibrated for fresh pump.fun gems):
+- Wallet verdict NOT DANGEROUS / RUG
+- Deployer NOT flagged as RUGGER
+- Positive buy pressure: buy/sell ratio > 0.50 OR buys_1h > 200
+- At least 10 unique holders (fresh coins ramp fast)
+- No SEVERE bundle risk
+- Composite score >= 40 OR quick_score >= 70 (momentum proxy)
+- LP locked OR mint revoked is NICE but NOT required on coins < 1h old
 
 Your response MUST be valid JSON with no markdown wrapping.`;
 
@@ -305,16 +314,19 @@ function validateDecision(raw, candidate, score) {
     const topHolder  = candidate.top10HolderPct ?? 0;
     const rugWallets = candidate.walletIntel?.rugWalletCount ?? 0;
 
-    if (deployer >= 80) {
+    // Relaxed safety overrides — calibrated for fresh pump.fun gems where the
+    // bonding curve PDA often appears as a top holder. Only block POST on
+    // clearly disqualifying signals.
+    if (deployer >= 90) {
       raw.decision = DECISIONS.IGNORE;
-      raw._safetyOverride = 'DEPLOYER_RISK_TOO_HIGH';
-    } else if (clusterRsk >= 75) {
+      raw._safetyOverride = 'DEPLOYER_RISK_CONFIRMED_RUGGER';
+    } else if (clusterRsk >= 85) {
       raw.decision = DECISIONS.WATCHLIST;
-      raw._safetyOverride = 'CLUSTER_RISK_TOO_HIGH';
-    } else if (topHolder > 30) {
+      raw._safetyOverride = 'CLUSTER_RISK_EXTREME';
+    } else if (topHolder > 45) {
       raw.decision = DECISIONS.WATCHLIST;
-      raw._safetyOverride = 'TOP_HOLDER_CONCENTRATION';
-    } else if (rugWallets > 2) {
+      raw._safetyOverride = 'TOP_HOLDER_CONCENTRATION_SEVERE';
+    } else if (rugWallets > 3) {
       raw.decision = DECISIONS.IGNORE;
       raw._safetyOverride = 'RUG_WALLETS_PRESENT';
     }
