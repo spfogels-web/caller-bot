@@ -1277,7 +1277,7 @@ async function uploadBannerToTelegram() {
       const blob      = new Blob([fileData], { type: 'image/png' });
       formData.append('chat_id', TELEGRAM_GROUP_CHAT_ID);
       formData.append('photo', blob, 'banner.png');
-      formData.append('caption', '🐺 Alpha Lennix online — call bot active');
+      formData.append('caption', '⚡ Pulse Caller online — call bot active');
 
       const res  = await fetch(`${TELEGRAM_API}/sendPhoto`, {
         method: 'POST',
@@ -1748,10 +1748,15 @@ function buildCallAlertCaption(candidate, verdict, scoreResult) {
   const dev    = candidate.devWalletPct   != null ? candidate.devWalletPct.toFixed(2)   + '%' : '?';
   const holders= candidate.holders?.toLocaleString() ?? '?';
 
+  const tokenLabel = candidate.token
+    || candidate.tokenName
+    || (candidate.contractAddress ? candidate.contractAddress.slice(0, 4).toUpperCase() : '?');
+  const nameLabel  = candidate.tokenName && candidate.tokenName !== candidate.token ? candidate.tokenName : '';
+
   return (
-    `🐺 <b>ALPHA LENNIX — CALL ALERT</b>\n` +
+    `⚡ <b>PULSE CALLER — CALL ALERT</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `<b>$${escapeHtml(candidate.token ?? '?')}</b>  <i>${escapeHtml(candidate.tokenName ?? '')}</i>  •  ${stage}\n` +
+    `<b>$${escapeHtml(tokenLabel)}</b>  <i>${escapeHtml(nameLabel)}</i>  •  ${stage}\n` +
     `<code>${escapeHtml(candidate.contractAddress ?? '—')}</code>\n\n` +
     `📊 <b>Stats</b>\n` +
     `Price: <b>${entryPrice}</b>\n` +
@@ -1811,7 +1816,7 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
   return (
     `<b>📡 CALL ALERT — PULSE CALLER</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `Token: <b>$${escapeHtml(candidate.token ?? 'UNKNOWN')}</b>  ${candidate.tokenName ? `<i>${escapeHtml(candidate.tokenName)}</i>` : ''}\n` +
+    `Token: <b>$${escapeHtml(candidate.token || candidate.tokenName || (candidate.contractAddress ? candidate.contractAddress.slice(0,4).toUpperCase() : '?'))}</b>  ${candidate.tokenName && candidate.tokenName !== candidate.token ? `<i>${escapeHtml(candidate.tokenName)}</i>` : ''}\n` +
     `CA: <code>${escapeHtml(candidate.contractAddress ?? '—')}</code>\n\n` +
     `<b>⏱ Entry:</b> ${entryTimestamp}\n` +
     `<b>💰 Entry MCap:</b> ${entryMcap}   <b>Price:</b> ${entryPrice}\n\n` +
@@ -2529,7 +2534,28 @@ async function processCandidate(candidate, isRescan = false) {
       }
 
       await sleep(1500);
-      await sendTelegramGroupMessage(enrichedCandidate.contractAddress ?? '');
+      // ── CA beacon for third-party bots (Phanes, Sect, etc.) ──────────────
+      // Sent as plain text, no HTML parse_mode, no preview, just the CA —
+      // this is what the leaderboard bots scan the chat for.
+      const caBeacon = enrichedCandidate.contractAddress ?? '';
+      if (caBeacon && TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID) {
+        try {
+          const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: TELEGRAM_GROUP_CHAT_ID,
+              text: caBeacon,
+              disable_web_page_preview: true,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!r.ok) console.warn(`[TG-CA] beacon status ${r.status}: ${(await r.text()).slice(0,150)}`);
+          else console.log(`[TG-CA] ✓ CA beacon posted for Phanes/Sect: ${caBeacon}`);
+        } catch (err) {
+          console.warn(`[TG-CA] beacon failed: ${err.message}`);
+        }
+      }
 
       // ── Archive this call permanently (AUTO_POST) ─────────────────────────
       try {
