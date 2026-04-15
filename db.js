@@ -456,6 +456,32 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_scanner_feed_action ON scanner_feed(filter_action)`,
     // Clean old scanner_feed rows older than 2 hours to prevent bloat
     `DELETE FROM scanner_feed WHERE scanned_at < datetime('now', '-2 hours')`,
+    // ── High-resolution detection timestamps (ms precision) for latency tracking ──
+    `ALTER TABLE candidates ADD COLUMN detected_at_ms INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN enriched_at_ms INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN scored_at_ms INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN posted_at_ms INTEGER`,
+    `ALTER TABLE scanner_feed ADD COLUMN detected_at_ms INTEGER`,
+    // ── Momentum tracker: track rapid price/volume spikes on active candidates ──
+    `CREATE TABLE IF NOT EXISTS momentum_snapshots (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      contract_address TEXT    NOT NULL,
+      snapshot_at_ms   INTEGER NOT NULL,
+      market_cap       REAL,
+      liquidity        REAL,
+      price_usd        REAL,
+      volume_5m        REAL,
+      buys_5m          INTEGER,
+      sells_5m         INTEGER,
+      delta_mcap_pct   REAL,
+      spike_flag       TEXT,     -- PRICE_SPIKE | VOLUME_SPIKE | BREAKOUT | null
+      created_at       TEXT    DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_momentum_ca   ON momentum_snapshots(contract_address)`,
+    `CREATE INDEX IF NOT EXISTS idx_momentum_time ON momentum_snapshots(snapshot_at_ms DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_momentum_spike ON momentum_snapshots(spike_flag)`,
+    // Keep momentum history bounded — drop older than 6h
+    `DELETE FROM momentum_snapshots WHERE created_at < datetime('now', '-6 hours')`,
   ];
 
   let added = 0;

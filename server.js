@@ -2078,20 +2078,30 @@ async function processCandidate(candidate, isRescan = false) {
   if (!ca) return;
   if (isBlocklisted(ca)) { console.log(`[auto-caller] BLOCKLIST skip — ${ca.slice(0,8)}`); return; }
 
+  // ── Stamp detection timestamp at ms precision for latency tracking ──
+  // Prefer the _discoveredAt set by the Helius listener (real detection moment);
+  // otherwise stamp now as the point at which processing begins.
+  const detectedAtMs = candidate._discoveredAt ?? Date.now();
+
   try {
     const isVeryNew = (candidate.pairAgeHours ?? 99) < 1;
     const intel = (isRescan || isVeryNew)
       ? await runQuickWalletIntel(candidate)
       : await runWalletIntel(candidate);
 
+    const enrichedAtMs = Date.now();
     const enrichedCandidate = {
       ...candidate,
       ...flattenIntel(intel),
       candidateType: candidate.candidateType ?? null,
       quickScore:    candidate.quickScore    ?? null,
+      detectedAtMs,
+      enrichedAtMs,
     };
 
     const scoreResult = computeFullScore(enrichedCandidate);
+    const scoredAtMs = Date.now();
+    enrichedCandidate.scoredAtMs = scoredAtMs;
     let regimeAdj = { adjustedScore: scoreResult.score, thresholdAdjust: 0, regimeNotes: [] };
     try {
       const ra = applyRegimeAdjustments(scoreResult.score, enrichedCandidate, scoreResult);
@@ -2341,6 +2351,14 @@ async function processCandidate(candidate, isRescan = false) {
     });
 
     insertSubScores(candidateId, ca, scoreResult);
+
+    // Stamp ms-precision timestamps for latency analytics (separate UPDATE
+    // so we don't have to widen the giant insertCandidate prepared stmt)
+    try {
+      dbInstance.prepare(
+        `UPDATE candidates SET detected_at_ms=?, enriched_at_ms=?, scored_at_ms=? WHERE id=?`
+      ).run(detectedAtMs, enrichedCandidate.enrichedAtMs, scoredAtMs, candidateId);
+    } catch {}
 
     // Write to our own sub-scores table — guaranteed schema we control
     try {
@@ -4149,6 +4167,43 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ─── Momentum / Hot Movers — parallel tracker surface ─────────────────────
+// Returns the most recent spike flags (PRICE_SPIKE / VOLUME_SPIKE / BREAKOUT)
+// from the momentum_snapshots table. Powers the "hot now" widget.
+app.get('/api/momentum/hot', (req, res) => {
+  setCors(res);
+  try {
+    const hot = dbInstance.prepare(`
+      SELECT m.*, c.token, c.token_name, c.composite_score, c.final_decision
+      FROM momentum_snapshots m
+      LEFT JOIN candidates c ON c.contract_address = m.contract_address
+      WHERE m.spike_flag IS NOT NULL
+        AND m.created_at > datetime('now', '-30 minutes')
+      ORDER BY m.snapshot_at_ms DESC
+      LIMIT 30
+    `).all();
+    res.json({ ok: true, spikes: hot, count: hot.length });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Detection-latency stats — median ms from detection → scoring → posting
+app.get('/api/stats/latency', (req, res) => {
+  setCors(res);
+  try {
+    const row = dbInstance.prepare(`
+      SELECT
+        COUNT(*) as n,
+        AVG(enriched_at_ms - detected_at_ms) as avg_enrich_ms,
+        AVG(scored_at_ms   - detected_at_ms) as avg_score_ms,
+        AVG(posted_at_ms   - detected_at_ms) as avg_post_ms
+      FROM candidates
+      WHERE detected_at_ms IS NOT NULL
+        AND evaluated_at > datetime('now', '-1 hour')
+    `).get();
+    res.json({ ok: true, latency: row });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // Rolling-window pipeline metrics for the Analytics tab.
@@ -5985,6 +6040,17 @@ app.listen(PORT, async () => {
     console.log('[startup] ✓ Solscan wallet enrichment loop active (6h interval)');
   } catch (err) {
     console.warn('[startup] Solscan enricher failed to start:', err.message);
+  }
+
+  // ── Momentum Tracker: parallel price/volume spike detection (every 15s) ───
+  // Separate async lane that watches the top 40 scored candidates for rapid
+  // mcap / volume breakouts — sub-minute reaction window.
+  try {
+    const { startMomentumTracker } = await import('./momentum-tracker.js');
+    startMomentumTracker(dbInstance);
+    console.log('[startup] ✓ Momentum tracker active — 15s tick, top 40 candidates');
+  } catch (err) {
+    console.warn('[startup] Momentum tracker failed to start:', err.message);
   }
 
   // ── v8.0: Survivor Detection (every 30min) ────────────────────────────────
