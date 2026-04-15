@@ -338,9 +338,10 @@ function calculateAdjustments(regime, timeWindow) {
       break;
 
     case 'DEAD':
-      // Dead market: very few things should pass
-      adjustments.structurePenalty = 15;
-      adjustments.thresholdAdjust  = 15;
+      // Dead market: slight caution — memecoin pumps still happen in dead broader markets.
+      // Softened from +15/+15 (which was killing every call) to +5/+5.
+      adjustments.structurePenalty = 5;
+      adjustments.thresholdAdjust  = 5;
       break;
   }
 
