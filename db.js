@@ -542,6 +542,18 @@ function runMigrations() {
     `ALTER TABLE candidates ADD COLUMN openai_agrees_with_claude INTEGER`,
     `ALTER TABLE candidates ADD COLUMN openai_raw TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_candidates_openai ON candidates(openai_decision)`,
+    // ── Outcome tracking upgrade: snapshots, peaks, time-to-peak, manual override ──
+    `ALTER TABLE calls ADD COLUMN peak_mcap REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_multiple REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_1h REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_3h REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_6h REAL`,
+    `ALTER TABLE calls ADD COLUMN time_to_peak_minutes INTEGER`,
+    `ALTER TABLE calls ADD COLUMN outcome_source TEXT`,
+    `ALTER TABLE calls ADD COLUMN outcome_set_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN last_snapshot_at TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_calls_outcome_source ON calls(outcome_source)`,
   ];
 
   let added = 0;

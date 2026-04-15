@@ -5822,6 +5822,51 @@ app.get('/api/calls', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Manual outcome override — user presses WIN / LOSS / PENDING on a call card.
+// Stamps outcome_source = 'MANUAL' so the auto tracker stops touching it.
+app.post('/api/calls/:id/outcome', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const id = Number(req.params.id);
+    const { outcome } = req.body ?? {};
+    const allowed = ['WIN', 'LOSS', 'PENDING'];
+    if (!allowed.includes(outcome)) {
+      return res.status(400).json({ ok: false, error: `outcome must be one of ${allowed.join('/')}` });
+    }
+    const info = dbInstance.prepare(`
+      UPDATE calls SET
+        outcome = ?,
+        outcome_source = ?,
+        outcome_set_at = datetime('now')
+      WHERE id = ?
+    `).run(outcome, outcome === 'PENDING' ? null : 'MANUAL', id);
+    if (info.changes === 0) return res.status(404).json({ ok: false, error: 'call not found' });
+    logEvent('INFO', 'MANUAL_OUTCOME', `call=${id} outcome=${outcome}`);
+    res.json({ ok: true, id, outcome, source: outcome === 'PENDING' ? null : 'MANUAL' });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// On-demand snapshot refresh for a single call — user clicks "refresh peak"
+// without waiting for the 15-min loop. Fetches DexScreener live and rolls peaks.
+app.post('/api/calls/:id/refresh', async (req, res) => {
+  setCors(res);
+  try {
+    const id = Number(req.params.id);
+    const row = dbInstance.prepare(`
+      SELECT id, contract_address, token, market_cap_at_call, called_at
+      FROM calls WHERE id = ?
+    `).get(id);
+    if (!row) return res.status(404).json({ ok: false, error: 'call not found' });
+    await runOutcomeTracker(dbInstance); // cheap: limits to 50 unresolved
+    const after = dbInstance.prepare(`
+      SELECT peak_mcap, peak_multiple, peak_at, time_to_peak_minutes,
+             peak_mcap_1h, peak_mcap_3h, peak_mcap_6h, last_snapshot_at, outcome
+      FROM calls WHERE id = ?
+    `).get(id);
+    res.json({ ok: true, id, ...after });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/api/top-ignored', (req, res) => {
   setCors(res);
   try {

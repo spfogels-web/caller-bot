@@ -9407,12 +9407,37 @@ function renderCallsFeed(){
     }
     const ca = r.contract_address || '';
 
+    const callId = r.id;
+    const src = r.outcome_source;
+    const srcBadge = src === 'MANUAL' ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:rgba(224,64,251,0.15);border:1px solid rgba(224,64,251,0.4);color:var(--purple);letter-spacing:1px">👤 MANUAL</span>'
+                  : src === 'AUTO'   ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);letter-spacing:1px">🤖 AUTO</span>'
+                  : '';
+    const ttp = r.time_to_peak_minutes;
+    const ttpTxt = ttp != null ? (ttp < 60 ? ttp+'m' : (ttp/60).toFixed(1)+'h') : null;
+    const peakLine = (r.peak_mcap_1h || r.peak_mcap_3h || r.peak_mcap_6h)
+      ? '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:0.5px;margin-top:4px">Peaks: ' +
+          (r.peak_mcap_1h ? '1h <b style="color:var(--cyan)">' + fmt(r.peak_mcap_1h,'$') + '</b>' : '1h —') + ' · ' +
+          (r.peak_mcap_3h ? '3h <b style="color:var(--green)">' + fmt(r.peak_mcap_3h,'$') + '</b>' : '3h —') + ' · ' +
+          (r.peak_mcap_6h ? '6h <b style="color:var(--gold)">' + fmt(r.peak_mcap_6h,'$') + '</b>' : '6h —') +
+          (ttpTxt ? ' · TTP <b style="color:var(--orange)">' + ttpTxt + '</b>' : '') +
+        '</div>'
+      : '';
+    const btnsRow = callId
+      ? '<div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap" onclick="event.stopPropagation()">' +
+          '<button onclick="setCallOutcome(' + callId + ',\'WIN\',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='WIN'?'rgba(0,230,118,0.25)':'rgba(0,230,118,0.08)') + ';border:1px solid rgba(0,230,118,0.45);color:var(--green)">🏆 WIN</button>' +
+          '<button onclick="setCallOutcome(' + callId + ',\'LOSS\',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='LOSS'?'rgba(255,23,68,0.25)':'rgba(255,23,68,0.08)') + ';border:1px solid rgba(255,23,68,0.45);color:var(--red)">💀 LOSS</button>' +
+          '<button onclick="setCallOutcome(' + callId + ',\'PENDING\',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3)">↺ RESET</button>' +
+          '<button onclick="refreshCallPeak(' + callId + ',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.35);color:var(--cyan)">🔄 PEAK</button>' +
+        '</div>'
+      : '';
+
     return '<div onclick="openFullCandidateDetail(\'' + esc(ca) + '\')" class="call-card" style="background:linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,14,28,0.92));border:1px solid ' + outCol + '44;border-left:4px solid ' + outCol + ';border-radius:10px;padding:12px 14px;cursor:pointer;transition:all 0.15s" onmouseenter="this.style.background=\'rgba(255,255,255,0.03)\';this.style.transform=\'translateX(2px)\'" onmouseleave="this.style.background=\'linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,14,28,0.92))\';this.style.transform=\'none\'">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">' +
             '<span style="font-family:\'Orbitron\',var(--mono),monospace;font-size:16px;font-weight:900;color:var(--text1);letter-spacing:1px">$' + esc(r.token || r.candidate_token || (r.contract_address ? r.contract_address.slice(0,4) : '?')) + '</span>' +
             '<span style="font-family:var(--mono);font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;background:' + outCol + '18;border:1px solid ' + outCol + '55;color:' + outCol + ';letter-spacing:1px">' + outIcon + ' ' + outcome + '</span>' +
+            srcBadge +
             (gemWin ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.3);color:var(--gold)">💎 GEM</span>' : '') +
             (r.claude_risk ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(68,138,255,0.08);border:1px solid rgba(68,138,255,0.3);color:var(--blue)">🤖 ' + esc(r.claude_risk) + '</span>' : '') +
             (r.openai_decision ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(0,230,118,0.08);border:1px solid rgba(0,230,118,0.3);color:var(--green)">🧠 ' + esc(r.openai_decision.replace('AUTO_POST','POST')) + (r.openai_conviction ? ' ' + r.openai_conviction + '%' : '') + '</span>' : '') +
@@ -9423,6 +9448,8 @@ function renderCallsFeed(){
             (r.peak_mcap ? ' · Peak: <b style="color:' + peakCol + '">' + fmt(r.peak_mcap, '$') + '</b>' : '') +
             (r.claude_setup_type ? ' · Setup: <b style="color:var(--purple)">' + esc(r.claude_setup_type.replace(/_/g,' ')) + '</b>' : '') +
           '</div>' +
+          peakLine +
+          btnsRow +
         '</div>' +
         '<div style="text-align:right;flex-shrink:0">' +
           '<div style="font-family:\'Orbitron\',var(--mono),monospace;font-size:24px;font-weight:900;line-height:1;color:' + scCol + ';text-shadow:0 0 8px ' + scCol + '44">' + score + '</div>' +
@@ -9498,6 +9525,57 @@ function renderPerfChart(calls){
     </div>`;
   }).join('');
 }
+
+// ─── Manual call outcome + peak refresh ───────────────────────────────
+async function setCallOutcome(callId, outcome, ev) {
+  if (ev) { ev.stopPropagation?.(); ev.preventDefault?.(); }
+  try {
+    const res = await fetch('/api/calls/' + callId + '/outcome', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ outcome }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'failed');
+    // Reload calls so the UI reflects the new outcome + MANUAL badge
+    if (typeof loadCalls === 'function') loadCalls();
+    else if (typeof loadCallsOverview === 'function') loadCallsOverview();
+  } catch (err) {
+    alert('Failed to set outcome: ' + err.message);
+  }
+}
+
+async function refreshCallPeak(callId, ev) {
+  if (ev) { ev.stopPropagation?.(); ev.preventDefault?.(); }
+  const btn = ev?.currentTarget;
+  const orig = btn?.textContent;
+  if (btn) btn.textContent = '⏳ …';
+  try {
+    const res = await fetch('/api/calls/' + callId + '/refresh', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'failed');
+    if (typeof loadCalls === 'function') loadCalls();
+    else if (typeof loadCallsOverview === 'function') loadCallsOverview();
+  } catch (err) {
+    alert('Peak refresh failed: ' + err.message);
+  } finally {
+    if (btn && orig) btn.textContent = orig;
+  }
+}
+
+// Auto-refresh the Calls tab every 15 min while the user is viewing it so
+// peak MCap / outcome snapshots stay fresh without manual reloads.
+let _callsAutoRefreshTimer = null;
+function startCallsAutoRefresh() {
+  if (_callsAutoRefreshTimer) return;
+  _callsAutoRefreshTimer = setInterval(() => {
+    const callsTab = document.getElementById('tab-calls');
+    if (callsTab && callsTab.classList.contains('active')) {
+      if (typeof loadCalls === 'function') loadCalls();
+    }
+  }, 15 * 60_000);
+}
+if (typeof window !== 'undefined') window.addEventListener('DOMContentLoaded', startCallsAutoRefresh);
 
 // ─── Rejection audit ───────────────────────────────────────────────────
 // Fetches /api/diagnose/rejections and renders:

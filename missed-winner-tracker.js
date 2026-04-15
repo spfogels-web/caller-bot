@@ -306,9 +306,10 @@ export async function runOutcomeTracker(dbInstance) {
   let unresolvedCalls;
   try {
     unresolvedCalls = dbInstance.prepare(`
-      SELECT id, contract_address, token, market_cap_at_call, called_at, score_at_call
+      SELECT id, contract_address, token, market_cap_at_call, called_at, score_at_call,
+             outcome, outcome_source
       FROM calls
-      WHERE (outcome IS NULL OR outcome = 'PENDING')
+      WHERE (outcome IS NULL OR outcome = 'PENDING' OR outcome_source != 'MANUAL')
         AND called_at > datetime('now', '-48 hours')
         AND contract_address IS NOT NULL
       LIMIT 50
@@ -330,9 +331,9 @@ export async function runOutcomeTracker(dbInstance) {
       const minutesSince = result.minutesSinceCall ?? 0;
       const ca = call.contract_address ?? call.contractAddress;
 
-      // ── Always roll the peak forward in audit_archive, even for unresolved calls ──
-      // This lets us see how far a coin ran while it was pending — useful for
-      // learning even if the final outcome never formally hits WIN/LOSS.
+      // ── Roll peak forward on BOTH audit_archive AND the calls row ─────────
+      // The calls row is what the dashboard reads — prior code only updated
+      // audit_archive, so the call cards never showed peak progress.
       if (ca && result.multiple != null) {
         try {
           dbInstance.prepare(`
@@ -351,18 +352,57 @@ export async function runOutcomeTracker(dbInstance) {
                  result.currentMcap, result.currentMcap,
                  result.multiple, ca);
         } catch {}
+
+        // Record on calls row + window snapshots + time-to-peak
+        try {
+          const currentMc  = result.currentMcap;
+          const multNow    = result.multiple;
+          const mins       = Math.round(minutesSince);
+          // 1h snapshot: capture first reading after 60 min that exceeds prior window value
+          const w1 = mins >= 60  ? currentMc : null;
+          const w3 = mins >= 180 ? currentMc : null;
+          const w6 = mins >= 360 ? currentMc : null;
+          dbInstance.prepare(`
+            UPDATE calls SET
+              peak_mcap = CASE WHEN peak_mcap IS NULL OR ? > peak_mcap THEN ? ELSE peak_mcap END,
+              peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END,
+              peak_at = CASE WHEN peak_mcap IS NULL OR ? > peak_mcap THEN datetime('now') ELSE peak_at END,
+              time_to_peak_minutes = CASE WHEN peak_mcap IS NULL OR ? > peak_mcap THEN ? ELSE time_to_peak_minutes END,
+              peak_mcap_1h = CASE WHEN ? IS NOT NULL AND (peak_mcap_1h IS NULL OR ? > peak_mcap_1h) THEN ? ELSE peak_mcap_1h END,
+              peak_mcap_3h = CASE WHEN ? IS NOT NULL AND (peak_mcap_3h IS NULL OR ? > peak_mcap_3h) THEN ? ELSE peak_mcap_3h END,
+              peak_mcap_6h = CASE WHEN ? IS NOT NULL AND (peak_mcap_6h IS NULL OR ? > peak_mcap_6h) THEN ? ELSE peak_mcap_6h END,
+              last_snapshot_at = datetime('now')
+            WHERE id = ?
+          `).run(
+            currentMc, currentMc,
+            multNow, multNow,
+            currentMc,
+            currentMc, mins,
+            w1, w1, w1,
+            w3, w3, w3,
+            w6, w6, w6,
+            call.id
+          );
+        } catch (err) {
+          console.warn('[outcome-tracker] calls-row snapshot update failed:', err.message);
+        }
       }
 
       if (!result.autoOutcome) { await sleep(300); continue; }
 
       // Only auto-resolve if enough time has passed
+      // Respect manual overrides — never auto-flip a user-set outcome
+      if (call.outcome_source === 'MANUAL') { await sleep(300); continue; }
+
       if (result.autoOutcome === 'WIN' && minutesSince >= 30) {
         dbInstance.prepare(`
           UPDATE calls SET
             outcome = 'WIN',
             pct_change_1h = ?,
             auto_resolved = 1,
-            auto_resolved_at = datetime('now')
+            auto_resolved_at = datetime('now'),
+            outcome_source = 'AUTO',
+            outcome_set_at = datetime('now')
           WHERE id = ?
         `).run(result.pctChange, call.id);
 
@@ -385,7 +425,9 @@ export async function runOutcomeTracker(dbInstance) {
             outcome = 'LOSS',
             pct_change_1h = ?,
             auto_resolved = 1,
-            auto_resolved_at = datetime('now')
+            auto_resolved_at = datetime('now'),
+            outcome_source = 'AUTO',
+            outcome_set_at = datetime('now')
           WHERE id = ?
         `).run(result.pctChange, call.id);
 
@@ -445,12 +487,12 @@ async function fetchCurrentMarketCap(contractAddress) {
 export function startLearningLoop(dbInstance, claudeApiKey) {
   console.log('[learning-loop] Starting automated outcome tracking and missed winner detection...');
 
-  // Outcome tracking: every 30 minutes
+  // Outcome tracking: every 15 minutes — faster feedback loop for active calls
   const outcomeInterval = setInterval(() => {
     runOutcomeTracker(dbInstance).catch(err =>
       console.warn('[learning-loop] Outcome tracker error:', err.message)
     );
-  }, 30 * 60_000);
+  }, 15 * 60_000);
 
   // Missed winner detection + analysis: every 6 hours
   const missedWinnerInterval = setInterval(async () => {
