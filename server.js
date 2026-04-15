@@ -4063,11 +4063,11 @@ app.get('/api/external/token/:ca', async (req, res) => {
     // ── Try Solscan first ──
     if (process.env.SOLSCAN_API_KEY) {
       try {
-        // Solscan caps per-page; paginate up to 60 holders (3 pages of 20).
-        // 60 is the sweet spot: enough depth to see meaningful whale structure
-        // without running into rate limits on busy tokens.
-        const pageSize = 40;
-        const pagesNeeded = 2; // 40 + 20 → ~60
+        // Solscan v2.0 only accepts fixed page_size values: 10, 20, 30, 40, 60.
+        // 40/60 sometimes reject silently on mid-tier plans; 20 is rock solid.
+        // 3 pages × 20 = 60 holders guaranteed.
+        const pageSize = 20;
+        const pagesNeeded = 3;
         let collected = [];
         for (let p = 1; p <= pagesNeeded; p++) {
           const r = await fetch(
@@ -4079,8 +4079,9 @@ app.get('/api/external/token/:ca', async (req, res) => {
           const arr = j?.data?.items || j?.data || [];
           if (!Array.isArray(arr) || arr.length === 0) break;
           collected = collected.concat(arr);
-          if (arr.length < pageSize) break; // no more pages
+          if (arr.length < pageSize) break; // last page
         }
+        console.log(`[external-token] Solscan pagination: ${collected.length} holders from ${pagesNeeded} page attempts`);
         const items = collected.slice(0, 60);
         if (items.length) {
           owners  = items.map(h => h.owner).filter(Boolean);
@@ -4133,6 +4134,30 @@ app.get('/api/external/token/:ca', async (req, res) => {
           }
         }
       } catch (err) { console.warn('[external-token] Helius getTokenLargestAccounts failed:', err.message); }
+    }
+
+    // ── Auto-insert every resolved holder into tracked_wallets ─────────────
+    // User-requested: a Brain Analyzer scan should populate the DB so the
+    // Smart Money page has something to work with. NEUTRAL + source='brain_scan'
+    // so we can filter/promote later. INSERT OR IGNORE avoids clobbering
+    // existing labels or categories.
+    if (owners.length) {
+      try {
+        const ins = dbInstance.prepare(`
+          INSERT OR IGNORE INTO tracked_wallets
+            (address, category, source, updated_at, last_seen)
+          VALUES (?, 'NEUTRAL', 'brain_scan', datetime('now'), datetime('now'))
+        `);
+        const tx = dbInstance.transaction((addrs) => {
+          let n = 0;
+          for (const a of addrs) { if (a) n += ins.run(a).changes; }
+          return n;
+        });
+        const inserted = tx(owners);
+        console.log(`[external-token] Auto-added ${inserted}/${owners.length} holders to tracked_wallets`);
+      } catch (err) {
+        console.warn('[external-token] auto-insert failed:', err.message);
+      }
     }
 
     // ── Batch-fetch SOL balance for every holder so the UI can surface whales ──
