@@ -2337,7 +2337,15 @@ async function processCandidate(candidate, isRescan = false) {
     if (shouldRunOpenAI) {
       try {
         const pipelineElapsed = Date.now() - (enrichedCandidate._discoveredAt ?? Date.now());
-        if (pipelineElapsed < PIPELINE_BUDGET_MS - OPENAI_TIMEOUT_MS) {
+        // Budget bypass for high-value decisions — AUTO_POST/WATCHLIST MUST get OpenAI's
+        // final authority verdict even if enrichment ran long. This was the killswitch
+        // silently skipping every call candidate.
+        const highValue = finalDecision === 'AUTO_POST' || finalDecision === 'WATCHLIST';
+        if (highValue || pipelineElapsed < PIPELINE_BUDGET_MS - OPENAI_TIMEOUT_MS) {
+          if (!highValue && pipelineElapsed > PIPELINE_BUDGET_MS - OPENAI_TIMEOUT_MS) {
+            // unreachable but keeps lint happy
+          }
+          console.log(`[openai-v8] Running on $${enrichedCandidate.token} (decision=${finalDecision}, elapsed=${Math.round(pipelineElapsed/1000)}s, highValue=${highValue})`);
           openAIDecision = await getOpenAIDecision(
             enrichedCandidate,
             verdict,
@@ -2378,6 +2386,8 @@ async function processCandidate(candidate, isRescan = false) {
         }
       } catch (err) {
         console.error(`[openai-v8] Decision failed for $${enrichedCandidate.token}: ${err.message}`);
+        console.error(`[openai-v8] Stack: ${err.stack}`);
+        logEvent('ERROR', 'OPENAI_FAIL', `${enrichedCandidate.token}: ${err.message}`);
         // Keep existing decision on OpenAI failure
       }
     }
