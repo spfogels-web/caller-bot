@@ -4309,7 +4309,7 @@ let refreshTimer=null,currentTab='overview',agentHistory=[],
 // ── UTILITIES ─────────────────────────────────────────────
 const fmt=(v,p='$',d=0)=>{if(v==null||isNaN(+v))return'—';const n=+v;if(n>=1e9)return`${p}${(n/1e9).toFixed(2)}B`;if(n>=1e6)return`${p}${(n/1e6).toFixed(2)}M`;if(n>=1e3)return`${p}${(n/1e3).toFixed(1)}K`;return`${p}${n.toFixed(d)}`;};
 const fmtPct=v=>{if(v==null||isNaN(+v))return'—';const n=+v;const c=n>0?'#00e676':n<0?'#ff1744':'#8899bb';return`<span style="color:${c}">${n>0?'+':''}${n.toFixed(2)}%</span>`;};
-const fmtTime=v=>{if(!v)return'—';const d=new Date(v);if(isNaN(d))return v;const mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return`${mo[d.getUTCMonth()]} ${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')} UTC`;};
+const fmtTime=v=>{if(!v)return'—';let s=String(v).trim();if(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s))s=s.replace(' ','T')+'Z';const d=new Date(s);if(isNaN(d))return'—';const mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return`${mo[d.getUTCMonth()]} ${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')} UTC`;};
 const timeAgo=ts=>{if(!ts)return'—';const s=Math.floor((Date.now()-new Date(ts).getTime())/1000);if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';};
 const shortAddr=a=>a?`${a.slice(0,6)}…${a.slice(-4)}`:'—';
 const esc=s=>{if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');};
@@ -4409,6 +4409,9 @@ function normalizeCandidate(c){
     scannedAt:c.scannedAt??c.scanned_at,
     evaluatedAt:c.evaluatedAt??c.evaluated_at,
     calledAtEt:c.calledAtEt??c.called_at_et,
+    posted_at:c.posted_at??c.postedAt,
+    called_at:c.called_at??c.calledAt,
+    posted_at_ms:c.posted_at_ms??c.postedAtMs,
     // Outcome (lit up after runOutcomeTracker resolves the call)
     outcome:c.outcome,
     peakMultiple:c.peakMultiple??c.peak_multiple,
@@ -4698,11 +4701,11 @@ function renderCallCards(containerId,rows,compact=false){
   // Update badges
   setText('tb-calls-badge',rows.length);
   el.innerHTML=rows.map(c=>{
-    const score=c.score_at_call||c.score||0;
-    const mcap=c.market_cap_at_call||c.marketCap;
+    const score=c.score_at_call||c.composite_score||c.score||0;
+    const mcap=c.market_cap_at_call||c.market_cap||c.marketCap;
     const lvls=sltp(mcap);
     const oc=c.outcome==='WIN'?'win':c.outcome==='LOSS'?'loss':'pending';
-    const verdict=c.claudeVerdict||c.claude_verdict||c.verdict||'';
+    const verdict=c.openaiVerdict||c.openai_verdict||c.claudeVerdict||c.claude_verdict||c.verdict||'';
     const shortV=verdict?verdict.slice(0,110)+(verdict.length>110?'…':''):'No AI thesis recorded.';
     const oaiD=c.openaiDecision||c.openai_decision;
     const oaiC=c.openaiConviction||c.openai_conviction;
@@ -4719,8 +4722,8 @@ function renderCallCards(containerId,rows,compact=false){
     return`<div class="call-card ${oc}" onclick="openCandidate('${c.contract_address||c.contractAddress||''}')">
       <div class="call-header">
         <div>
-          <div class="call-token">$${esc(c.token||'?')}</div>
-          <div class="call-meta">${fmtTime(c.called_at)} · ${c.stage||'?'} · MCap: ${fmt(mcap,'$')}</div>
+          <div class="call-token">$${esc(c.token||c.candidate_token||(c.contract_address?c.contract_address.slice(0,4):'?'))}</div>
+          <div class="call-meta">${fmtTime(c.called_at||c.posted_at)} · ${c.stage||'?'} · <b style="color:var(--gold)">MCap @ call: ${fmt(mcap,'$')}</b></div>
         </div>
         <div class="call-badges">
           <div class="call-score-badge" style="background:${scoreCol(score)}22;color:${scoreCol(score)};border:1px solid ${scoreCol(score)}44">${score}</div>
@@ -5456,7 +5459,9 @@ function buildAuditDetail(c){
       }
 
       const scannedRaw = c.scannedAt || c.scanned_at || c.createdAt || c.created_at || c.evaluatedAt || c.evaluated_at;
-      const calledRaw  = c.calledAtEt || c.called_at_et;  // only set when actually posted
+      // Prefer ISO timestamps; fall back to formatted ET string; last resort evaluated_at when posted
+      const calledRaw  = c.called_at || c.posted_at || c.posted_at_ms || c.calledAtEt || c.called_at_et
+                       || ((c.finalDecision === 'AUTO_POST' || c.posted) ? (c.evaluatedAt || c.evaluated_at) : null);
 
       const scannedDate = parseDbTs(scannedRaw);
       const calledDate  = parseDbTs(calledRaw);
@@ -9387,12 +9392,17 @@ function renderCallsFeed(){
     const scCol = scoreCol(score);
     const mc = r.market_cap || 0;
     const gemWin = mc >= 7500 && mc <= 40000;
-    const when = r.called_at_et || r.created_at;
+    const when = r.called_at || r.posted_at || r.called_at_et || r.created_at;
     let timeTxt = '—';
     if (when) {
       try {
-        const d = new Date(when.includes('ET') ? when : when + 'Z');
-        timeTxt = d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase() + ' et';
+        let s = String(when).trim();
+        // SQLite datetime (no TZ) → treat as UTC
+        if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s)) s = s.replace(' ','T') + 'Z';
+        const d = new Date(s);
+        if (!isNaN(d)) {
+          timeTxt = d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase() + ' et';
+        }
       } catch(e) {}
     }
     const ca = r.contract_address || '';
@@ -9401,7 +9411,7 @@ function renderCallsFeed(){
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">' +
-            '<span style="font-family:\'Orbitron\',var(--mono),monospace;font-size:16px;font-weight:900;color:var(--text1);letter-spacing:1px">$' + esc(r.token || '?') + '</span>' +
+            '<span style="font-family:\'Orbitron\',var(--mono),monospace;font-size:16px;font-weight:900;color:var(--text1);letter-spacing:1px">$' + esc(r.token || r.candidate_token || (r.contract_address ? r.contract_address.slice(0,4) : '?')) + '</span>' +
             '<span style="font-family:var(--mono);font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;background:' + outCol + '18;border:1px solid ' + outCol + '55;color:' + outCol + ';letter-spacing:1px">' + outIcon + ' ' + outcome + '</span>' +
             (gemWin ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.3);color:var(--gold)">💎 GEM</span>' : '') +
             (r.claude_risk ? '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(68,138,255,0.08);border:1px solid rgba(68,138,255,0.3);color:var(--blue)">🤖 ' + esc(r.claude_risk) + '</span>' : '') +

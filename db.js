@@ -1172,7 +1172,11 @@ export function getAllCalls({ limit = 50, offset = 0 } = {}) {
            ca.wallet_intel_score, ca.cluster_risk, ca.momentum_grade,
            ca.composite_score, ca.structure_grade, ca.narrative_tags,
            ca.launch_quality_score, ca.buy_sell_ratio_1h, ca.volume_velocity,
-           ca.sniper_wallet_count, ca.bot_source AS candidate_bot_source
+           ca.sniper_wallet_count, ca.bot_source AS candidate_bot_source,
+           ca.claude_verdict, ca.claude_risk, ca.claude_setup_type, ca.claude_score,
+           ca.openai_decision, ca.openai_conviction, ca.openai_verdict,
+           ca.openai_agrees_with_claude, ca.token AS candidate_token,
+           ca.posted_at_ms, ca.evaluated_at AS candidate_evaluated_at
     FROM calls c
     LEFT JOIN candidates ca ON c.candidate_id = ca.id
     ORDER BY c.posted_at DESC LIMIT ? OFFSET ?
