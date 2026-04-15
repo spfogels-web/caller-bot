@@ -2673,6 +2673,57 @@ body::before {
   display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
 }
 .analyzer-row-reason b { color: var(--text1); }
+
+/* Rejection audit */
+.rej-summary {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  padding: 8px 10px; margin-bottom: 10px;
+  background: rgba(255,23,68,0.04);
+  border: 1px dashed rgba(255,23,68,0.25);
+  border-radius: 6px;
+}
+.rej-reason-chip {
+  font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 1px;
+  padding: 3px 8px; border-radius: 10px;
+  background: rgba(255,23,68,0.1); border: 1px solid rgba(255,23,68,0.3); color: var(--red);
+}
+.rej-reason-chip.top {
+  background: rgba(255,109,0,0.2); border-color: rgba(255,109,0,0.5); color: var(--orange);
+}
+.rej-reason-chip b { font-size: 9px; margin-left: 3px; }
+
+.rej-list { display: flex; flex-direction: column; gap: 5px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+.rej-list::-webkit-scrollbar { width: 4px; }
+.rej-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+.rej-row {
+  display: grid;
+  grid-template-columns: 110px 55px 1fr 200px;
+  gap: 10px; align-items: center;
+  padding: 8px 12px;
+  background: rgba(0,0,0,0.35);
+  border-left: 3px solid #ff1744;
+  border-radius: 6px;
+  cursor: pointer; transition: all 0.15s;
+  font-family: var(--mono); font-size: 9px;
+}
+.rej-row:hover { background: rgba(255,23,68,0.06); transform: translateX(2px); }
+.rej-row-token { font-family: 'Orbitron', var(--mono), monospace; font-size: 12px; font-weight: 900; color: var(--text1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rej-row-score { font-family: 'Orbitron', var(--mono), monospace; font-size: 13px; font-weight: 900; text-align: center; }
+.rej-row-reasons { display: flex; gap: 3px; flex-wrap: wrap; }
+.rej-row-reason-pill {
+  font-size: 7px; font-weight: 700; letter-spacing: 0.5px;
+  padding: 2px 6px; border-radius: 3px;
+  background: rgba(255,23,68,0.12); border: 1px solid rgba(255,23,68,0.3); color: var(--red);
+  white-space: nowrap;
+}
+.rej-row-metrics { font-size: 8px; color: var(--text3); display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.rej-row-metrics b { color: var(--text2); }
+@media(max-width:800px){
+  .rej-row { grid-template-columns: 100px 50px; grid-template-rows: auto auto auto; }
+  .rej-row-reasons { grid-column: 1 / -1; }
+  .rej-row-metrics { grid-column: 1 / -1; justify-content: flex-start; }
+}
 .analyzer-row-score {
   text-align: right; flex-shrink: 0;
   font-family: 'Orbitron', var(--mono), monospace;
@@ -3103,6 +3154,20 @@ body::before {
           </div>
           <div id="analyzerFeed" class="analyzer-feed">
             <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading analyzer decisions...</div>
+          </div>
+        </div>
+
+        <!-- ═══ 🚫 REJECTION AUDIT — why we didn't call the last 10 rejected coins ═══ -->
+        <div class="calls-section">
+          <div class="calls-section-hdr" style="--hdr-col:#ff1744">
+            <span>🚫 REJECTION AUDIT · <span id="rejCount">0</span></span>
+            <span class="calls-section-sub" id="rejRecommendation">top blockers · last 24h · click any row for full detail</span>
+          </div>
+          <!-- Summary strip: top rejection causes -->
+          <div id="rejSummary" class="rej-summary"></div>
+          <!-- Last 10 rejected coins with per-coin breakdown -->
+          <div id="rejList" class="rej-list">
+            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading rejection audit...</div>
           </div>
         </div>
 
@@ -9148,11 +9213,12 @@ var _callsFilter = 'all';
 async function loadCallsTab(){
   const feed = document.getElementById('callsFeed');
   if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>';
-  // Parallel: actual AUTO_POSTs (archive) + scanner-feed PROMOTED + scored candidates (for analyzer verdicts)
-  const [archive, scanner, scored] = await Promise.all([
+  // Parallel: archive + promoted feed + scored candidates + rejection audit
+  const [archive, scanner, scored, rejections] = await Promise.all([
     apiFetch('/api/archive?decision=AUTO_POST&limit=300'),
     apiFetch('/api/scanner-feed?limit=120').catch(() => null),
     apiFetch('/api/scanner?limit=40').catch(() => null),
+    apiFetch('/api/diagnose/rejections').catch(() => null),
   ]);
   if (!archive || !archive.ok) {
     if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Failed to load calls.</div>';
@@ -9169,6 +9235,9 @@ async function loadCallsTab(){
 
   // Analyzer feed — verdicts per scored candidate
   renderAnalyzerFeed(scored?.rows || [], calledCAs);
+
+  // Rejection audit — last 10 rejections with reason breakdown
+  renderRejectionAudit(rejections);
 
   // Performance chart from resolved/peak calls
   renderPerfChart(_callsAll);
@@ -9318,6 +9387,79 @@ function renderPerfChart(calls){
         <div class="perf-bar-baseline" style="left:${baselinePct}%" title="1x (entry)"></div>
       </div>
       <span class="perf-bar-value" style="color:${col}">${peak.toFixed(2)}x</span>
+    </div>`;
+  }).join('');
+}
+
+// ─── Rejection audit ───────────────────────────────────────────────────
+// Fetches /api/diagnose/rejections and renders:
+//   - a summary strip of the top rejection reasons (top one highlighted)
+//   - per-coin list with score, specific reasons, and key metrics
+function renderRejectionAudit(data){
+  const summaryEl = document.getElementById('rejSummary');
+  const listEl    = document.getElementById('rejList');
+  if (!summaryEl || !listEl) return;
+
+  if (!data || !data.ok) {
+    listEl.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">No rejection data yet (pipeline may be starting up).</div>';
+    summaryEl.innerHTML = '';
+    return;
+  }
+
+  setText('rejCount', data.rejection_count || 0);
+  if (data.recommendation) setText('rejRecommendation', data.recommendation);
+
+  // Sort reasons by frequency, highlight the top one
+  const reasonSummary = data.reason_summary || {};
+  const sorted = Object.entries(reasonSummary).sort((a,b) => b[1] - a[1]);
+  const labelFor = {
+    claude_extreme:  '🤖 Claude EXTREME',
+    bundle_severe:   '📦 Bundle SEVERE',
+    bundle_high:     '📦 Bundle HIGH',
+    dev_high:        '👤 Dev > 15%',
+    top10_high:      '🐋 Top10 > 70%',
+    snipers_heavy:   '🎯 > 25 snipers',
+    mint_active:     '🔥 Mint ACTIVE',
+    lp_unlocked:     '🔓 LP unlocked',
+    trap_high:       '🪤 Trap HIGH',
+    trap_critical:   '🪤 Trap CRITICAL',
+    trap_severe:     '🪤 Trap SEVERE',
+    below_threshold: '📉 Below 35',
+  };
+  summaryEl.innerHTML = sorted.length
+    ? sorted.map(([r, n], i) =>
+        `<span class="rej-reason-chip ${i===0?'top':''}">${esc(labelFor[r] || r)} <b>${n}</b></span>`
+      ).join('')
+    : '';
+
+  const samples = data.rejected_samples || [];
+  if (!samples.length) {
+    listEl.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--green)">✓ No rejections in the last 24h — calls are flowing.</div>';
+    return;
+  }
+
+  listEl.innerHTML = samples.map(s => {
+    const tok = s.token || (s.ca||'').slice(0,6);
+    const score = s.score || 0;
+    const scCol = score >= 60 ? 'var(--gold)' : score >= 45 ? 'var(--cyan)' : score >= 35 ? 'var(--blue)' : 'var(--text3)';
+    const m = s.metrics || {};
+    const reasonPills = (s.rejection_reasons || [])
+      .slice(0, 4)
+      .map(r => `<span class="rej-row-reason-pill">${esc(labelFor[r] || r)}</span>`)
+      .join('');
+    const metricBits = [];
+    if (m.dev_pct   != null) metricBits.push(`Dev: <b>${m.dev_pct.toFixed(1)}%</b>`);
+    if (m.top10_pct != null) metricBits.push(`T10: <b>${m.top10_pct.toFixed(0)}%</b>`);
+    if (m.buy_ratio != null) metricBits.push(`Buy%: <b>${Math.round(m.buy_ratio*100)}%</b>`);
+    if (m.vol_1h    != null) metricBits.push(`V1h: <b>${fmt(m.vol_1h,'$')}</b>`);
+    if (m.mcap      != null) metricBits.push(`MCap: <b>${fmt(m.mcap,'$')}</b>`);
+    if (m.age_hours != null) metricBits.push(`Age: <b>${m.age_hours < 1 ? Math.round(m.age_hours*60)+'m' : m.age_hours.toFixed(1)+'h'}</b>`);
+
+    return `<div class="rej-row" onclick="openFullCandidateDetail('${esc(s.ca||'')}')">
+      <div class="rej-row-token">$${esc(tok)}</div>
+      <div class="rej-row-score" style="color:${scCol}">${score}</div>
+      <div class="rej-row-reasons">${reasonPills || '<span style="color:var(--text3);font-size:8px">—</span>'}</div>
+      <div class="rej-row-metrics">${metricBits.join(' · ')}</div>
     </div>`;
   }).join('');
 }
