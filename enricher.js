@@ -253,37 +253,64 @@ async function enrichWithHelius(ca, pairAddress = null) {
     const totalSupply = Number(supplyInfo.amount);
 
     if (totalSupply > 0) {
-      // BUGFIX: terminal shows Dev 5% but we were reporting 59%. Root cause:
-      // the pump.fun bonding curve holds most tokens pre-migration as a PDA
-      // whose *address* varies per token (not in LP_PROGRAM_IDS), but whose
-      // *owner* is always the pump.fun program. Same for Raydium pool token
-      // accounts. We now resolve each top holder's owner via getMultipleAccounts
-      // and filter out any owned by a known contract program.
-      let resolvedOwners = {};
+      // BUGFIX v2: pump.fun curve and LP pools were slipping through because
+      // ownership has TWO layers for token accounts:
+      //   1. Token account → owned by a wallet (could be human OR a PDA)
+      //   2. That wallet → owned by a PROGRAM (System Program = human,
+      //      pump.fun = bonding curve, Raydium = pool, etc.)
+      // We need to resolve BOTH layers then check if the wallet is itself
+      // a PDA of a known contract.
+      let resolvedOwners = {};       // tokenAcct → wallet address
+      let walletOwnerPrograms = {};  // wallet address → program that owns it
       try {
+        // Step 1 — token account → wallet owner
         const topAddrs = holders.slice(0, 20).map(h => h.address);
-        const ownerRes = await heliusRpc(
+        const tokenAcctRes = await heliusRpc(
           'getMultipleAccounts',
           [topAddrs, { encoding: 'jsonParsed', commitment: 'confirmed' }],
           'holderOwners'
         );
-        const accounts = ownerRes?.result?.value ?? [];
-        accounts.forEach((acct, i) => {
+        const tokenAccts = tokenAcctRes?.result?.value ?? [];
+        const walletsToCheck = [];
+        tokenAccts.forEach((acct, i) => {
           const owner = acct?.data?.parsed?.info?.owner;
-          if (owner) resolvedOwners[topAddrs[i]] = owner;
+          if (owner) {
+            resolvedOwners[topAddrs[i]] = owner;
+            walletsToCheck.push(owner);
+          }
         });
+
+        // Step 2 — wallet → program that owns the account
+        // Human wallets are owned by System Program (11111111111111111111111111111111).
+        // Contract PDAs are owned by pump.fun / Raydium / etc.
+        if (walletsToCheck.length) {
+          const uniqueWallets = [...new Set(walletsToCheck)];
+          const walletRes = await heliusRpc(
+            'getMultipleAccounts',
+            [uniqueWallets, { commitment: 'confirmed' }],   // no jsonParsed — we just need top-level .owner
+            'walletOwners'
+          );
+          const walletInfo = walletRes?.result?.value ?? [];
+          walletInfo.forEach((info, i) => {
+            if (info?.owner) walletOwnerPrograms[uniqueWallets[i]] = info.owner;
+          });
+        }
       } catch (err) {
-        console.warn('[enricher:helius] getMultipleAccounts failed:', err.message);
+        console.warn('[enricher:helius] owner resolution failed:', err.message);
       }
 
       const isContractAccount = (holderAddress) => {
-        // Explicit block-list of LP/program addresses we know
+        // 1. Static block-list (token-account addresses that we always skip)
         if (LP_PROGRAM_IDS.has(holderAddress)) return true;
-        // NEW: check resolved owner against known contract programs
-        const owner = resolvedOwners[holderAddress];
-        if (owner && CONTRACT_OWNERS.has(owner)) return true;
-        // Pair-address check — if we know the pair, exclude it too
+        // 2. Pair address
         if (pairAddress && holderAddress === pairAddress) return true;
+        // 3. Owner wallet itself is a known LP address
+        const ownerWallet = resolvedOwners[holderAddress];
+        if (ownerWallet && LP_PROGRAM_IDS.has(ownerWallet)) return true;
+        // 4. MOST IMPORTANT — the owner wallet is a PDA of a known contract program
+        //    (this is how pump.fun bonding curves are caught)
+        const ownerProgram = walletOwnerPrograms[ownerWallet];
+        if (ownerProgram && CONTRACT_OWNERS.has(ownerProgram)) return true;
         return false;
       };
 
