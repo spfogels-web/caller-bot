@@ -108,12 +108,23 @@ async function runTick(dbInstance) {
     const hot = trending.filter(t => (t.priceChange24h || 0) >= 30 && (t.symbol || '').length >= MATCH_MIN_LEN);
     if (!hot.length) { _ticks++; return; }
 
-    // Recent Solana candidates to match against
+    // Recent Solana candidates to match against.
+    // `candidates` has `token` (symbol) but not `token_name` — that column
+    // lives on scanner_feed. Pull from both so we can match on either field.
     const solRows = dbInstance.prepare(`
-      SELECT contract_address, token, token_name FROM candidates
-      WHERE contract_address IS NOT NULL
-        AND evaluated_at > datetime('now', ?)
-    `).all(`-${SOLANA_WINDOW_H} hours`);
+      SELECT c.contract_address,
+             c.token,
+             sf.token      AS scanner_token,
+             sf.contract_address AS sf_ca
+      FROM candidates c
+      LEFT JOIN scanner_feed sf ON sf.contract_address = c.contract_address
+      WHERE c.contract_address IS NOT NULL
+        AND c.evaluated_at > datetime('now', ?)
+    `).all(`-${SOLANA_WINDOW_H} hours`).map(r => ({
+      contract_address: r.contract_address,
+      token:      r.token,
+      token_name: r.scanner_token || r.token, // fallback to symbol if no name
+    }));
 
     let found = 0;
     for (const sol of solRows) {

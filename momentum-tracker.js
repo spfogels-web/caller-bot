@@ -74,13 +74,14 @@ async function runTick(dbInstance) {
 
   try {
     // 1. Top candidates from last 2h, sorted by score desc
+    //    (candidates table uses `evaluated_at`, not created_at — was a
+    //    column-name bug causing 'no such column: created_at' errors)
     const candidates = dbInstance.prepare(`
       SELECT contract_address FROM candidates
       WHERE composite_score IS NOT NULL
         AND composite_score >= 30
         AND contract_address IS NOT NULL
-        AND (created_at > datetime('now', '-2 hours')
-             OR evaluated_at > datetime('now', '-2 hours'))
+        AND evaluated_at > datetime('now', '-2 hours')
       ORDER BY composite_score DESC
       LIMIT ?
     `).all(MAX_CANDIDATES);
