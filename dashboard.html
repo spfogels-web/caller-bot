@@ -4900,29 +4900,71 @@ function buildAuditDetail(c){
       </div>`;
     })()}
 
-    <!-- ═══ CALLOUT TIMESTAMP + MCAP AT CALL (BIG, AT TOP) ═══ -->
+    <!-- ═══ SCANNED / CALLED TIMESTAMPS + MCAP AT CALL ═══ -->
     ${(()=>{
-      const rawTs = c.calledAtEt||c.called_at_et||c.evaluatedAt||c.evaluated_at||c.createdAt||c.created_at||c.scannedAt||c.scanned_at;
-      let timeTxt='';
-      if(rawTs){
-        try{
-          // Format like "3:06pm ET" — keep it short and US-Eastern
-          const d=new Date(rawTs);
-          const opts={timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:true};
-          let timePart = d.toLocaleString('en-US',opts).replace(' ','').toLowerCase(); // "3:06pm"
-          const datePart = d.toLocaleString('en-US',{timeZone:'America/New_York',month:'short',day:'numeric'}); // "Apr 14"
-          timeTxt = `${timePart} ET · ${datePart}`;
-        }catch(e){}
+      // Bug fix: SQLite datetime('now') stores UTC strings like "2026-04-15 11:50:00"
+      // WITHOUT a 'Z' suffix, so the browser parses them as LOCAL time instead of UTC.
+      // Force UTC interpretation by appending 'Z' if the string has no timezone marker.
+      function parseDbTs(raw){
+        if(!raw) return null;
+        if(typeof raw === 'number') return new Date(raw);
+        let s = String(raw).trim();
+        // If it looks like a SQLite datetime (YYYY-MM-DD HH:MM:SS) with no TZ, treat as UTC
+        if(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(s)) {
+          s = s.replace(' ', 'T') + 'Z';
+        }
+        const d = new Date(s);
+        return isNaN(d) ? null : d;
       }
+      function fmtEt(d){
+        if(!d) return null;
+        const opts = { timeZone:'America/New_York', hour:'numeric', minute:'2-digit', hour12:true };
+        const tp   = d.toLocaleString('en-US', opts).replace(' ','').toLowerCase();
+        const dp   = d.toLocaleString('en-US', { timeZone:'America/New_York', month:'short', day:'numeric' });
+        return `${tp} ET · ${dp}`;
+      }
+
+      const scannedRaw = c.scannedAt || c.scanned_at || c.createdAt || c.created_at || c.evaluatedAt || c.evaluated_at;
+      const calledRaw  = c.calledAtEt || c.called_at_et;  // only set when actually posted
+
+      const scannedDate = parseDbTs(scannedRaw);
+      const calledDate  = parseDbTs(calledRaw);
+
+      // Prefer explicit posted state; fall back to AUTO_POST decision
+      const wasCalled = !!(calledRaw) || (c.finalDecision === 'AUTO_POST' && !!c.posted);
+
+      let latencyTxt = null;
+      if (scannedDate && calledDate) {
+        const ms = calledDate - scannedDate;
+        if (ms > 0) {
+          if      (ms < 60_000)    latencyTxt = `${Math.round(ms/1000)}s`;
+          else if (ms < 3_600_000) latencyTxt = `${Math.round(ms/60_000)}m ${Math.round((ms%60_000)/1000)}s`;
+          else                     latencyTxt = `${(ms/3_600_000).toFixed(1)}h`;
+        }
+      }
+
       const mcVal = c.marketCap;
-      const gemWindow = mcVal>=5000 && mcVal<=40000;
-      return `<div style="background:linear-gradient(135deg,rgba(24,255,255,0.08),rgba(0,230,118,0.04));border:1px solid rgba(24,255,255,0.3);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-        <div>
-          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">CALLED AT (US EASTERN)</div>
-          <div style="font-family:var(--mono);font-size:15px;font-weight:900;color:#fff;letter-spacing:0.5px">🕐 ${timeTxt||'—'}</div>
+      const gemWindow = mcVal>=7500 && mcVal<=40000;
+      const scannedTxt = fmtEt(scannedDate) || '—';
+      const calledTxt  = calledDate ? fmtEt(calledDate) : (wasCalled ? fmtEt(scannedDate) : null);
+
+      return `<div style="background:linear-gradient(135deg,rgba(24,255,255,0.08),rgba(0,230,118,0.04));border:1px solid rgba(24,255,255,0.3);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div style="flex:1;min-width:160px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
+            <div style="font-family:var(--mono);font-size:7px;color:var(--cyan);letter-spacing:2px">🔬 SCANNED</div>
+          </div>
+          <div style="font-family:var(--mono);font-size:13px;font-weight:900;color:#fff;letter-spacing:0.5px;margin-bottom:8px">${scannedTxt}</div>
+          ${calledTxt
+            ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
+                 <div style="font-family:var(--mono);font-size:7px;color:var(--green);letter-spacing:2px">📞 CALLED</div>
+                 ${latencyTxt ? `<span style="font-family:var(--mono);font-size:8px;padding:1px 6px;border-radius:3px;background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.3);color:var(--gold);letter-spacing:1px">⚡ ${latencyTxt} to call</span>` : ''}
+               </div>
+               <div style="font-family:var(--mono);font-size:13px;font-weight:900;color:var(--green);letter-spacing:0.5px">${calledTxt}</div>`
+            : `<div style="font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:1.5px">📞 NOT CALLED YET</div>`
+          }
         </div>
         <div style="text-align:right">
-          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">MCAP AT CALL${gemWindow?' · 💎 GEM WINDOW':''}</div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">MCAP AT CALL${gemWindow?' · 💎 GEM':''}</div>
           <div style="font-family:var(--mono);font-size:20px;font-weight:900;color:${gemWindow?'var(--gold)':'var(--cyan)'};letter-spacing:0.5px">${fmt(mcVal,'$')}</div>
         </div>
       </div>`;
