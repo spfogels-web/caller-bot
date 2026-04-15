@@ -4290,6 +4290,28 @@ app.get('/api/external/wallet/:address', async (req, res) => {
     const { enrichWallet } = await import('./solscan-wallet-enricher.js');
     const stats = await enrichWallet(address, dbInstance);
 
+    // ── Guaranteed upsert: ensure the wallet lands in tracked_wallets ─────
+    // Even if Solscan returned no transfers (fresh/inactive wallet), we still
+    // want the row to exist so the Smart Money page lists it. Enrichment can
+    // fill in the rest asynchronously via the 6h background loop.
+    try {
+      dbInstance.prepare(`
+        INSERT INTO tracked_wallets (address, category, source, added_at, updated_at, last_seen)
+        VALUES (?, 'NEUTRAL', 'manual_add', datetime('now'), datetime('now'), datetime('now'))
+        ON CONFLICT(address) DO UPDATE SET last_seen = datetime('now')
+      `).run(address);
+    } catch (err) {
+      // `added_at` may not exist on older schemas — retry without it
+      try {
+        dbInstance.prepare(`
+          INSERT OR IGNORE INTO tracked_wallets (address, category, source, updated_at, last_seen)
+          VALUES (?, 'NEUTRAL', 'manual_add', datetime('now'), datetime('now'))
+        `).run(address);
+      } catch (err2) {
+        console.warn('[external-wallet] stub insert failed:', err2.message);
+      }
+    }
+
     // Also pull any existing DB record + our own early_wallets data
     let existing = null;
     try { existing = dbInstance.prepare(`SELECT * FROM tracked_wallets WHERE address=?`).get(address); } catch {}
@@ -6434,6 +6456,85 @@ app.get('/api/v8/dune-wallet-status', (req, res) => {
 
 // Get all tracked wallets with filtering
 // Smart Money rankings — sorted by score, win rate, or category
+// Scan the entire tracked_wallets DB for the biggest SOL balances. Uses
+// Helius getMultipleAccounts in chunks of 100 — one batched RPC call per
+// chunk — so it's fast even on multi-thousand-wallet databases.
+app.post('/api/wallets/scan-whales', async (req, res) => {
+  setCors(res);
+  try {
+    if (!HELIUS_API_KEY) return res.status(500).json({ ok: false, error: 'HELIUS_API_KEY missing' });
+    const minSol = Number(req.query.minSol ?? 5);   // minimum SOL to count
+    const maxWallets = Math.min(Number(req.query.max ?? 2000), 5000);
+
+    const rows = dbInstance.prepare(`
+      SELECT address, label, category FROM tracked_wallets
+      WHERE is_blacklist = 0 AND address IS NOT NULL
+      LIMIT ?
+    `).all(maxWallets);
+
+    const results = [];
+    for (let i = 0; i < rows.length; i += 100) {
+      const chunk = rows.slice(i, i + 100);
+      try {
+        const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'whales', method: 'getMultipleAccounts',
+            params: [chunk.map(w => w.address), { commitment: 'confirmed' }],
+          }),
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (!r.ok) { console.warn(`[scan-whales] chunk ${i} HTTP ${r.status}`); continue; }
+        const j = await r.json();
+        const values = j?.result?.value || [];
+        values.forEach((acc, idx) => {
+          const sol = (acc?.lamports ?? 0) / 1e9;
+          if (sol >= minSol) {
+            results.push({
+              address:  chunk[idx].address,
+              label:    chunk[idx].label,
+              category: chunk[idx].category,
+              solBalance: sol,
+              isMegaWhale: sol >= 100,
+              isWhale:     sol >= 10,
+            });
+          }
+        });
+      } catch (err) {
+        console.warn(`[scan-whales] chunk ${i} failed:`, err.message);
+      }
+    }
+
+    results.sort((a, b) => b.solBalance - a.solBalance);
+
+    // Auto-label the top mega-whales (≥100 SOL) as SMART_MONEY if they're
+    // still NEUTRAL, so they get picked up by the smart-money watcher.
+    let promoted = 0;
+    try {
+      const upd = dbInstance.prepare(`
+        UPDATE tracked_wallets SET category='SMART_MONEY', updated_at=datetime('now')
+        WHERE address=? AND category IN ('NEUTRAL','MOMENTUM')
+      `);
+      for (const w of results.filter(r => r.isMegaWhale)) {
+        const info = upd.run(w.address);
+        if (info.changes) promoted++;
+      }
+    } catch (err) { console.warn('[scan-whales] promote failed:', err.message); }
+
+    res.json({
+      ok: true,
+      scanned:  rows.length,
+      found:    results.length,
+      megaWhales: results.filter(r => r.isMegaWhale).length,
+      whales:     results.filter(r => r.isWhale && !r.isMegaWhale).length,
+      promoted,
+      minSol,
+      topN: results.slice(0, 100),
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/api/wallets/rankings', (req, res) => {
   setCors(res);
   try {

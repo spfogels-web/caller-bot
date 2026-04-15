@@ -3878,6 +3878,7 @@ body::before {
               <div class="ws-actions">
                 <button class="ws-btn ws-btn-secondary" id="wsScanBtn" onclick="triggerDuneScan()">⚡ DUNE BATCH</button>
                 <button class="ws-btn ws-btn-secondary" id="wsEnrichBtn" onclick="triggerSolscanEnrichment()">🧬 ENRICH STALE (PnL)</button>
+                <button class="ws-btn ws-btn-secondary" onclick="scanAllWhales(this)">🐋 SCAN FOR WHALES</button>
                 <button class="ws-btn ws-btn-tertiary" onclick="loadWalletTiles()">↻ REFRESH TILES</button>
               </div>
               <div class="ws-status-line" id="wsStatusLine"></div>
@@ -7315,6 +7316,34 @@ function _setWalletScannerStatus(label, cls, msg) {
   if (card) {
     if (cls === 'scanning') card.classList.add('scanning');
     else card.classList.remove('scanning');
+  }
+}
+
+// Scan every tracked_wallets row for its SOL balance via Helius, promote
+// mega-whales (≥100 SOL) to SMART_MONEY, and surface the top 100.
+async function scanAllWhales(btn){
+  const orig = btn?.textContent;
+  if (btn){ btn.disabled = true; btn.textContent = '⏳ SCANNING…'; }
+  _setWalletScannerStatus && _setWalletScannerStatus('SCANNING', 'scanning', '🐋 Scanning tracked_wallets for SOL balances…');
+  try {
+    const res = await fetch('/api/wallets/scan-whales?minSol=5&max=3000', { method:'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'scan failed');
+    const msg = `✓ Scanned ${data.scanned} wallets · ${data.megaWhales} 🐋 mega (≥100 SOL) · ${data.whales} 💎 whales (≥10) · ${data.promoted} auto-promoted to SMART_MONEY`;
+    _setWalletScannerStatus && _setWalletScannerStatus('COMPLETE', 'done', msg);
+    // Reload tiles so promotions show up
+    if (typeof loadWalletTiles === 'function') loadWalletTiles();
+    if (typeof loadWalletRankings === 'function') loadWalletRankings();
+    // Show top whales in a modal-lite alert so the user sees the best finds
+    const top = (data.topN || []).slice(0, 15)
+      .map((w,i) => `#${i+1}  ${w.solBalance.toFixed(1)} SOL  ${w.category || 'NEUTRAL'}  ${w.address.slice(0,8)}…`)
+      .join('\n');
+    if (top) alert(`🐋 TOP WHALES IN YOUR DB\n\n${top}\n\n${data.promoted} auto-promoted to SMART_MONEY.\nOpen the Wallet Rankings tiles to label them WINNER.`);
+  } catch (err) {
+    _setWalletScannerStatus && _setWalletScannerStatus('ERROR', 'error', '✗ Scan failed: ' + err.message);
+    alert('Whale scan failed: ' + err.message);
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = orig || '🐋 SCAN FOR WHALES'; }
   }
 }
 
