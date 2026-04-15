@@ -7159,6 +7159,10 @@ async function loadSmartMoneyTab() {
   }
 
   loadSeedContracts();
+  // Wallet tiles + heatmap (previously patched via broken wrappers that
+  // caused infinite recursion on every invocation).
+  if (typeof loadWalletTiles     === 'function') loadWalletTiles();
+  if (typeof renderWalletHeatmap === 'function') renderWalletHeatmap();
 }
 
 // ── Summary stats + Dune status ────────────────────────────────────
@@ -7628,12 +7632,8 @@ function loadMoreWalletTiles(){
   renderWalletTiles();
 }
 
-// Hook wallet tiles into the smart-money tab load
-const _origLoadSmartMoneyTab3 = (typeof loadSmartMoneyTab === 'function') ? loadSmartMoneyTab : null;
-async function loadSmartMoneyTab() {
-  if (_origLoadSmartMoneyTab3) await _origLoadSmartMoneyTab3();
-  loadWalletTiles();
-}
+// (Wallet tiles loading is inlined into loadSmartMoneyTab above — the old
+//  wrapper here was a hoisting footgun that caused infinite recursion.)
 
 async function showWalletModal(address){
   if(!address)return;
@@ -9122,13 +9122,9 @@ function loadWalletRankings(cat) {
   if (_origLoadWalletRankings) return _origLoadWalletRankings();
 }
 
-// ── PATCH loadSmartMoneyTab to also render the heatmap ────────
-var _origLoadSmartMoneyTab2 = (typeof loadSmartMoneyTab === 'function') ? loadSmartMoneyTab : null;
-
-async function loadSmartMoneyTab() {
-  if (_origLoadSmartMoneyTab2) await _origLoadSmartMoneyTab2();
-  renderWalletHeatmap();
-}
+// (Heatmap rendering is now inlined into loadSmartMoneyTab above — the
+//  old wrapper here double-nested with the wallet-tiles wrapper and caused
+//  infinite recursion: "Maximum call stack size exceeded".)
 
 // Boot: render heatmap on page load if already on smart tab
 window.addEventListener('load', function() {
