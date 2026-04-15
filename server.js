@@ -93,7 +93,7 @@ const {
   ADMIN_TELEGRAM_ID,
   PORT              = 3000,
   NODE_ENV          = 'development',
-  MIN_SCORE_TO_POST = 45,
+  MIN_SCORE_TO_POST = 58,
   SCAN_INTERVAL_MS  = 90 * 1000,
 } = process.env;
 
@@ -1179,20 +1179,19 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   const setupCheck = candidate.setupType ?? candidate.claudeSetupType ?? '';
   if (setupCheck === 'EXTENDED_AVOID') return 'IGNORE';
 
-  // Threshold floor lowered again (38 → 34) so more coins flow through to
-  // AUTO_POST and get Claude/GPT-4o final verdicts. The Auditor was starving;
-  // the AI layer provides precision on top of this wider recall gate.
-  const adjustedThreshold = Math.max(34, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
+  // User direction: anything scoring 58+ should AUTO_POST. We can tighten
+  // again later if it pushes too much trash. Floor raised 34 → 58.
+  const adjustedThreshold = Math.max(58, threshold + regimeResult.thresholdAdjust + mode.thresholdAdjust);
 
   if (scorerDecision === 'RETEST')    return 'RETEST';
   if (scorerDecision === 'WATCHLIST') return 'WATCHLIST';
 
   const allowedRisks = ['LOW', 'MEDIUM', 'HIGH'];
+  // HARD AUTO-POST: score >= 58 AND risk not EXTREME. No other gates.
   if (finalScore >= adjustedThreshold && allowedRisks.includes(risk)) return 'AUTO_POST';
-  // Widened WATCHLIST band from -10 to -14 so borderline gems stay on the list
-  // and accumulate rescan cycles instead of falling straight to IGNORE.
-  if (finalScore >= adjustedThreshold - 14) return 'WATCHLIST';
-  if (finalScore >= adjustedThreshold - 24) return 'HOLD_FOR_REVIEW';
+  // Borderline coins (40-57) still get watchlisted so they keep getting rescans
+  if (finalScore >= adjustedThreshold - 18) return 'WATCHLIST';
+  if (finalScore >= adjustedThreshold - 28) return 'HOLD_FOR_REVIEW';
   return 'IGNORE';
 }
 
@@ -4215,6 +4214,86 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ─── DIAGNOSTIC: why is nothing posting? Surfaces all silent guards ──────
+app.get('/api/diagnose/posting', (req, res) => {
+  setCors(res);
+  try {
+    const safe = (sql, ...p) => { try { return dbInstance.prepare(sql).get(...p); } catch { return null; } };
+    const safeAll = (sql, ...p) => { try { return dbInstance.prepare(sql).all(...p); } catch { return []; } };
+
+    const dist = safeAll(`
+      SELECT
+        SUM(CASE WHEN composite_score >= 58 THEN 1 ELSE 0 END) as bucket_58_plus,
+        SUM(CASE WHEN composite_score BETWEEN 50 AND 57 THEN 1 ELSE 0 END) as bucket_50_57,
+        SUM(CASE WHEN composite_score BETWEEN 40 AND 49 THEN 1 ELSE 0 END) as bucket_40_49,
+        SUM(CASE WHEN composite_score BETWEEN 30 AND 39 THEN 1 ELSE 0 END) as bucket_30_39,
+        SUM(CASE WHEN composite_score < 30 THEN 1 ELSE 0 END) as bucket_under_30,
+        SUM(CASE WHEN composite_score IS NULL THEN 1 ELSE 0 END) as bucket_unscored,
+        MAX(composite_score) as max_score_24h,
+        AVG(composite_score) as avg_score_24h
+      FROM candidates
+      WHERE evaluated_at > datetime('now', '-24 hours')
+    `)[0] || {};
+
+    const autoPost24h = safe(`SELECT COUNT(*) as n FROM candidates WHERE final_decision='AUTO_POST' AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const calls24h    = safe(`SELECT COUNT(*) as n FROM calls WHERE called_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const lastAutoPost = safe(`SELECT token, contract_address, composite_score, evaluated_at FROM candidates WHERE final_decision='AUTO_POST' ORDER BY evaluated_at DESC LIMIT 1`);
+    const lastCall     = safe(`SELECT token, contract_address, called_at, posted_at FROM calls ORDER BY called_at DESC LIMIT 1`);
+    const freezeRow    = safe(`SELECT value FROM agent_system_state WHERE key='freeze_active'`);
+    const driftRow     = safe(`SELECT value FROM agent_system_state WHERE key='drift_warning'`);
+
+    const checks = {
+      env: {
+        TELEGRAM_BOT_TOKEN_present:    !!TELEGRAM_BOT_TOKEN,
+        TELEGRAM_GROUP_CHAT_ID_present: !!TELEGRAM_GROUP_CHAT_ID,
+        ADMIN_TELEGRAM_ID_present:     !!ADMIN_TELEGRAM_ID,
+        MIN_SCORE_TO_POST_value:       Number(MIN_SCORE_TO_POST),
+        CLAUDE_API_KEY_present:        !!CLAUDE_API_KEY,
+        OPENAI_API_KEY_present:        !!OPENAI_API_KEY,
+        HELIUS_API_KEY_present:        !!process.env.HELIUS_API_KEY,
+      },
+      runtime: {
+        pausePosting:        AI_CONFIG_OVERRIDES?.pausePosting ?? false,
+        freezeActive:        freezeRow?.value === 'true',
+        driftWarning:        driftRow?.value === 'true',
+        activeMode:          activeMode?.name ?? '?',
+      },
+      flow_24h: {
+        scoreDistribution: {
+          '58+':         dist.bucket_58_plus    || 0,
+          '50-57':       dist.bucket_50_57      || 0,
+          '40-49':       dist.bucket_40_49      || 0,
+          '30-39':       dist.bucket_30_39      || 0,
+          'under_30':    dist.bucket_under_30   || 0,
+          'unscored':    dist.bucket_unscored   || 0,
+        },
+        max_score:       dist.max_score_24h ?? null,
+        avg_score:       dist.avg_score_24h ? Math.round(dist.avg_score_24h * 10) / 10 : null,
+        auto_post_count: autoPost24h,
+        calls_count:     calls24h,
+        last_auto_post:  lastAutoPost,
+        last_call:       lastCall,
+      },
+    };
+
+    // Compose a verdict so the user sees the diagnosis at a glance
+    const reasons = [];
+    if (!checks.env.TELEGRAM_BOT_TOKEN_present)     reasons.push('❌ TELEGRAM_BOT_TOKEN env var missing — Telegram silently skipped');
+    if (!checks.env.TELEGRAM_GROUP_CHAT_ID_present) reasons.push('❌ TELEGRAM_GROUP_CHAT_ID env var missing — group post silently skipped');
+    if (checks.runtime.pausePosting)                reasons.push('⏸ AI_CONFIG_OVERRIDES.pausePosting=true — posting paused via dashboard config');
+    if (checks.runtime.freezeActive)                reasons.push('🥶 freeze_active=true — agent kill-switch is on');
+    if (checks.flow_24h.scoreDistribution['58+'] === 0 && checks.flow_24h.auto_post_count === 0) {
+      reasons.push(`📉 No candidate scored ≥58 in the last 24h (max: ${checks.flow_24h.max_score ?? 'n/a'}, avg: ${checks.flow_24h.avg_score ?? 'n/a'}). Threshold may be too high OR scoring is starving.`);
+    }
+    if (checks.flow_24h.auto_post_count > 0 && checks.flow_24h.calls_count === 0) {
+      reasons.push('⚠ AUTO_POST decisions exist but NO calls in calls table — post path itself failing silently after decision');
+    }
+    if (!reasons.length) reasons.push('✓ No obvious blockers found — check Railway logs for [ai-os] PAUSED or sendCallAlert errors');
+
+    res.json({ ok: true, verdict: reasons, checks, generatedAt: new Date().toISOString() });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // ─── Dev Fingerprint API ──────────────────────────────────────────────────
