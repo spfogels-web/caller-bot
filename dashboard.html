@@ -2639,6 +2639,57 @@ body::before {
   font-weight: 800;
 }
 
+/* Analyzer YES/NO verdict rows */
+.analyzer-feed { display: flex; flex-direction: column; gap: 6px; }
+.analyzer-row {
+  display: grid;
+  grid-template-columns: 120px 90px 1fr 60px;
+  gap: 10px; align-items: center;
+  padding: 9px 12px;
+  background: rgba(0,0,0,0.4);
+  border-left: 3px solid var(--v-col);
+  border-radius: 6px;
+  cursor: pointer; transition: all 0.15s;
+}
+.analyzer-row:hover { background: rgba(255,255,255,0.04); transform: translateX(2px); }
+.analyzer-row-token {
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 13px; font-weight: 900; color: var(--text1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.analyzer-row-verdict {
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 15px; font-weight: 900; letter-spacing: 2px;
+  text-align: center;
+  padding: 5px 10px; border-radius: 5px;
+  background: color-mix(in srgb, var(--v-col) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--v-col) 50%, transparent);
+  color: var(--v-col);
+}
+.analyzer-row-reason {
+  font-family: var(--mono); font-size: 9px;
+  color: var(--text2); line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
+}
+.analyzer-row-reason b { color: var(--text1); }
+.analyzer-row-score {
+  text-align: right; flex-shrink: 0;
+  font-family: 'Orbitron', var(--mono), monospace;
+  font-size: 14px; font-weight: 900;
+}
+@media(max-width:700px){
+  .analyzer-row {
+    grid-template-columns: 100px 75px 40px;
+    grid-template-rows: auto auto;
+    row-gap: 4px;
+  }
+  .analyzer-row-token { grid-column: 1; }
+  .analyzer-row-verdict { grid-column: 2; font-size: 12px; padding: 3px 6px; }
+  .analyzer-row-score { grid-column: 3; }
+  .analyzer-row-reason { grid-column: 1 / -1; }
+}
+
 /* ═══════════════════════════════════════════════════
    📡 LIVE INTELLIGENCE — real-time pipeline event feed
    ═══════════════════════════════════════════════════ */
@@ -3041,6 +3092,17 @@ body::before {
           </div>
           <div id="promotedFeed" class="calls-grid-promoted">
             <div style="grid-column:1/-1;text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading promoted coins...</div>
+          </div>
+        </div>
+
+        <!-- ═══ 🔬 ANALYZER — YES/NO verdict per promoted coin ═══ -->
+        <div class="calls-section">
+          <div class="calls-section-hdr" style="--hdr-col:#18ffff">
+            <span>🔬 ANALYZER · <span id="analyzerCount">0</span></span>
+            <span class="calls-section-sub">real-time YES/NO decision per coin · reason from Claude + scorer</span>
+          </div>
+          <div id="analyzerFeed" class="analyzer-feed">
+            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading analyzer decisions...</div>
           </div>
         </div>
 
@@ -9086,10 +9148,11 @@ var _callsFilter = 'all';
 async function loadCallsTab(){
   const feed = document.getElementById('callsFeed');
   if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>';
-  // Parallel: actual AUTO_POSTs (archive) + scanner-feed PROMOTED picks
-  const [archive, scanner] = await Promise.all([
+  // Parallel: actual AUTO_POSTs (archive) + scanner-feed PROMOTED + scored candidates (for analyzer verdicts)
+  const [archive, scanner, scored] = await Promise.all([
     apiFetch('/api/archive?decision=AUTO_POST&limit=300'),
     apiFetch('/api/scanner-feed?limit=120').catch(() => null),
+    apiFetch('/api/scanner?limit=40').catch(() => null),
   ]);
   if (!archive || !archive.ok) {
     if (feed) feed.innerHTML = '<div style="text-align:center;padding:30px;font-family:var(--mono);font-size:10px;color:var(--red)">Failed to load calls.</div>';
@@ -9097,7 +9160,6 @@ async function loadCallsTab(){
   }
   _callsAll = archive.rows || [];
 
-  // Render PROMOTED section — scanner's top picks, dedupe against already-called CAs
   const calledCAs = new Set(_callsAll.map(c => c.contract_address));
   const promoted = (scanner?.rows || [])
     .filter(r => r.filter_action === 'PROMOTE')
@@ -9105,7 +9167,10 @@ async function loadCallsTab(){
     .slice(0, 24);
   renderPromotedSection(promoted, calledCAs);
 
-  // Render performance chart from resolved/peak calls
+  // Analyzer feed — verdicts per scored candidate
+  renderAnalyzerFeed(scored?.rows || [], calledCAs);
+
+  // Performance chart from resolved/peak calls
   renderPerfChart(_callsAll);
   // Summary tiles
   const wins = _callsAll.filter(c => c.outcome === 'WIN').length;
@@ -9253,6 +9318,77 @@ function renderPerfChart(calls){
         <div class="perf-bar-baseline" style="left:${baselinePct}%" title="1x (entry)"></div>
       </div>
       <span class="perf-bar-value" style="color:${col}">${peak.toFixed(2)}x</span>
+    </div>`;
+  }).join('');
+}
+
+// ─── Analyzer YES/NO verdicts ─────────────────────────────────────────
+// For each scored candidate, decide whether the bot would/did call it and
+// WHY, pulling reasons from Claude + scorer signals. Shows the 20 most
+// recent scored candidates.
+function renderAnalyzerFeed(scoredRows, calledCAs){
+  const el = document.getElementById('analyzerFeed');
+  if (!el) return;
+  // Only rows with a real composite_score — exclude pre-score entries
+  const rows = scoredRows
+    .filter(r => r.composite_score != null && r.composite_score > 0)
+    .sort((a, b) => new Date(b.evaluated_at || 0).getTime() - new Date(a.evaluated_at || 0).getTime())
+    .slice(0, 20);
+
+  setText('analyzerCount', rows.length);
+  if (!rows.length) {
+    el.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">No analyzer decisions yet — waiting for scored candidates.</div>';
+    return;
+  }
+
+  function buildVerdict(r){
+    const score = r.composite_score || 0;
+    const dec   = r.final_decision || 'PENDING';
+    const risk  = r.claude_risk;
+    const wasCalled = dec === 'AUTO_POST' || calledCAs.has(r.contract_address);
+    // YES if the bot made the call; NO otherwise. Colors + reason follow.
+    if (wasCalled) {
+      return {
+        label: 'YES',
+        col: '#00e676',
+        reason: `<b>Called.</b> Score ${score}${risk ? ` · Claude: <b>${esc(risk)}</b>` : ''}${r.claude_setup_type ? ` · Setup: <b>${esc(r.claude_setup_type.replace(/_/g,' '))}</b>` : ''}`,
+      };
+    }
+    // Build a concrete NO reason
+    const reasons = [];
+    if (risk === 'EXTREME') reasons.push(`Claude flagged <b>EXTREME risk</b>`);
+    if (score < 35) reasons.push(`score <b>${score}</b> below 35 floor`);
+    if (dec === 'BLOCKLIST') reasons.push(`hard-blocked by scorer`);
+    if (dec === 'IGNORE' && !reasons.length) reasons.push(`bot decided <b>IGNORE</b>`);
+    if (dec === 'WATCHLIST') reasons.push(`kept on watchlist · awaiting upgrade`);
+    if (dec === 'HOLD_FOR_REVIEW') reasons.push(`holding for review`);
+    if (r.bundle_risk === 'SEVERE' || r.bundle_risk === 'HIGH') reasons.push(`bundle risk <b>${esc(r.bundle_risk)}</b>`);
+    if (r.sniper_wallet_count > 15) reasons.push(`${r.sniper_wallet_count} snipers`);
+    if (r.dev_wallet_pct > 15) reasons.push(`dev holds <b>${r.dev_wallet_pct.toFixed(1)}%</b>`);
+    if (!reasons.length && r.claude_verdict) {
+      const snip = r.claude_verdict.slice(0, 90).replace(/"/g, '');
+      reasons.push(`"${esc(snip)}${r.claude_verdict.length > 90 ? '…' : ''}"`);
+    }
+    if (!reasons.length) reasons.push(`score ${score} · ${esc(dec)}`);
+    // MAYBE state for borderline 35-49 with LOW/MEDIUM risk
+    const isBorderline = score >= 35 && score < 50 && (risk === 'LOW' || risk === 'MEDIUM' || !risk);
+    return {
+      label: isBorderline ? 'MAYBE' : 'NO',
+      col:   isBorderline ? '#ffd740' : '#ff1744',
+      reason: reasons.slice(0, 2).join(' · '),
+    };
+  }
+
+  el.innerHTML = rows.map(r => {
+    const v = buildVerdict(r);
+    const score = r.composite_score || 0;
+    const scCol = score >= 80 ? 'var(--gold)' : score >= 65 ? 'var(--green)' : score >= 50 ? 'var(--cyan)' : score >= 35 ? 'var(--blue)' : 'var(--text3)';
+    const tok = r.token || (r.contract_address || '').slice(0,6);
+    return `<div class="analyzer-row" style="--v-col:${v.col}" onclick="openFullCandidateDetail('${esc(r.contract_address||'')}')">
+      <div class="analyzer-row-token">$${esc(tok)}</div>
+      <div class="analyzer-row-verdict">${v.label}</div>
+      <div class="analyzer-row-reason">${v.reason}</div>
+      <div class="analyzer-row-score" style="color:${scCol}">${score}</div>
     </div>`;
   }).join('');
 }
