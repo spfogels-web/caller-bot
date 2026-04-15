@@ -2624,7 +2624,6 @@ body::before {
     <button class="htab active" onclick="switchTab('overview')"><span class="dot"></span>OVERVIEW</button>
     <button class="htab" onclick="switchTab('calls')"><span class="dot"></span>CALLS <span class="badge" id="tb-calls-badge"></span></button>
     <button class="htab" onclick="switchTab('candidates')"><span class="dot"></span>CANDIDATES <span class="badge" id="tb-candidates-badge"></span></button>
-    <button class="htab" onclick="switchTab('auditor')"><span class="dot"></span>AUDITOR <span class="badge" id="tb-auditor-badge"></span></button>
     <button class="htab" onclick="switchTab('smart')"><span class="dot"></span>SMART MONEY</button>
     <button class="htab" onclick="switchTab('ai')"><span class="dot"></span>AI BRAIN</button>
     <button class="htab" onclick="switchTab('analytics')"><span class="dot"></span>ANALYTICS</button>
@@ -2644,7 +2643,6 @@ body::before {
       <option value="overview">≡ OVERVIEW</option>
       <option value="calls">≡ CALLS</option>
       <option value="candidates">≡ CANDIDATES</option>
-      <option value="auditor">≡ AUDITOR</option>
       <option value="smart">≡ SMART MONEY</option>
       <option value="ai">≡ AI BRAIN</option>
       <option value="analytics">≡ ANALYTICS</option>
@@ -3782,84 +3780,6 @@ body::before {
       </div>
     </div><!-- /smart -->
 
-    <!-- AUDITOR TAB -->
-    <div class="tab-panel" id="tab-auditor">
-      <div style="padding:16px">
-
-        <!-- Header -->
-        <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
-          <div>
-            <div style="font-family:'Orbitron',var(--mono),monospace;font-size:18px;font-weight:900;background:linear-gradient(90deg,#18ffff,#00e676);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:2px">
-              AUDITOR
-            </div>
-            <div style="font-family:var(--mono);font-size:9px;color:rgba(136,153,187,0.7);letter-spacing:2px;margin-top:4px">
-              EVERY PROMOTED COIN · CLAUDE + GPT-4o DECISION TRAIL
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <button onclick="loadAuditor()" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:5px;padding:6px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">↻ REFRESH</button>
-          </div>
-        </div>
-
-        <!-- Decision summary tiles -->
-        <div class="g5" style="margin-bottom:14px" id="auditorStats">
-          <div class="tile"><div class="tile-label">TOTAL</div><div class="tile-val" id="auTotal">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--green)">AUTO POST</div><div class="tile-val" style="color:var(--green)" id="auAutoPost">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--gold)">WATCHLIST</div><div class="tile-val" style="color:var(--gold)" id="auWatchlist">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--orange)">RETEST</div><div class="tile-val" style="color:var(--orange)" id="auRetest">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--red)">BLOCKED</div><div class="tile-val" style="color:var(--red)" id="auBlocklist">—</div></div>
-        </div>
-
-        <!-- Filters -->
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-          <input id="auSearch" oninput="filterAuditor()" placeholder="Search token or CA..." style="flex:1;min-width:180px;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:5px;padding:6px 10px;color:var(--text1);font-family:var(--mono);font-size:10px;outline:none">
-          <select id="auDecision" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
-            <option value="">ALL DECISIONS</option>
-            <option value="AUTO_POST">AUTO POST</option>
-            <option value="WATCHLIST">WATCHLIST</option>
-            <option value="RETEST">RETEST</option>
-            <option value="IGNORE">IGNORE</option>
-            <option value="BLOCKLIST">BLOCKLIST</option>
-            <option value="HOLD_FOR_REVIEW">HOLD</option>
-          </select>
-          <select id="auMinScore" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
-            <option value="">ANY SCORE</option>
-            <option value="80">≥ 80</option>
-            <option value="65">≥ 65</option>
-            <option value="50">≥ 50</option>
-            <option value="38">≥ 38</option>
-          </select>
-          <select id="auMcap" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
-            <option value="">ANY MCAP</option>
-            <option value="gem">$7.5K–$40K (GEM WINDOW)</option>
-            <option value="micro">&lt; $100K</option>
-            <option value="small">$100K–$500K</option>
-            <option value="mid">&gt; $500K</option>
-          </select>
-          <select id="auOutcome" onchange="filterAuditor()" style="background:rgba(0,0,0,0.5);border:1px solid var(--border2);color:var(--text1);border-radius:5px;padding:6px 8px;font-family:var(--mono);font-size:10px;outline:none">
-            <option value="">ANY OUTCOME</option>
-            <option value="WIN">🏆 WINS ONLY</option>
-            <option value="LOSS">💀 LOSSES</option>
-            <option value="PENDING">⏳ PENDING</option>
-            <option value="2x">≥ 2× peak</option>
-            <option value="5x">≥ 5× peak</option>
-            <option value="10x">≥ 10× peak (GEMS)</option>
-          </select>
-        </div>
-
-        <!-- Audit rows -->
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-          <div class="au-row au-header" style="border-bottom:1px solid var(--border);font-family:var(--mono);font-size:7px;letter-spacing:2px;color:rgba(136,153,187,0.55);text-transform:uppercase">
-            <div>TIME</div><div>TOKEN</div><div>MCAP</div><div>SCORE</div><div>OUTCOME</div><div>CLAUDE / GPT-4o</div><div>DECISION</div><div>SETUP</div>
-          </div>
-          <div id="auRows" style="max-height:600px;overflow-y:auto">
-            <div style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:rgba(136,153,187,0.5)">Loading audit archive...</div>
-          </div>
-          <div id="auPager" style="padding:8px 14px;border-top:1px solid var(--border);font-family:var(--mono);font-size:8px;color:var(--text3);text-align:center"></div>
-        </div>
-
-      </div>
-    </div><!-- /auditor -->
 
     <!-- ═══════════════════════════════════════════════════════════════════════════
          🧠⚖️ BRAINSTORM ROOM — Claude (Analyst) + OpenAI (Decision Engine) collab
@@ -4095,7 +4015,6 @@ function switchTab(name){
   if(sel) sel.value=name;
 
   if(name==='smart')loadSmartMoneyTab();
-  if(name==='auditor')loadAuditor();
 }
 
 function refreshTabData(name){
@@ -4103,7 +4022,6 @@ function refreshTabData(name){
     case 'overview':    loadOverview();      break;
     case 'calls':       loadCallsTab();      break;
     case 'candidates':  loadAudit();         break;
-    case 'auditor':     loadAuditor();       break;
     case 'analytics':   loadAnalytics();     break;
     case 'ai':          loadAI();            break;
     case 'smart':       loadSmartMoneyTab(); break;
