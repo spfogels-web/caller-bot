@@ -8716,43 +8716,89 @@ function renderLiveIntel(){
 
 async function pollLiveIntel(){
   try {
-    // Pull recent scored candidates + auto-posts
-    const [scanner, momentum] = await Promise.all([
-      apiFetch('/api/scanner?limit=50'),
+    // Pull every source we have so the feed is NEVER empty when pipeline is running
+    const [scanner, feed, momentum, rolling] = await Promise.all([
+      apiFetch('/api/scanner?limit=80'),
+      apiFetch('/api/scanner-feed?limit=80').catch(()=>null),
       apiFetch('/api/momentum/hot').catch(()=>null),
+      apiFetch('/api/stats/rolling').catch(()=>null),
     ]);
     const rows = (scanner?.rows || []);
-    // Promoted / auto-posted
-    rows.filter(r => r.final_decision === 'AUTO_POST')
-        .slice(0, 8)
-        .forEach(r => {
-          _liPushEvent('promo', r.token, '🚀 <span class="li-token" style="color:var(--green)">$'+esc(r.token||'?')+'</span> promoted · score <b>'+(r.composite_score||'?')+'</b> · mcap '+fmt(r.market_cap,'$'), 'var(--green)');
-        });
-    // Scored (composite became available)
-    rows.filter(r => r.composite_score != null && r.composite_score >= 40 && r.final_decision !== 'AUTO_POST')
-        .slice(0, 10)
-        .forEach(r => {
-          _liPushEvent('scored', r.token, '✓ Scored <span class="li-token" style="color:var(--cyan)">$'+esc(r.token||'?')+'</span> · <b>'+r.composite_score+'</b>/100 · '+esc(r.final_decision||'—'), 'var(--cyan)');
-        });
-    // Claude verdicts (risk available)
-    rows.filter(r => r.claude_verdict && r.claude_risk)
-        .slice(0, 5)
-        .forEach(r => {
-          _liPushEvent('claude', r.token, '🤖 Claude reviewed <span class="li-token" style="color:var(--blue)">$'+esc(r.token||'?')+'</span> · risk <b>'+esc(r.claude_risk)+'</b>', 'var(--blue)');
-        });
-    // Momentum spikes
+    const feedRows = (feed?.rows || []);
+
+    // 1. Scanner detections (always has data — uses a per-CA dedupe)
+    feedRows.slice(0, 15).forEach(r => {
+      const tok = r.token || (r.contract_address || '').slice(0, 6);
+      const mc = r.market_cap ? ' · '+fmt(r.market_cap, '$') : '';
+      const act = r.filter_action || 'scanned';
+      _liPushEvent('scan-'+(r.contract_address||tok), tok, '🔬 Scanned <span class="li-token" style="color:var(--text1)">$'+esc(tok)+'</span> · '+esc(act)+mc, 'var(--text3)');
+    });
+
+    // 2. AUTO_POST promotions
+    rows.filter(r => r.final_decision === 'AUTO_POST').slice(0, 8).forEach(r => {
+      _liPushEvent('promo-'+(r.contract_address||r.token), r.token,
+        '🚀 <span class="li-token" style="color:var(--green)">$'+esc(r.token||'?')+'</span> promoted · score <b>'+(r.composite_score||'?')+'</b> · mcap '+fmt(r.market_cap,'$'),
+        'var(--green)');
+    });
+
+    // 3. Any scored candidate — threshold lowered 40 → 0 so EVERY scored coin shows up
+    rows.filter(r => r.composite_score != null && r.final_decision !== 'AUTO_POST').slice(0, 20).forEach(r => {
+      const dec = r.final_decision || 'PENDING';
+      const col = r.composite_score >= 58 ? 'var(--gold)' : r.composite_score >= 45 ? 'var(--cyan)' : r.composite_score >= 30 ? 'var(--text2)' : 'var(--text3)';
+      _liPushEvent('scored-'+(r.contract_address||r.token), r.token,
+        '✓ Scored <span class="li-token" style="color:'+col+'">$'+esc(r.token||'?')+'</span> · <b>'+r.composite_score+'</b>/100 · '+esc(dec),
+        col);
+    });
+
+    // 4. Claude forensic verdicts
+    rows.filter(r => r.claude_verdict && r.claude_risk).slice(0, 8).forEach(r => {
+      const snippet = (r.claude_verdict || '').slice(0, 60).replace(/"/g, '').trim();
+      const riskCol = r.claude_risk === 'LOW' ? 'var(--green)' : r.claude_risk === 'EXTREME' ? 'var(--red)' : 'var(--gold)';
+      _liPushEvent('claude-'+(r.contract_address||r.token), r.token,
+        '🤖 Claude on <span class="li-token" style="color:var(--blue)">$'+esc(r.token||'?')+'</span> · <b style="color:'+riskCol+'">'+esc(r.claude_risk)+'</b>'+(snippet ? ' — <span style="color:var(--text3);font-style:italic">"'+esc(snippet)+(r.claude_verdict.length > 60 ? '…' : '')+'"</span>' : ''),
+        'var(--blue)');
+    });
+
+    // 5. GPT-4o final decisions
+    rows.filter(r => r.openai_decision).slice(0, 5).forEach(r => {
+      const d = r.openai_decision;
+      const col = d === 'AUTO_POST' || d === 'POST' ? 'var(--green)' : d === 'IGNORE' ? 'var(--red)' : 'var(--gold)';
+      _liPushEvent('gpt-'+(r.contract_address||r.token), r.token,
+        '🧠 GPT-4o on <span class="li-token" style="color:'+col+'">$'+esc(r.token||'?')+'</span> → <b>'+esc(d)+'</b>'+(r.openai_conviction ? ' · '+r.openai_conviction+'%' : ''),
+        col);
+    });
+
+    // 6. Momentum spikes
     if (momentum?.spikes) {
-      momentum.spikes.slice(0, 5).forEach(s => {
+      momentum.spikes.slice(0, 8).forEach(s => {
         const tok = s.token || (s.contract_address||'').slice(0,6);
         const flag = s.spike_flag;
         const icon = flag === 'BREAKOUT' ? '💥' : flag === 'PRICE_SPIKE' ? '📈' : '⚡';
         const pct = s.delta_mcap_pct != null ? ' +'+Math.round(s.delta_mcap_pct)+'%' : '';
-        _liPushEvent('spike-'+(s.id||tok), tok, icon+' <span class="li-token" style="color:var(--gold)">$'+esc(tok)+'</span> '+esc(flag.replace('_',' '))+pct, 'var(--gold)');
+        _liPushEvent('spike-'+(s.id||tok), tok,
+          icon+' <span class="li-token" style="color:var(--gold)">$'+esc(tok)+'</span> '+esc(flag.replace('_',' '))+pct,
+          'var(--gold)');
       });
     }
+
+    // 7. Heartbeat — always fire at least one event per poll so the feed is never dead
+    if (rolling?.ok && rolling.windows?.['1h']) {
+      const h = rolling.windows['1h'];
+      const now = Date.now();
+      const lastHeartbeat = _liEvents[0]?.type === 'heartbeat' ? _liEvents[0].at : 0;
+      // Only beat once per 5 min to avoid spam
+      if (now - lastHeartbeat > 5 * 60_000) {
+        _liPushEvent('heartbeat-'+Math.floor(now/300_000), null,
+          '💓 Last hour: <b>'+h.scanned+'</b> scanned · <b>'+h.evaluated+'</b> scored · <b>'+h.claudeRan+'</b> Claude · <b>'+h.autoPosted+'</b> posts',
+          'var(--purple)');
+      }
+    }
+
     _liFirstLoad = false;
     renderLiveIntel();
-  } catch (err) { /* silent */ }
+  } catch (err) {
+    console.warn('[live-intel] poll failed:', err.message);
+  }
 }
 
 // Start the live-intel loop
