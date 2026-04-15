@@ -4258,6 +4258,72 @@ app.get('/api/external/wallet/:address', async (req, res) => {
   }
 });
 
+// ─── 🔎 PIPELINE FLOW DIAGNOSTIC — shows drop-off at each stage ──────────
+// Counts rows at every step so we can see exactly where the pipeline is leaking.
+// scanner_feed → promoted → enriched → scored → posted
+app.get('/api/diagnose/pipeline-flow', (req, res) => {
+  setCors(res);
+  try {
+    const safe = (sql, ...p) => { try { return dbInstance.prepare(sql).get(...p); } catch { return null; } };
+    const safeAll = (sql, ...p) => { try { return dbInstance.prepare(sql).all(...p); } catch { return []; } };
+
+    // Stage 1 — scanner_feed (scanner detected)
+    const feed_total = safe(`SELECT COUNT(*) as n FROM scanner_feed WHERE scanned_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const feed_by_action = safeAll(`
+      SELECT filter_action, COUNT(*) as n FROM scanner_feed
+      WHERE scanned_at > datetime('now','-24 hours') GROUP BY filter_action
+    `);
+
+    // Stage 2 — candidates table (processCandidate ran)
+    const cands_total = safe(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const cands_scored = safe(`SELECT COUNT(*) as n FROM candidates WHERE composite_score IS NOT NULL AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const cands_by_decision = safeAll(`
+      SELECT final_decision, COUNT(*) as n FROM candidates
+      WHERE evaluated_at > datetime('now','-24 hours') GROUP BY final_decision
+    `);
+
+    // Stage 3 — Claude ran (claude_verdict or claude_risk set)
+    const claude_ran = safe(`SELECT COUNT(*) as n FROM candidates WHERE claude_verdict IS NOT NULL AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+    const openai_ran = safe(`SELECT COUNT(*) as n FROM candidates WHERE openai_decision IS NOT NULL AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+
+    // Stage 4 — posted to Telegram (posted=1)
+    const posted = safe(`SELECT COUNT(*) as n FROM candidates WHERE posted=1 AND evaluated_at > datetime('now','-24 hours')`)?.n ?? 0;
+
+    // Sample scanner_feed rows that ARE promoted to see if they have CAs/data
+    const sample_promoted = safeAll(`
+      SELECT contract_address, token, quick_score, filter_action, filter_reason,
+             market_cap, liquidity, buys_1h, scanned_at
+      FROM scanner_feed
+      WHERE filter_action='PROMOTE' AND scanned_at > datetime('now','-4 hours')
+      ORDER BY scanned_at DESC LIMIT 5
+    `);
+
+    // Drop-off diagnosis
+    const promoted_count = (feed_by_action.find(r => r.filter_action === 'PROMOTE') || {}).n || 0;
+    const leak = (() => {
+      if (feed_total === 0) return '🚨 scanner not running — no scanner_feed rows at all';
+      if (promoted_count === 0) return '🚨 scanner produced rows but NONE promoted — quick-score filter too strict';
+      if (cands_total === 0) return '🚨 MASSIVE LEAK: scanner promoted ' + promoted_count + ' coins but processCandidate never wrote to candidates table. Check Railway logs for exceptions in processCandidate / enrichCandidate.';
+      if (cands_scored === 0) return '🚨 candidates inserted but composite_score is null — scorer is crashing or returning null';
+      if (claude_ran === 0 && cands_scored > 0) return '⚠ Claude never runs — check CLAUDE_API_KEY and the aiShouldEvaluate gate';
+      if (openai_ran === 0 && cands_scored > 0) return '⚠ OpenAI never runs — check OPENAI_API_KEY and the shouldRunOpenAI gate';
+      if (posted === 0 && cands_scored > 0) return '⚠ Scoring works but nothing posting — check decision logic / risk gate';
+      return '✓ Pipeline looks healthy.';
+    })();
+
+    res.json({
+      ok: true,
+      leak_diagnosis: leak,
+      stage_1_scanner_feed:  { total: feed_total, by_action: feed_by_action },
+      stage_2_candidates:    { total: cands_total, scored: cands_scored, by_decision: cands_by_decision },
+      stage_3_ai:            { claude_ran, openai_ran },
+      stage_4_posted:        posted,
+      sample_promoted,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // ─── 🚨 KILLSWITCH AUDIT — checks EVERY known post-killer in one shot ────────
 // User reports 'something is killing every post'. This endpoint runs through
 // the 13 known kill paths and tells you exactly which one(s) are firing.
