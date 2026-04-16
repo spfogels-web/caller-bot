@@ -6532,6 +6532,47 @@ app.get('/api/db/backup', async (req, res) => {
 });
 
 // Quick health check — tells you if the DB is persistent and how big it is.
+// Diagnostic: test Solscan + Helius holder fetch for a CA
+app.get('/api/diagnose/holders/:ca', async (req, res) => {
+  setCors(res);
+  const { ca } = req.params;
+  const result = {
+    solscan: { keyPresent: !!process.env.SOLSCAN_API_KEY, status: null, ownersFound: 0, error: null },
+    helius:  { keyPresent: !!HELIUS_API_KEY,              status: null, ownersFound: 0, error: null },
+  };
+  // Test Solscan
+  if (process.env.SOLSCAN_API_KEY) {
+    try {
+      const r = await fetch(
+        `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=20&page=1`,
+        { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(9_000) }
+      );
+      result.solscan.status = r.status;
+      const j = await r.json();
+      const arr = j?.data?.items || j?.data || [];
+      result.solscan.ownersFound = Array.isArray(arr) ? arr.length : 0;
+      if (!r.ok) result.solscan.error = j?.message || j?.error || 'HTTP ' + r.status;
+    } catch (e) { result.solscan.error = e.message; }
+  }
+  // Test Helius
+  if (HELIUS_API_KEY) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'diag', method: 'getTokenLargestAccounts', params: [ca, { commitment: 'confirmed' }] }),
+        signal: AbortSignal.timeout(9_000),
+      });
+      result.helius.status = r.status;
+      const j = await r.json();
+      result.helius.ownersFound = (j?.result?.value || []).length;
+      if (j?.error) result.helius.error = JSON.stringify(j.error);
+      if (!r.ok) result.helius.error = 'HTTP ' + r.status;
+    } catch (e) { result.helius.error = e.message; }
+  }
+  res.json({ ok: true, ca, result });
+});
+
 app.get('/api/db/health', (req, res) => {
   setCors(res);
   try {

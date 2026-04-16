@@ -8701,12 +8701,6 @@ async function analyzeSeedContract(ca){
         if (ext?.ok && ext.candidate) {
           c = ext.candidate;
           source = ext.source || 'live';
-          // Brain Analyzer auto-inserts holders into tracked_wallets. Kick the
-          // Smart Money tab to refresh in the background so the user sees them
-          // when they switch tabs.
-          if (typeof loadWalletTiles === 'function') loadWalletTiles();
-          if (typeof loadWalletRankings === 'function') loadWalletRankings();
-          if (typeof loadSmartMoneySummary === 'function') loadSmartMoneySummary();
         }
       } catch {}
     }
@@ -8954,27 +8948,26 @@ async function triggerBrainAnalysis() {
     const data = await apiFetch('/api/candidates/by-ca/' + encodeURIComponent(ca));
     candidate = data?.candidate || null;
   } catch {}
-  // External fallback — fetch live from DexScreener for any CA not in our DB
-  if (!candidate) {
-    try {
-      const data = await apiFetch('/api/external/token/' + encodeURIComponent(ca));
-      if (data?.ok && data.candidate) {
-        candidate = data.candidate;
-        // Log the auto-ingest result so we can see exactly what happened
-        if (data.walletsIngested) {
-          console.log('[brain-analyzer] walletsIngested:', data.walletsIngested);
-          const wi = data.walletsIngested;
-          if (wi.attempted === 0) {
-            console.warn('[brain-analyzer] ⚠ 0 holders resolved — Solscan and Helius both returned empty. Check SOLSCAN_API_KEY on Railway.');
-          } else if (wi.error) {
-            console.error('[brain-analyzer] ⚠ auto-insert error:', wi.error);
-          } else {
-            console.log('[brain-analyzer] ✓ ' + wi.inserted + ' new / ' + wi.updated + ' updated (of ' + wi.attempted + ')');
-          }
+  // Always call /api/external/token/:ca — even if the CA is already in our DB.
+  // This is what actually fetches the current holders and inserts them into
+  // tracked_wallets. We await it so that loadWalletTiles() below is guaranteed
+  // to see the new rows.
+  try {
+    const data = await apiFetch('/api/external/token/' + encodeURIComponent(ca));
+    if (data?.ok && data.candidate) {
+      if (!candidate) candidate = data.candidate; // use as fallback if not in DB
+      if (data.walletsIngested) {
+        const wi = data.walletsIngested;
+        if (wi.attempted === 0) {
+          console.warn('[brain-analyzer] ⚠ 0 holders resolved — check SOLSCAN_API_KEY.');
+        } else if (wi.error) {
+          console.error('[brain-analyzer] ⚠ auto-insert error:', wi.error);
+        } else {
+          console.log('[brain-analyzer] ✓ ' + wi.inserted + ' new / ' + wi.updated + ' updated (of ' + wi.attempted + ')');
         }
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
   if (candidate) {
     const wi = candidate.wallet_intel
@@ -9019,9 +9012,10 @@ async function triggerBrainAnalysis() {
     _setBrainStatus('COMPLETE', 'done');
     _setBrainProgress(100, '✓ Scan complete · ' + (candidate.token ? '$' + candidate.token : ca.slice(0, 8)));
 
-    // Refresh Wallet Database — the server just auto-inserted the scanned
-    // holders with SOL balance, but the tile grid won't show them until we
-    // reload. No click required from the user.
+    // Refresh Wallet Database — switch sort to "recently seen" so wallets just
+    // inserted by this scan bubble to the top of the tile grid automatically.
+    const wtSort = document.getElementById('wtSortBy');
+    if (wtSort) wtSort.value = 'recent';
     if (typeof loadWalletTiles === 'function') loadWalletTiles();
     if (typeof loadWalletRankings === 'function') loadWalletRankings();
     if (typeof loadSmartMoneySummary === 'function') loadSmartMoneySummary();
