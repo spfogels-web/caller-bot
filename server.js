@@ -4221,13 +4221,19 @@ app.get('/api/external/token/:ca', async (req, res) => {
       }
     } catch (err) { console.warn('[external-token] dex fetch failed:', err.message); }
 
+    // Don't 404 when DexScreener has no pair data — fresh pump.fun coins
+    // often aren't indexed there yet, but their holders exist on-chain and
+    // we can still scan them via Solscan/Helius. A missing DexScreener hit
+    // used to cause /api/external/token to 404 before the holder fetch
+    // could run — which blocked the Brain Analyzer's wallet auto-insert.
     if (!row && !dex) {
-      return res.status(404).json({ ok: false, error: 'Not in DB and DexScreener has no data for this CA' });
+      console.warn(`[external-token] No DB row or DexScreener pair for ${ca.slice(0,8)} — continuing to holder fetch anyway`);
     }
 
     // 3. Merge — DexScreener live data wins for volatile fields (price/mcap/vol),
     //    DB wins for scored fields (composite_score, claude_verdict, sub_scores)
     const merged = { ...(row || {}) };
+    merged.contract_address = ca; // always set — even when no row/dex
     if (dex) {
       merged.contract_address = ca;
       merged.token            = merged.token || dex.baseToken?.symbol;
