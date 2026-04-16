@@ -7014,7 +7014,17 @@ app.get('/api/wallets/rankings', (req, res) => {
     // In-memory Dune store stats (live)
     const duneStatus = getDuneWalletStatus();
 
-    res.json({ ok: true, wallets: rows, categories: cats, topWinners, duneStatus, total: rows.length });
+    // Real total — COUNT(*) across the whole table, not the returned slice.
+    // Category filter narrows the count so "IN DB" reflects current filter.
+    let totalCount = rows.length;
+    try {
+      let countQ = `SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0`;
+      const countParams = [];
+      if (category) { countQ += ' AND category=?'; countParams.push(category); }
+      totalCount = dbInstance.prepare(countQ).get(...countParams).n;
+    } catch {}
+
+    res.json({ ok: true, wallets: rows, categories: cats, topWinners, duneStatus, total: totalCount, returned: rows.length });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 

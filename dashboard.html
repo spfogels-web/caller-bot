@@ -7703,13 +7703,14 @@ const WALLET_TILES_PAGE = 60;
 
 async function loadWalletTiles(){
   try{
-    const data = await apiFetch('/api/wallets/rankings?limit=500');
+    const data = await apiFetch('/api/wallets/rankings?limit=1000');
     _walletTilesAll = (data && data.wallets) ? data.wallets : [];
-    // Update scanner stat tiles
-    const cats = data?.categories || [];
-    const total = _walletTilesAll.length;
-    const whales = (cats.find(c=>c.category==='WINNER') || {}).count || 0;
-    const smart  = (cats.find(c=>c.category==='SMART_MONEY') || {}).count || 0;
+    // Server returns the REAL count (COUNT(*) from tracked_wallets) as data.total.
+    // Fall back to array length when absent so older backends keep working.
+    const total   = (data && Number.isFinite(data.total)) ? data.total : _walletTilesAll.length;
+    const cats    = data?.categories || [];
+    const whales  = (cats.find(c=>c.category==='WINNER') || {}).count || 0;
+    const smart   = (cats.find(c=>c.category==='SMART_MONEY') || {}).count || 0;
     setText('wsStatTotal', total.toLocaleString());
     setText('wsStatWhale', whales);
     setText('wsStatSmart', smart);
