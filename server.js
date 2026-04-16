@@ -4383,33 +4383,59 @@ app.get('/api/external/token/:ca', async (req, res) => {
     // AND carry SOL balance so the tiles show it without an extra click.
     // INSERT OR IGNORE keeps existing labels/categories untouched; the
     // UPDATE afterward refreshes sol_balance even on pre-existing rows.
-    let _autoInsertResult = { attempted: owners.length, inserted: 0, updated: 0, error: null };
+    let _autoInsertResult = { attempted: owners.length, inserted: 0, updated: 0, promoted: 0, error: null };
     if (owners.length) {
       try {
+        // Auto-categorize based on SOL balance:
+        //   ≥100 SOL → WINNER  (renders as 🐋 WHALE in tiles)
+        //   ≥ 10 SOL → SMART_MONEY
+        //   ≥  1 SOL → MOMENTUM (active wallet, not a whale yet)
+        //   <  1 SOL → NEUTRAL (dust / dust-holder)
+        // Only UPSERTs category if the existing row is NEUTRAL — we never
+        // clobber a user-labeled category (WINNER/RUG/etc).
+        const categoryFor = (sol) => {
+          if (sol == null) return 'NEUTRAL';
+          if (sol >= 100) return 'WINNER';
+          if (sol >= 10)  return 'SMART_MONEY';
+          if (sol >= 1)   return 'MOMENTUM';
+          return 'NEUTRAL';
+        };
         const ins = dbInstance.prepare(`
           INSERT OR IGNORE INTO tracked_wallets
             (address, category, source, updated_at, last_seen)
-          VALUES (?, 'NEUTRAL', 'brain_scan', datetime('now'), datetime('now'))
+          VALUES (?, ?, 'brain_scan', datetime('now'), datetime('now'))
         `);
         const updSol = dbInstance.prepare(`
           UPDATE tracked_wallets
           SET sol_balance = ?, sol_scanned_at = datetime('now')
           WHERE address = ?
         `);
+        // Promotion only touches NEUTRAL rows — so manual labels stick.
+        const promote = dbInstance.prepare(`
+          UPDATE tracked_wallets
+          SET category = ?, updated_at = datetime('now')
+          WHERE address = ?
+            AND (category = 'NEUTRAL' OR category IS NULL)
+            AND ? != 'NEUTRAL'
+        `);
         const tx = dbInstance.transaction((addrs) => {
-          let inserted = 0, updated = 0;
+          let inserted = 0, updated = 0, promoted = 0;
           for (const a of addrs) {
             if (!a) continue;
-            inserted += ins.run(a).changes;
             const sol = solBalances.get(a);
+            const cat = categoryFor(sol);
+            inserted += ins.run(a, cat).changes;
             if (sol != null) updated += updSol.run(Number(sol.toFixed(6)), a).changes;
+            // Promote pre-existing NEUTRAL rows when this scan found they're whales
+            if (cat !== 'NEUTRAL') promoted += promote.run(cat, a, cat).changes;
           }
-          return { inserted, updated };
+          return { inserted, updated, promoted };
         });
-        const { inserted, updated } = tx(owners);
+        const { inserted, updated, promoted } = tx(owners);
         _autoInsertResult.inserted = inserted;
         _autoInsertResult.updated  = updated;
-        console.log(`[external-token] ca=${ca.slice(0,8)} Auto-added ${inserted} new · refreshed SOL on ${updated} rows (out of ${owners.length})`);
+        _autoInsertResult.promoted = promoted;
+        console.log(`[external-token] ca=${ca.slice(0,8)} Auto-added ${inserted} new · refreshed SOL on ${updated} rows · auto-promoted ${promoted} by SOL balance (out of ${owners.length})`);
       } catch (err) {
         _autoInsertResult.error = err.message;
         console.warn('[external-token] auto-insert failed:', err.message);
