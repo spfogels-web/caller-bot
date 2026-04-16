@@ -6735,6 +6735,47 @@ app.get('/api/wallets/rankings', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Instant SOL-balance classification for brain_scan wallets still sitting at NEUTRAL.
+// Runs in <50ms (pure SQLite, no external APIs). Call this before the Dune scan so
+// users see categories immediately instead of waiting 2 minutes.
+app.post('/api/wallets/classify-by-sol', (req, res) => {
+  setCors(res);
+  try {
+    const neutrals = dbInstance.prepare(
+      `SELECT address, sol_balance FROM tracked_wallets
+       WHERE source='brain_scan' AND (category='NEUTRAL' OR category IS NULL)
+         AND sol_balance IS NOT NULL AND sol_balance > 0`
+    ).all();
+
+    const upsert = dbInstance.prepare(
+      `UPDATE tracked_wallets
+       SET category=?, score=?, notes=?, updated_at=datetime('now')
+       WHERE address=? AND source!='manual'`
+    );
+
+    const tx = dbInstance.transaction((rows) => {
+      let classified = 0;
+      for (const row of rows) {
+        const sol = Number(row.sol_balance || 0);
+        let cat, score;
+        if      (sol >= 100) { cat = 'WINNER';      score = 75; }
+        else if (sol >= 10)  { cat = 'SMART_MONEY'; score = 50; }
+        else if (sol >= 1)   { cat = 'MOMENTUM';    score = 25; }
+        else continue;
+        upsert.run(cat, score, `SOL balance: ${sol.toFixed(2)} SOL`, row.address);
+        classified++;
+      }
+      return classified;
+    });
+
+    const classified = tx(neutrals);
+    console.log(`[classify-by-sol] ${classified}/${neutrals.length} brain_scan wallets upgraded from NEUTRAL`);
+    res.json({ ok: true, checked: neutrals.length, classified });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Trigger Solscan wallet enrichment on demand (single wallet OR batch)
 app.post('/api/wallets/enrich', async (req, res) => {
   setCors(res);

@@ -7400,8 +7400,25 @@ async function scanAllWhales(btn){
 async function triggerDuneScan(){
   const btn=document.getElementById('wsScanBtn');
   if(btn){btn.disabled=true;btn.textContent='⏳ SCANNING...';}
-  _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Dune batch scan started — wallets land in ~2min');
+  _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Classifying by SOL balance...');
   try{
+    // Step 1: instant SOL-balance classification (no API, <50ms)
+    // Brain_scan wallets that have SOL balance already stored get classified
+    // into WINNER/SMART_MONEY/MOMENTUM right away — no waiting for Dune.
+    try {
+      const solRes = await fetch('/api/wallets/classify-by-sol', {method:'POST',headers:{'Content-Type':'application/json'}});
+      const solData = await solRes.json();
+      if (solData?.classified > 0) {
+        _setWalletScannerStatus('SCANNING', 'scanning', `✓ ${solData.classified} wallets classified instantly — Dune scan running...`);
+        loadWalletTiles && loadWalletTiles();
+      } else {
+        _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Dune batch scan started — wallets land in ~2min');
+      }
+    } catch(_e) {
+      _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Dune batch scan started — wallets land in ~2min');
+    }
+
+    // Step 2: fire the full Dune scan in the background (30-120s)
     await fetch('/api/v8/dune-wallet-scan',{method:'POST',headers:{'Content-Type':'application/json'}});
     _setWalletScannerStatus('SCANNING', 'scanning', '✓ Dune scan running — refreshing tiles in 30s');
     setTimeout(function(){
