@@ -9514,17 +9514,23 @@ async function loadCallsTab(){
 
   // Performance chart from resolved/peak calls
   renderPerfChart(_callsAll);
-  // Summary tiles
-  const wins = _callsAll.filter(c => c.outcome === 'WIN').length;
-  const losses = _callsAll.filter(c => c.outcome === 'LOSS').length;
+  // Summary tiles — combine explicit outcomes with peak-based inference so
+  // the stats reflect reality even while most calls are still PENDING.
+  //   WIN  = outcome==='WIN'  OR peak_multiple >= 2
+  //   LOSS = outcome==='LOSS' OR (peak_multiple <= 0.5 AND no win peak)
+  const isWin  = c => c.outcome === 'WIN'  || (c.peak_multiple != null && c.peak_multiple >= 2);
+  const isLoss = c => c.outcome === 'LOSS' || (c.peak_multiple != null && c.peak_multiple <= 0.5 && (c.peak_multiple || 0) < 2);
+  const wins     = _callsAll.filter(isWin).length;
+  const losses   = _callsAll.filter(isLoss).length;
+  const pending  = _callsAll.length - wins - losses;
   const resolved = wins + losses;
-  const winRate = resolved > 0 ? Math.round(wins / resolved * 100) + '%' : '—';
-  const peaks = _callsAll.filter(c => c.peak_multiple != null && c.peak_multiple > 0).map(c => c.peak_multiple);
-  const avgPeak = peaks.length > 0 ? (peaks.reduce((a,b)=>a+b,0) / peaks.length).toFixed(2) + 'x' : '—';
+  const winRate  = resolved > 0 ? Math.round(wins / resolved * 100) + '%' : '—';
+  const peaks    = _callsAll.filter(c => c.peak_multiple != null && c.peak_multiple > 0).map(c => c.peak_multiple);
+  const avgPeak  = peaks.length > 0 ? (peaks.reduce((a,b)=>a+b,0) / peaks.length).toFixed(2) + 'x' : '—';
   setText('callsTotal', _callsAll.length.toLocaleString());
   setText('callsWins', wins);
   setText('callsLosses', losses);
-  setText('callsWinRate', winRate);
+  setText('callsWinRate', winRate + (pending > 0 ? ' <span style="font-size:10px;color:var(--text3);font-weight:400">(' + pending + ' pending)</span>' : ''));
   setText('callsAvgPeak', avgPeak);
   setText('tb-calls-badge', _callsAll.length);
   renderCallsFeed();
