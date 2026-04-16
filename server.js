@@ -7409,9 +7409,79 @@ app.post('/api/archive/analyze', async (req, res) => {
     const archived = dbInstance.prepare(`SELECT * FROM audit_archive WHERE contract_address=?`).get(contractAddress);
     const candidate = dbInstance.prepare(`SELECT * FROM candidates WHERE contract_address=? ORDER BY id DESC LIMIT 1`).get(contractAddress);
     const call = dbInstance.prepare(`SELECT * FROM calls WHERE contract_address=? ORDER BY id DESC LIMIT 1`).get(contractAddress);
-    if (!archived && !candidate && !call) return res.status(404).json({ ok: false, error: 'Token not found in any table' });
 
-    const data = { ...archived, ...candidate, ...call };
+    let data = { ...archived, ...candidate, ...call };
+    let externalScan = false;
+
+    // ── EXTERNAL LEARNING MODE ──────────────────────────────────────────
+    // If the token isn't in our DB, fetch live data from DexScreener +
+    // Solscan so the AI can still study it. This is the whole point of
+    // the Token Analyzer: paste any winning CA (even one we never saw)
+    // and have Claude extract the pattern from it.
+    if (!archived && !candidate && !call) {
+      externalScan = true;
+      console.log(`[token-analyze] External scan — ${contractAddress.slice(0,8)} not in any table, fetching live`);
+
+      // DexScreener for price/mcap/volume/age
+      let dex = null;
+      try {
+        const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(contractAddress)}`, {
+          signal: AbortSignal.timeout(9_000),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          const pairs = (j?.pairs || []).filter(p => (p.chainId || p.chain) === 'solana');
+          dex = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        }
+      } catch (err) { console.warn('[token-analyze] DexScreener failed:', err.message); }
+
+      if (!dex) {
+        return res.status(404).json({ ok: false, error: 'Token not in our DB and DexScreener has no data. Double-check the CA.' });
+      }
+
+      data = {
+        contract_address: contractAddress,
+        token: dex.baseToken?.symbol || null,
+        token_name: dex.baseToken?.name || null,
+        market_cap: dex.marketCap ?? dex.fdv ?? null,
+        liquidity: dex.liquidity?.usd ?? null,
+        volume_24h: dex.volume?.h24 ?? null,
+        volume_1h: dex.volume?.h1 ?? null,
+        price_usd: parseFloat(dex.priceUsd || 0) || null,
+        buys_1h: dex.txns?.h1?.buys ?? null,
+        sells_1h: dex.txns?.h1?.sells ?? null,
+        buy_ratio_1h: (dex.txns?.h1 && (dex.txns.h1.buys + dex.txns.h1.sells) > 0)
+          ? dex.txns.h1.buys / (dex.txns.h1.buys + dex.txns.h1.sells)
+          : null,
+        pair_age_hours: dex.pairCreatedAt ? (Date.now() - dex.pairCreatedAt) / 3_600_000 : null,
+        stage: dex.dexId || 'unknown',
+        // These stay null for external scans — AI will know we lack them
+        composite_score: null, claude_score: null, quick_score: null,
+        final_decision: 'EXTERNAL_STUDY',
+        outcome: null,
+      };
+
+      // Top holders via Solscan (optional, best-effort) — gives Claude wallet structure context
+      if (process.env.SOLSCAN_API_KEY) {
+        try {
+          const r = await fetch(
+            `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(contractAddress)}&page_size=20&page=1`,
+            { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(8_000) }
+          );
+          if (r.ok) {
+            const j = await r.json();
+            const items = j?.data?.items || j?.data || [];
+            if (items.length) {
+              const top10Sum = items.slice(0, 10).reduce((s, h) => s + Number(h.amount || 0), 0);
+              const totalSum = items.reduce((s, h) => s + Number(h.amount || 0), 0);
+              data.top10_holder_pct = totalSum > 0 ? (top10Sum / totalSum) * 100 : null;
+              data.holders_sampled  = items.length;
+            }
+          }
+        } catch (err) { console.warn('[token-analyze] Solscan holders failed:', err.message); }
+      }
+    }
+
     const subScores = (() => { try { return JSON.parse(data.sub_scores || '{}'); } catch { return {}; } })();
 
     const tokenContext = `TOKEN ANALYSIS REQUEST:
@@ -7461,11 +7531,21 @@ OUTCOME:
   Outcome: ${data.outcome||'PENDING'}
 `;
 
-    const userQuestion = question || 'Analyze this token deeply. What specific signals made it a strong/weak call? What patterns does it show that we should use to find similar winners/avoid similar losers in the future? What would you add to the scoring system based on this token?';
+    const userQuestion = question || (externalScan
+      ? 'This is a token we DID NOT call. Study it forensically. What signals would have caught this as a gem before it ran? Extract the repeatable pattern so we can find similar coins in the future.'
+      : 'Analyze this token deeply. What specific signals made it a strong/weak call? What patterns does it show that we should use to find similar winners/avoid similar losers in the future? What would you add to the scoring system based on this token?');
+
+    const modeHeader = externalScan
+      ? `[EXTERNAL STUDY — WE NEVER CALLED THIS COIN]
+The user is feeding this CA in to teach the AI what a winner looks like.
+We have LIVE DexScreener/Solscan data but no score, no Claude verdict,
+no outcome from our system. Focus on extracting patterns from the
+market/structure data alone so we can reverse-engineer the edge.\n\n`
+      : '';
 
     const analyzePrompt = `You are the Pulse Caller AI learning engine. Study this token forensically to extract lessons and patterns.
 
-${tokenContext}
+${modeHeader}${tokenContext}
 
 QUESTION: ${userQuestion}
 
