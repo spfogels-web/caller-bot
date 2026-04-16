@@ -4270,48 +4270,104 @@ app.get('/api/external/token/:ca', async (req, res) => {
     let owners = [];  // resolved owner wallet addresses
     let amounts = []; // balance per owner (uiAmount)
 
-    // ── Try Solscan first — cast a wide net, then re-sort by SOL later ──
-    // We fetch up to 100 holders (5 pages × 20) so we have a big enough pool
-    // to rank by SOL balance. Solscan returns holders sorted by TOKEN amount,
-    // which on fresh memecoins surfaces LP/sniper wallets — not the wealthy
-    // wallets we actually care about. We re-rank after the Helius SOL fetch.
-    if (process.env.SOLSCAN_API_KEY) {
+    // ── Solscan + Helius whale hunt ─────────────────────────────────────────
+    // Goal: find 3-5 wallets with ≥10 SOL on every scan. Keep paginating and
+    // checking SOL balances until either we hit the whale target (3) or we've
+    // already looked at 300 holders (dust coin — give up).
+    // User directive: 60 holders max per scan. Quality over quantity —
+    // we hunt for whales in the first 60, and if the coin's dust, so be it.
+    const WHALE_SOL_THRESHOLD = 10;
+    const WHALE_TARGET        = 3;
+    const HARD_HOLDER_CAP     = 60;
+    const PAGE_SIZE           = 20;
+    const MAX_PAGES           = Math.ceil(HARD_HOLDER_CAP / PAGE_SIZE); // 3
+
+    // Intermediate accumulator with SOL attached. We won't populate
+    // owners/holders/amounts until after the whale hunt completes.
+    const pool = []; // [{ address, tokenAcct, uiAmount, sol }]
+    let whaleCount = 0;
+    let lastError  = null;
+
+    // Tiny helper to fetch one chunk of SOL balances (up to 100 at a time)
+    const fetchSolChunk = async (addrs) => {
+      if (!addrs.length || !HELIUS_API_KEY) return {};
       try {
-        const pageSize = 20;
-        const pagesNeeded = 5; // up to 100 candidates before SOL ranking
-        let collected = [];
-        let lastError = null;
-        for (let p = 1; p <= pagesNeeded; p++) {
-          try {
-            const r = await fetch(
-              `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=${pageSize}&page=${p}`,
-              { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(9_000) }
-            );
-            if (!r.ok) {
-              lastError = `page ${p} HTTP ${r.status}`;
-              console.warn(`[external-token] Solscan holders page ${p} returned ${r.status} — stopping pagination`);
-              break;
-            }
-            const j = await r.json();
-            const arr = j?.data?.items || j?.data || [];
-            if (!Array.isArray(arr) || arr.length === 0) break;
-            collected = collected.concat(arr);
-            if (arr.length < pageSize) break; // last page reached
-          } catch (err) {
-            lastError = err.message;
-            console.warn(`[external-token] Solscan page ${p} threw: ${err.message}`);
+        const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'bal', method: 'getMultipleAccounts',
+            params: [addrs, { commitment: 'confirmed', encoding: 'base64', dataSlice: { offset: 0, length: 0 } }],
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!r.ok) return {};
+        const j = await r.json();
+        const out = {};
+        (j?.result?.value || []).forEach((acc, idx) => {
+          out[addrs[idx]] = (acc?.lamports ?? 0) / 1e9;
+        });
+        return out;
+      } catch { return {}; }
+    };
+
+    if (process.env.SOLSCAN_API_KEY) {
+      for (let p = 1; p <= MAX_PAGES; p++) {
+        let arr = [];
+        try {
+          const r = await fetch(
+            `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=${PAGE_SIZE}&page=${p}`,
+            { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(9_000) }
+          );
+          if (!r.ok) {
+            lastError = `page ${p} HTTP ${r.status}`;
+            console.warn(`[external-token] Solscan page ${p} returned ${r.status}`);
             break;
           }
+          const j = await r.json();
+          arr = j?.data?.items || j?.data || [];
+        } catch (err) {
+          lastError = err.message;
+          console.warn(`[external-token] Solscan page ${p} threw: ${err.message}`);
+          break;
         }
-        console.log(`[external-token] Solscan pagination: ${collected.length} holders collected${lastError ? ' (halted on: ' + lastError + ')' : ''}`);
-        if (collected.length) {
-          owners  = collected.map(h => h.owner).filter(Boolean);
-          amounts = collected.map(h => h.amount ?? h.uiAmount ?? null);
-          holders = collected.map((h, i) => ({ address: h.address || owners[i], uiAmount: amounts[i] }));
+        if (!Array.isArray(arr) || arr.length === 0) break;
+
+        // Batch-fetch SOL balances for this page's owners
+        const pageOwners = arr.map(h => h.owner).filter(Boolean);
+        const solMap     = await fetchSolChunk(pageOwners);
+
+        for (const h of arr) {
+          const sol = solMap[h.owner] ?? 0;
+          pool.push({
+            address:   h.owner,
+            tokenAcct: h.address || h.owner,
+            uiAmount:  h.amount ?? h.uiAmount ?? null,
+            sol,
+          });
+          if (sol >= WHALE_SOL_THRESHOLD) whaleCount++;
         }
-      } catch (err) {
-        console.warn('[external-token] Solscan holders failed:', err.message);
+
+        // Stop if we've hit the whale target OR the hard cap
+        if (whaleCount >= WHALE_TARGET) {
+          console.log(`[external-token] ✓ whale target (${whaleCount}) reached after page ${p} · ${pool.length} holders scanned`);
+          break;
+        }
+        if (pool.length >= HARD_HOLDER_CAP) {
+          console.log(`[external-token] hit holder cap (${pool.length}) with only ${whaleCount} whales — dust coin, stopping`);
+          break;
+        }
+        if (arr.length < PAGE_SIZE) break; // ran out of holders
       }
+      console.log(`[external-token] Solscan hunt: ${pool.length} holders scanned · ${whaleCount} whales ≥${WHALE_SOL_THRESHOLD} SOL${lastError ? ' (halted on: ' + lastError + ')' : ''}`);
+
+      // Sort pool by SOL descending, take top 60. If we found whales they're
+      // at the top; if not, we still surface the best-capitalized dust.
+      pool.sort((a, b) => b.sol - a.sol);
+      const top = pool.slice(0, 60);
+      owners  = top.map(h => h.address);
+      amounts = top.map(h => h.uiAmount);
+      holders = top.map(h => ({ address: h.tokenAcct, uiAmount: h.uiAmount }));
     }
 
     // ── Helius fallback if Solscan didn't give us owners ──
