@@ -5249,8 +5249,18 @@ app.get('/api/crosschain/matches', (req, res) => {
 app.get('/api/momentum/hot', (req, res) => {
   setCors(res);
   try {
+    // Guard against (a) momentum_snapshots table not existing yet, and
+    // (b) candidates.token_name not existing. Both were 500ing the endpoint
+    // and killing the Calls tab refresh.
+    const hasTable = (() => {
+      try { return !!dbInstance.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='momentum_snapshots'`
+      ).get(); } catch { return false; }
+    })();
+    if (!hasTable) return res.json({ ok: true, spikes: [], count: 0, note: 'momentum_snapshots not initialized' });
+
     const hot = dbInstance.prepare(`
-      SELECT m.*, c.token, c.token_name, c.composite_score, c.final_decision
+      SELECT m.*, c.token, c.composite_score, c.final_decision
       FROM momentum_snapshots m
       LEFT JOIN candidates c ON c.contract_address = m.contract_address
       WHERE m.spike_flag IS NOT NULL
@@ -5259,7 +5269,10 @@ app.get('/api/momentum/hot', (req, res) => {
       LIMIT 30
     `).all();
     res.json({ ok: true, spikes: hot, count: hot.length });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  } catch (err) {
+    console.warn('[momentum/hot] query failed:', err.message);
+    res.json({ ok: true, spikes: [], count: 0, error: err.message });
+  }
 });
 
 // Detection-latency stats — median ms from detection → scoring → posting
@@ -5415,7 +5428,10 @@ app.get('/api/scanner', (req, res) => {
 
     // Build flexible query — candidates table columns vary by db.js version
     // Use id ordering (auto-increment) instead of created_at which may not exist
-    let q = `SELECT id, contract_address, token, token_name,
+    // token_name is not on candidates (only audit_archive has it). Selecting
+    // it was causing 500s on every /api/scanner call and breaking the Calls
+    // tab reload after manual WIN/LOSS clicks.
+    let q = `SELECT id, contract_address, token,
                final_decision, composite_score, market_cap, liquidity,
                pair_age_hours, stage, bundle_risk, dev_wallet_pct,
                top10_holder_pct, sniper_wallet_count, structure_grade,
