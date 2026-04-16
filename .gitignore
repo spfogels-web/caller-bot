@@ -4,3 +4,7 @@
 node_modules/
 *.log
 .DS_Store
+*.db
+*.db-shm
+*.db-wal
+package-lock.json
