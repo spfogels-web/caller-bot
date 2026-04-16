@@ -235,7 +235,14 @@ const MODES = {
     name: 'NEW_COINS', emoji: '🚀', color: '#00ff88',
     minScore: 40,
     minMarketCap: 1_000,
-    maxMarketCap: 150_000,   // HARD CAP: brand new micro-cap gems only — max $150K MCap for highest ROI potential
+    // HARD CAP lowered 150K → 80K based on outcome analysis:
+    //   $13K-$40K (sweet spot, priority)
+    //   $40K-$80K (secondary — 100% WR on 2/2 historically, still viable)
+    //   >$80K     AUTO-REJECT regardless of score
+    maxMarketCap:    80_000,
+    sweetSpotMin:    13_000,
+    sweetSpotMax:    40_000,
+    secondaryMcapMax: 80_000,
     minLiquidity: 3_000,
     minVolume24h: 500,
     minPairAgeHours: 0,
@@ -247,8 +254,7 @@ const MODES = {
     thresholdAdjust: -8,
     weightMomentum: true,
     ignoreSellPressure: true,
-    // CHANGED: 0 minutes (was 3 minutes), maxMarketCap 3M → 150K for max ROI
-    description: 'Brand new micro-cap gems only. 0 min to 4h old. Max $150K MCap. Highest ROI hunting.',
+    description: 'Micro-cap gem hunter. Sweet spot $13K-$40K · secondary $40K-$80K · hard block above $80K.',
   },
   TRENDING: {
     name: 'TRENDING', emoji: '📈', color: '#ffd700',
@@ -2118,6 +2124,18 @@ async function processCandidate(candidate, isRescan = false) {
   if (!ca) return;
   if (isBlocklisted(ca)) { console.log(`[auto-caller] BLOCKLIST skip — ${ca.slice(0,8)}`); return; }
 
+  // ── HARD MCap ceiling: $80K cap based on historical outcome analysis.
+  // Coins above this rarely produce the 10x-ish returns we're hunting, and
+  // late entries are the #1 source of losses. Auto-reject regardless of
+  // score, Claude, OpenAI, or smart-money signals. The cap is overridable
+  // via AI_CONFIG_OVERRIDES.maxMarketCapOverride (set from dashboard / TG).
+  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 80_000;
+  if ((candidate.marketCap ?? 0) > MCAP_HARD_CAP) {
+    logEvent('INFO', 'MCAP_CEILING', `${candidate.token ?? ca.slice(0,6)} mcap=${Math.round(candidate.marketCap/1000)}K > ${MCAP_HARD_CAP/1000}K cap`);
+    console.log(`[auto-caller] 🛑 $${candidate.token ?? ca.slice(0,6)} rejected — mcap ${Math.round(candidate.marketCap/1000)}K above $${MCAP_HARD_CAP/1000}K ceiling`);
+    return;
+  }
+
   // ── Stamp detection timestamp at ms precision for latency tracking ──
   // Prefer the _discoveredAt set by the Helius listener (real detection moment);
   // otherwise stamp now as the point at which processing begins.
@@ -2148,6 +2166,27 @@ async function processCandidate(candidate, isRescan = false) {
     const scoreResult = computeFullScore(enrichedCandidate);
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
+
+    // ── MCap tier bonuses ─────────────────────────────────────────────────
+    // Sweet spot $13K-$40K: +8 points (historical data shows best ROI here)
+    // Secondary $40K-$80K: +3 points (100% WR 2/2 historically, still viable)
+    // Below $13K: no bonus (too pre-launch to reliably enter)
+    const mcap = enrichedCandidate.marketCap ?? 0;
+    let mcapTier = null;
+    if (mcap >= 13_000 && mcap <= 40_000) {
+      scoreResult.score = Math.min(100, scoreResult.score + 8);
+      (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+      scoreResult.signals.launch.push('+8 sweet-spot MCap ($13K-$40K)');
+      mcapTier = 'SWEET_SPOT';
+    } else if (mcap > 40_000 && mcap <= 80_000) {
+      scoreResult.score = Math.min(100, scoreResult.score + 3);
+      (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+      scoreResult.signals.launch.push('+3 secondary MCap ($40K-$80K)');
+      mcapTier = 'SECONDARY';
+    } else if (mcap > 0 && mcap < 13_000) {
+      mcapTier = 'PRE_SWEETSPOT';
+    }
+    enrichedCandidate.mcapTier = mcapTier;
 
     // ── Dev fingerprint adjustment: boost ELITE/PROVEN devs, penalize RUGGERs ──
     try {
