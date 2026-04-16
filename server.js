@@ -2174,14 +2174,14 @@ async function processCandidate(candidate, isRescan = false) {
     const mcap = enrichedCandidate.marketCap ?? 0;
     let mcapTier = null;
     if (mcap >= 13_000 && mcap <= 40_000) {
-      scoreResult.score = Math.min(100, scoreResult.score + 8);
+      scoreResult.score = Math.min(100, scoreResult.score + 4);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push('+8 sweet-spot MCap ($13K-$40K)');
+      scoreResult.signals.launch.push('+4 sweet-spot MCap ($13K-$40K)');
       mcapTier = 'SWEET_SPOT';
     } else if (mcap > 40_000 && mcap <= 80_000) {
-      scoreResult.score = Math.min(100, scoreResult.score + 3);
+      scoreResult.score = Math.min(100, scoreResult.score + 2);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push('+3 secondary MCap ($40K-$80K)');
+      scoreResult.signals.launch.push('+2 secondary MCap ($40K-$80K)');
       mcapTier = 'SECONDARY';
     } else if (mcap > 0 && mcap < 13_000) {
       mcapTier = 'PRE_SWEETSPOT';
@@ -2196,11 +2196,14 @@ async function processCandidate(candidate, isRescan = false) {
         const fp = getDevFingerprint(deployer, dbInstance);
         const adj = devScoreAdjustment(fp);
         if (adj.delta !== 0) {
-          scoreResult.score = Math.max(0, Math.min(100, scoreResult.score + adj.delta));
-          scoreResult.devFingerprint = { ...fp, adjustment: adj };
+          // Cap dev fingerprint bonus at +3 (penalties left uncapped — RUGGER
+          // should still hurt as much as the model says).
+          const cappedDelta = adj.delta > 0 ? Math.min(adj.delta, 3) : adj.delta;
+          scoreResult.score = Math.max(0, Math.min(100, scoreResult.score + cappedDelta));
+          scoreResult.devFingerprint = { ...fp, adjustment: { ...adj, delta: cappedDelta } };
           (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-          if (adj.delta > 0) scoreResult.signals.launch.push(adj.reason);
-          else (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), adj.reason];
+          if (cappedDelta > 0) scoreResult.signals.launch.push(`+${cappedDelta} ${adj.reason}`);
+          else (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `${cappedDelta} ${adj.reason}`];
         }
       }
     } catch {}
@@ -2212,11 +2215,11 @@ async function processCandidate(candidate, isRescan = false) {
         const { isPreLaunchSuspect, markSuspectConsumed } = await import('./pre-launch-detector.js');
         const suspect = isPreLaunchSuspect(deployer, dbInstance);
         if (suspect) {
-          scoreResult.score = Math.min(100, scoreResult.score + 12);
+          scoreResult.score = Math.min(100, scoreResult.score + 6);
           scoreResult.preLaunchPredicted = true;
           (scoreResult.signals = scoreResult.signals || {}).launch =
             [...(scoreResult.signals.launch || []),
-             `🎯 PRE_LAUNCH_PREDICTED — dev funded by ${suspect.source_exchange} ${suspect.funded_amount}◎ within last 6h`];
+             `+6 PRE_LAUNCH_PREDICTED — dev funded by ${suspect.source_exchange} ${suspect.funded_amount}◎ within last 6h`];
           markSuspectConsumed(deployer, ca, dbInstance);
         }
       }
@@ -2227,11 +2230,11 @@ async function processCandidate(candidate, isRescan = false) {
       const { getCrossChainMatch } = await import('./cross-chain-tracker.js');
       const match = getCrossChainMatch(ca, dbInstance);
       if (match && match.match_confidence >= 0.85) {
-        scoreResult.score = Math.min(100, scoreResult.score + 8);
+        scoreResult.score = Math.min(100, scoreResult.score + 4);
         scoreResult.crossChainMatch = match;
         (scoreResult.signals = scoreResult.signals || {}).social =
           [...(scoreResult.signals.social || []),
-           `🌉 CROSS-CHAIN MATCH — $${match.source_symbol} on ${match.source_chain} up ${Math.round(match.source_price_change||0)}% (${Math.round(match.match_confidence*100)}% match)`];
+           `+4 CROSS-CHAIN MATCH — $${match.source_symbol} on ${match.source_chain} up ${Math.round(match.source_price_change||0)}% (${Math.round(match.match_confidence*100)}% match)`];
       }
     } catch {}
     let regimeAdj = { adjustedScore: scoreResult.score, thresholdAdjust: 0, regimeNotes: [] };

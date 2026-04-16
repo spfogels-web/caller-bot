@@ -10231,16 +10231,24 @@ function renderAnalyzerFeed(scoredRows, calledCAs){
   el.innerHTML = rows.map(r => {
     const v = buildVerdict(r);
     const score = r.composite_score || 0;
-    const scCol = score >= 80 ? 'var(--gold)' : score >= 65 ? 'var(--green)' : score >= 50 ? 'var(--cyan)' : score >= 35 ? 'var(--blue)' : 'var(--text3)';
+    const isQuick = r._source === 'quick';
+    // Quick scanner scores are permissive and often hit 100 on basic
+    // criteria — they DON'T reflect a real fully-scored composite. Show
+    // them in muted cyan regardless of value so the user doesn't read
+    // them as gem-grade.
+    const scCol = isQuick
+      ? 'rgba(24,255,255,0.6)' // muted cyan — "scanner only, not yet scored"
+      : score >= 80 ? 'var(--gold)' : score >= 65 ? 'var(--green)' : score >= 50 ? 'var(--cyan)' : score >= 35 ? 'var(--blue)' : 'var(--text3)';
     const tok = r.token || (r.contract_address || '').slice(0,6);
-    const sourceTag = r._source === 'quick'
-      ? '<span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-left:5px">[QUICK]</span>'
-      : '<span style="font-family:var(--mono);font-size:7px;color:var(--green);letter-spacing:1px;margin-left:5px">[FULL]</span>';
+    const sourceTag = isQuick
+      ? '<span style="font-family:var(--mono);font-size:7px;color:rgba(24,255,255,0.7);letter-spacing:1px;margin-left:5px;padding:1px 5px;border-radius:3px;border:1px dashed rgba(24,255,255,0.35)" title="Scanner-only quick score — NOT a full composite. Awaiting AI scoring.">SCANNER</span>'
+      : '<span style="font-family:var(--mono);font-size:7px;color:var(--green);letter-spacing:1px;margin-left:5px;padding:1px 5px;border-radius:3px;background:rgba(0,230,118,0.12);border:1px solid rgba(0,230,118,0.3)" title="Full pipeline composite score (scorer + Claude + OpenAI)">SCORED</span>';
+    const scoreSuffix = isQuick ? '<span style="font-size:9px;color:var(--text3);font-weight:400;letter-spacing:1px;margin-left:2px">q</span>' : '';
     return `<div class="analyzer-row" style="--v-col:${v.col}" onclick="openFullCandidateDetail('${esc(r.contract_address||'')}')">
       <div class="analyzer-row-token">$${esc(tok)}${sourceTag}</div>
       <div class="analyzer-row-verdict">${v.label}</div>
       <div class="analyzer-row-reason">${v.reason}</div>
-      <div class="analyzer-row-score" style="color:${scCol}">${score}</div>
+      <div class="analyzer-row-score" style="color:${scCol}" title="${isQuick ? 'Scanner quick-filter score (NOT composite)' : 'Full composite score'}">${score}${scoreSuffix}</div>
     </div>`;
   }).join('');
 }
