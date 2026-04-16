@@ -6972,6 +6972,65 @@ app.get('/api/diagnose/holders/:ca', async (req, res) => {
   res.json({ ok: true, ca, result });
 });
 
+// Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
+// the exact response. Tells you whether the key is wrong, the workspace
+// has no credits, or Railway is still using a cached value.
+app.get('/api/diagnose/claude', async (req, res) => {
+  setCors(res);
+  const key = process.env.CLAUDE_API_KEY || null;
+  const result = {
+    ok: false,
+    keyPresent: !!key,
+    keyPrefix: key ? key.slice(0, 12) + '…' : null,
+    keyLength: key ? key.length : 0,
+    timestamp: new Date().toISOString(),
+  };
+  if (!key) {
+    result.error = 'CLAUDE_API_KEY env var is missing on Railway';
+    return res.json(result);
+  }
+  try {
+    const probeStart = Date.now();
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 10,
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    result.httpStatus = r.status;
+    result.latencyMs  = Date.now() - probeStart;
+    const txt = await r.text();
+    let body;
+    try { body = JSON.parse(txt); } catch { body = { raw: txt.slice(0, 500) }; }
+    result.body = body;
+    if (r.ok) {
+      result.ok = true;
+      result.diagnosis = '✓ Claude API responding normally for this key';
+    } else if (body?.error?.message?.toLowerCase?.().includes('credit balance')) {
+      result.diagnosis = '⚠ Workspace this key belongs to has $0 credits. Check console.anthropic.com → Plans & Billing for the SAME workspace as the API key. Credits added to a different workspace do not transfer.';
+    } else if (r.status === 401) {
+      result.diagnosis = '⚠ Key invalid or revoked. Generate a fresh key in the workspace that has credits.';
+    } else if (r.status === 429) {
+      result.diagnosis = '⚠ Rate limited. Wait a minute and retry.';
+    } else {
+      result.diagnosis = `⚠ HTTP ${r.status} — see body for details`;
+    }
+    res.json(result);
+  } catch (err) {
+    result.error = err.message;
+    result.diagnosis = '⚠ Network/timeout — could not reach api.anthropic.com';
+    res.status(500).json(result);
+  }
+});
+
 app.get('/api/db/health', (req, res) => {
   setCors(res);
   try {
