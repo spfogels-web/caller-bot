@@ -4274,10 +4274,9 @@ app.get('/api/external/token/:ca', async (req, res) => {
     // Goal: find 3-5 wallets with ≥10 SOL on every scan. Keep paginating and
     // checking SOL balances until either we hit the whale target (3) or we've
     // already looked at 300 holders (dust coin — give up).
-    // User directive: 60 holders max per scan. Quality over quantity —
-    // we hunt for whales in the first 60, and if the coin's dust, so be it.
+    // User directive: 60 holders max per scan. We scan all 60 every time
+    // and surface EVERY whale in that pool — not just the first 3.
     const WHALE_SOL_THRESHOLD = 10;
-    const WHALE_TARGET        = 3;
     const HARD_HOLDER_CAP     = 60;
     const PAGE_SIZE           = 20;
     const MAX_PAGES           = Math.ceil(HARD_HOLDER_CAP / PAGE_SIZE); // 3
@@ -4348,13 +4347,10 @@ app.get('/api/external/token/:ca', async (req, res) => {
           if (sol >= WHALE_SOL_THRESHOLD) whaleCount++;
         }
 
-        // Stop if we've hit the whale target OR the hard cap
-        if (whaleCount >= WHALE_TARGET) {
-          console.log(`[external-token] ✓ whale target (${whaleCount}) reached after page ${p} · ${pool.length} holders scanned`);
-          break;
-        }
+        // Always scan the full 60 — surface EVERY whale in the pool, not
+        // just the first 3. Only stop on the hard cap or an empty page.
         if (pool.length >= HARD_HOLDER_CAP) {
-          console.log(`[external-token] hit holder cap (${pool.length}) with only ${whaleCount} whales — dust coin, stopping`);
+          console.log(`[external-token] hit holder cap (${pool.length}) · ${whaleCount} whales found`);
           break;
         }
         if (arr.length < PAGE_SIZE) break; // ran out of holders
