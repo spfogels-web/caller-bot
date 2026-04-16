@@ -4208,6 +4208,42 @@ app.get('/api/external/token/:ca', async (req, res) => {
       console.warn(`[external-token] ca=${ca.slice(0,8)} owners list is EMPTY — nothing to insert. Solscan/Helius both returned no holders.`);
     }
 
+    // ── Cross-CA overlap tracking: record which CA each wallet appeared in ──────
+    // Wallets that show up across 3+ different CAs are almost certainly smart money
+    // — they identified multiple winners independently. Auto-upgrade them.
+    if (owners.length) {
+      try {
+        const insAppear = dbInstance.prepare(
+          `INSERT OR IGNORE INTO wallet_appearances (address, ca) VALUES (?, ?)`
+        );
+        const updCount = dbInstance.prepare(
+          `UPDATE tracked_wallets
+           SET ca_count = (SELECT COUNT(DISTINCT ca) FROM wallet_appearances WHERE address=tracked_wallets.address)
+           WHERE address = ?`
+        );
+        const upgradeStmt = dbInstance.prepare(
+          `UPDATE tracked_wallets
+           SET category='SMART_MONEY', score=MAX(score, 60),
+               notes=COALESCE(notes||' | ', '') || 'Overlap: seen in ' || ca_count || ' CAs',
+               updated_at=datetime('now')
+           WHERE address=? AND ca_count >= 3 AND category NOT IN ('WINNER','SNIPER','CLUSTER','RUG') AND source!='manual'`
+        );
+        const overlapTx = dbInstance.transaction((addrs) => {
+          let upgrades = 0;
+          for (const a of addrs) {
+            insAppear.run(a, ca);
+            updCount.run(a);
+            upgrades += upgradeStmt.run(a).changes;
+          }
+          return upgrades;
+        });
+        const upgrades = overlapTx(owners);
+        if (upgrades > 0) console.log(`[external-token] ca=${ca.slice(0,8)} Overlap upgrade: ${upgrades} wallets → SMART_MONEY (seen in 3+ CAs)`);
+      } catch (err) {
+        console.warn('[external-token] overlap tracking failed:', err.message);
+      }
+    }
+
     // ── Populate holderStats + classify against tracked_wallets ──
     if (owners.length || holders.length) {
       try {
@@ -6532,6 +6568,47 @@ app.get('/api/db/backup', async (req, res) => {
 });
 
 // Quick health check — tells you if the DB is persistent and how big it is.
+// Diagnostic: test Solscan + Helius holder fetch for a CA
+app.get('/api/diagnose/holders/:ca', async (req, res) => {
+  setCors(res);
+  const { ca } = req.params;
+  const result = {
+    solscan: { keyPresent: !!process.env.SOLSCAN_API_KEY, status: null, ownersFound: 0, error: null },
+    helius:  { keyPresent: !!HELIUS_API_KEY,              status: null, ownersFound: 0, error: null },
+  };
+  // Test Solscan
+  if (process.env.SOLSCAN_API_KEY) {
+    try {
+      const r = await fetch(
+        `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=20&page=1`,
+        { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(9_000) }
+      );
+      result.solscan.status = r.status;
+      const j = await r.json();
+      const arr = j?.data?.items || j?.data || [];
+      result.solscan.ownersFound = Array.isArray(arr) ? arr.length : 0;
+      if (!r.ok) result.solscan.error = j?.message || j?.error || 'HTTP ' + r.status;
+    } catch (e) { result.solscan.error = e.message; }
+  }
+  // Test Helius
+  if (HELIUS_API_KEY) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'diag', method: 'getTokenLargestAccounts', params: [ca, { commitment: 'confirmed' }] }),
+        signal: AbortSignal.timeout(9_000),
+      });
+      result.helius.status = r.status;
+      const j = await r.json();
+      result.helius.ownersFound = (j?.result?.value || []).length;
+      if (j?.error) result.helius.error = JSON.stringify(j.error);
+      if (!r.ok) result.helius.error = 'HTTP ' + r.status;
+    } catch (e) { result.helius.error = e.message; }
+  }
+  res.json({ ok: true, ca, result });
+});
+
 app.get('/api/db/health', (req, res) => {
   setCors(res);
   try {
@@ -6662,7 +6739,7 @@ app.get('/api/wallets/rankings', (req, res) => {
     const { limit = 200, category } = req.query;
     let q = `SELECT address, label, category, win_rate, avg_roi, trade_count, score,
                wins_found_in, losses_in, source, notes, dune_data, updated_at,
-               sol_balance, sol_scanned_at
+               sol_balance, sol_scanned_at, ca_count
              FROM tracked_wallets WHERE is_blacklist=0`;
     const params = [];
     if (category) { q += ' AND category=?'; params.push(category); }
@@ -6692,6 +6769,47 @@ app.get('/api/wallets/rankings', (req, res) => {
 
     res.json({ ok: true, wallets: rows, categories: cats, topWinners, duneStatus, total: rows.length });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Instant SOL-balance classification for brain_scan wallets still sitting at NEUTRAL.
+// Runs in <50ms (pure SQLite, no external APIs). Call this before the Dune scan so
+// users see categories immediately instead of waiting 2 minutes.
+app.post('/api/wallets/classify-by-sol', (req, res) => {
+  setCors(res);
+  try {
+    const neutrals = dbInstance.prepare(
+      `SELECT address, sol_balance FROM tracked_wallets
+       WHERE source='brain_scan' AND (category='NEUTRAL' OR category IS NULL)
+         AND sol_balance IS NOT NULL AND sol_balance > 0`
+    ).all();
+
+    const upsert = dbInstance.prepare(
+      `UPDATE tracked_wallets
+       SET category=?, score=?, notes=?, updated_at=datetime('now')
+       WHERE address=? AND source!='manual'`
+    );
+
+    const tx = dbInstance.transaction((rows) => {
+      let classified = 0;
+      for (const row of rows) {
+        const sol = Number(row.sol_balance || 0);
+        let cat, score;
+        if      (sol >= 100) { cat = 'WINNER';      score = 75; }
+        else if (sol >= 10)  { cat = 'SMART_MONEY'; score = 50; }
+        else if (sol >= 1)   { cat = 'MOMENTUM';    score = 25; }
+        else continue;
+        upsert.run(cat, score, `SOL balance: ${sol.toFixed(2)} SOL`, row.address);
+        classified++;
+      }
+      return classified;
+    });
+
+    const classified = tx(neutrals);
+    console.log(`[classify-by-sol] ${classified}/${neutrals.length} brain_scan wallets upgraded from NEUTRAL`);
+    res.json({ ok: true, checked: neutrals.length, classified });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Trigger Solscan wallet enrichment on demand (single wallet OR batch)

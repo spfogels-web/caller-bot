@@ -558,6 +558,16 @@ function runMigrations() {
     `ALTER TABLE tracked_wallets ADD COLUMN sol_balance REAL`,
     `ALTER TABLE tracked_wallets ADD COLUMN sol_scanned_at TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_tw_sol_balance ON tracked_wallets(sol_balance DESC)`,
+    // ── Cross-CA overlap tracking ──
+    `ALTER TABLE tracked_wallets ADD COLUMN ca_count INTEGER DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS wallet_appearances (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       address    TEXT NOT NULL,
+       ca         TEXT NOT NULL,
+       scanned_at TEXT DEFAULT (datetime('now')),
+       UNIQUE(address, ca)
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_wa_address ON wallet_appearances(address)`,
   ];
 
   let added = 0;

@@ -763,6 +763,71 @@ export async function runDuneWalletScan() {
       console.warn('[dune] Sniper query failed:', err.message);
     }
 
+    // 2e: Targeted lookup — classify brain_scan wallets that Dune hasn't seen yet
+    if (_db) {
+      try {
+        const brainAddrs = _db.prepare(
+          `SELECT address FROM tracked_wallets WHERE source='brain_scan' AND (category='NEUTRAL' OR category IS NULL) LIMIT 200`
+        ).all().map(r => r.address).filter(a => a && a.length >= 32);
+
+        if (brainAddrs.length > 0) {
+          console.log(`[dune] Targeted lookup: ${brainAddrs.length} brain_scan wallets...`);
+          const addrList = brainAddrs.map(a => `'${a}'`).join(', ');
+          const targetSQL = `
+            SELECT
+              taker                                AS wallet_address,
+              COUNT(*)                             AS total_trades,
+              SUM(amount_usd)                      AS total_volume_usd,
+              AVG(amount_usd)                      AS avg_trade_usd,
+              COUNT(DISTINCT token_bought_address) AS unique_tokens,
+              MAX(block_time)                      AS last_active
+            FROM dex.trades
+            WHERE blockchain = 'solana'
+              AND block_time >= NOW() - interval '30' day
+              AND taker IN (${addrList})
+              AND token_sold_symbol IN ('SOL', 'WSOL', 'USDC', 'USDT')
+              AND amount_usd >= 1
+            GROUP BY taker
+            HAVING COUNT(*) >= 1
+            ORDER BY total_volume_usd DESC
+          `.trim();
+
+          const rows = await runDuneSQL(targetSQL, 'brain_scan_lookup', 120_000);
+          const upsert = _db.prepare(`
+            UPDATE tracked_wallets
+            SET category=?, score=?, trade_count=?, avg_roi=?, notes=?, updated_at=datetime('now')
+            WHERE address=? AND source!='manual'
+          `);
+          const tx = _db.transaction((results) => {
+            let classified = 0;
+            for (const r of results) {
+              const addr = r.wallet_address;
+              if (!addr || addr.length < 32) continue;
+              const trades  = Number(r.total_trades  || 0);
+              const volume  = Number(r.total_volume_usd || 0);
+              const tokens  = Number(r.unique_tokens  || 0);
+              let cat = 'NEUTRAL', score = 0;
+              if      (volume >= 100000 && trades >= 30) { cat = 'WINNER';      score = 82; }
+              else if (volume >= 20000  && tokens >= 8)  { cat = 'SMART_MONEY'; score = 65; }
+              else if (volume >= 5000   && tokens >= 5)  { cat = 'SMART_MONEY'; score = 55; }
+              else if (trades >= 20     && tokens >= 3)  { cat = 'MOMENTUM';    score = 42; }
+              else if (trades >= 5)                      { cat = 'MOMENTUM';    score = 28; }
+              if (cat !== 'NEUTRAL') {
+                upsert.run(cat, score, trades, Math.round(volume / Math.max(1, trades)),
+                  `Dune: ${trades} trades · $${Math.round(volume).toLocaleString()} vol · ${tokens} tokens`, addr);
+                classified++;
+              }
+            }
+            return classified;
+          });
+          const classified = tx(rows);
+          console.log(`[dune] Brain-scan targeted lookup: ${rows.length} found in Dune, ${classified} classified`);
+        }
+      } catch (err) {
+        console.warn('[dune] Brain-scan targeted lookup failed:', err.message);
+      }
+    }
+
   } catch (err) {
     console.error('[dune] Scan error:', err.message);
   } finally {

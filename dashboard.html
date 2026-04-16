@@ -2142,12 +2142,18 @@ body::before {
 /* Tile grid — generous column count, scoped scroll */
 .wt-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(160px, 200px));
   gap: 8px;
   max-height: 70vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-right: 4px;
+}
+@media (max-width: 900px) {
+  .wt-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
+@media (max-width: 480px) {
+  .wt-grid { grid-template-columns: repeat(2, 1fr); }
 }
 .wt-grid::-webkit-scrollbar { width: 6px; }
 .wt-grid::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
@@ -6292,6 +6298,9 @@ function startAutoRefresh(){
 // ── BOOT ──────────────────────────────────────────────────
 loadOverview();
 loadPromotedSidebar();
+// Pre-load wallet tiles in the background so they're ready the moment
+// the user opens the Smart Money tab — no waiting, no empty grid.
+setTimeout(() => { if (typeof loadWalletTiles === 'function') loadWalletTiles(); }, 2000);
 
 
 // ── MOBILE NAVIGATION ─────────────────────────────────────
@@ -7391,8 +7400,25 @@ async function scanAllWhales(btn){
 async function triggerDuneScan(){
   const btn=document.getElementById('wsScanBtn');
   if(btn){btn.disabled=true;btn.textContent='⏳ SCANNING...';}
-  _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Dune batch scan started — wallets land in ~2min');
+  _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Classifying by SOL balance...');
   try{
+    // Step 1: instant SOL-balance classification (no API, <50ms)
+    // Brain_scan wallets that have SOL balance already stored get classified
+    // into WINNER/SMART_MONEY/MOMENTUM right away — no waiting for Dune.
+    try {
+      const solRes = await fetch('/api/wallets/classify-by-sol', {method:'POST',headers:{'Content-Type':'application/json'}});
+      const solData = await solRes.json();
+      if (solData?.classified > 0) {
+        _setWalletScannerStatus('SCANNING', 'scanning', `✓ ${solData.classified} wallets classified instantly — Dune scan running...`);
+        loadWalletTiles && loadWalletTiles();
+      } else {
+        _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Dune batch scan started — wallets land in ~2min');
+      }
+    } catch(_e) {
+      _setWalletScannerStatus('SCANNING', 'scanning', '⏳ Dune batch scan started — wallets land in ~2min');
+    }
+
+    // Step 2: fire the full Dune scan in the background (30-120s)
     await fetch('/api/v8/dune-wallet-scan',{method:'POST',headers:{'Content-Type':'application/json'}});
     _setWalletScannerStatus('SCANNING', 'scanning', '✓ Dune scan running — refreshing tiles in 30s');
     setTimeout(function(){
@@ -7604,6 +7630,11 @@ function renderWalletTiles(){
     const scoreGlow = sc >= 70 ? ' glow' : '';
     const wrGlow    = (w.win_rate ?? 0) >= 0.5 ? ' glow' : '';
     const solGlow   = isWhale ? ' glow' : '';
+    // CA overlap count — the core signal. 3+ means this wallet found multiple winners.
+    const caCount  = w.ca_count || 0;
+    const caLabel  = caCount >= 3 ? `<span style="color:#ffd740;font-weight:900">${caCount} CAs ★</span>`
+                   : caCount >= 2 ? `<span style="color:#18ffff">${caCount} CAs</span>`
+                   : `<span>${esc(short)}</span>`;
     return `<div class="wt-tile ${tier}" style="--tile-cat-col:${col}" onclick="showWalletModal('${esc(addr)}')">
       ${tierBadge ? `<span class="wt-tier-badge">${tierBadge}</span>` : ''}
       <div class="wt-tile-head">
@@ -7616,7 +7647,7 @@ function renderWalletTiles(){
         <div class="wt-tile-stat"><div class="wt-tile-stat-label">WIN%</div><div class="wt-tile-stat-val${wrGlow}" style="color:${wrCol}">${wr}</div></div>
       </div>
       <div class="wt-tile-foot">
-        <span>${esc(short)}</span>
+        ${caLabel}
         <span>${esc(seen)}</span>
       </div>
     </div>`;
@@ -8701,12 +8732,6 @@ async function analyzeSeedContract(ca){
         if (ext?.ok && ext.candidate) {
           c = ext.candidate;
           source = ext.source || 'live';
-          // Brain Analyzer auto-inserts holders into tracked_wallets. Kick the
-          // Smart Money tab to refresh in the background so the user sees them
-          // when they switch tabs.
-          if (typeof loadWalletTiles === 'function') loadWalletTiles();
-          if (typeof loadWalletRankings === 'function') loadWalletRankings();
-          if (typeof loadSmartMoneySummary === 'function') loadSmartMoneySummary();
         }
       } catch {}
     }
@@ -8954,27 +8979,26 @@ async function triggerBrainAnalysis() {
     const data = await apiFetch('/api/candidates/by-ca/' + encodeURIComponent(ca));
     candidate = data?.candidate || null;
   } catch {}
-  // External fallback — fetch live from DexScreener for any CA not in our DB
-  if (!candidate) {
-    try {
-      const data = await apiFetch('/api/external/token/' + encodeURIComponent(ca));
-      if (data?.ok && data.candidate) {
-        candidate = data.candidate;
-        // Log the auto-ingest result so we can see exactly what happened
-        if (data.walletsIngested) {
-          console.log('[brain-analyzer] walletsIngested:', data.walletsIngested);
-          const wi = data.walletsIngested;
-          if (wi.attempted === 0) {
-            console.warn('[brain-analyzer] ⚠ 0 holders resolved — Solscan and Helius both returned empty. Check SOLSCAN_API_KEY on Railway.');
-          } else if (wi.error) {
-            console.error('[brain-analyzer] ⚠ auto-insert error:', wi.error);
-          } else {
-            console.log('[brain-analyzer] ✓ ' + wi.inserted + ' new / ' + wi.updated + ' updated (of ' + wi.attempted + ')');
-          }
+  // Always call /api/external/token/:ca — even if the CA is already in our DB.
+  // This is what actually fetches the current holders and inserts them into
+  // tracked_wallets. We await it so that loadWalletTiles() below is guaranteed
+  // to see the new rows.
+  try {
+    const data = await apiFetch('/api/external/token/' + encodeURIComponent(ca));
+    if (data?.ok && data.candidate) {
+      if (!candidate) candidate = data.candidate; // use as fallback if not in DB
+      if (data.walletsIngested) {
+        const wi = data.walletsIngested;
+        if (wi.attempted === 0) {
+          console.warn('[brain-analyzer] ⚠ 0 holders resolved — check SOLSCAN_API_KEY.');
+        } else if (wi.error) {
+          console.error('[brain-analyzer] ⚠ auto-insert error:', wi.error);
+        } else {
+          console.log('[brain-analyzer] ✓ ' + wi.inserted + ' new / ' + wi.updated + ' updated (of ' + wi.attempted + ')');
         }
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
   if (candidate) {
     const wi = candidate.wallet_intel
@@ -9019,9 +9043,10 @@ async function triggerBrainAnalysis() {
     _setBrainStatus('COMPLETE', 'done');
     _setBrainProgress(100, '✓ Scan complete · ' + (candidate.token ? '$' + candidate.token : ca.slice(0, 8)));
 
-    // Refresh Wallet Database — the server just auto-inserted the scanned
-    // holders with SOL balance, but the tile grid won't show them until we
-    // reload. No click required from the user.
+    // Refresh Wallet Database — switch sort to "recently seen" so wallets just
+    // inserted by this scan bubble to the top of the tile grid automatically.
+    const wtSort = document.getElementById('wtSortBy');
+    if (wtSort) wtSort.value = 'recent';
     if (typeof loadWalletTiles === 'function') loadWalletTiles();
     if (typeof loadWalletRankings === 'function') loadWalletRankings();
     if (typeof loadSmartMoneySummary === 'function') loadSmartMoneySummary();
@@ -9070,6 +9095,7 @@ async function renderWalletHeatmap() {
       } else {
         var cat    = w.category || 'NEUTRAL';
         var wr     = w.win_rate != null ? w.win_rate : 0;
+        var sol    = w.sol_balance != null ? w.sol_balance : 0;
         var catRGB = {
           WINNER:      '255,215,64',
           SMART_MONEY: '24,255,255',
@@ -9079,7 +9105,10 @@ async function renderWalletHeatmap() {
           RUG:         '255,23,68',
           NEUTRAL:     '136,153,187',
         }[cat] || '136,153,187';
-        var opacity = Math.max(0.1, Math.min(0.9, wr + 0.2));
+        // For NEUTRAL wallets with no win rate, use SOL balance for brightness
+        var opacity = (cat === 'NEUTRAL' && wr === 0)
+          ? Math.max(0.25, Math.min(0.85, sol / 200))
+          : Math.max(0.25, Math.min(0.9, wr + 0.25));
         cell.style.background = 'rgba(' + catRGB + ',' + opacity + ')';
         cell.title = (w.label || w.address.slice(0, 8)) + ' | ' + cat + ' | WR: ' + (wr * 100).toFixed(0) + '%';
         cell.addEventListener('click', function() {
