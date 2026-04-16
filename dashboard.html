@@ -3301,10 +3301,11 @@ body::before {
           </div>
           <!-- Filter row -->
           <div style="display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 10px 0">
-            <button class="fchip active" onclick="filterCalls(this,'all')">ALL</button>
+            <button class="fchip active" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
             <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
             <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
-            <button class="fchip" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
+            <button class="fchip" onclick="filterCalls(this,'NEUTRAL')" style="color:var(--cyan);border-color:rgba(24,255,255,0.4)">➖ NEUTRAL</button>
+            <button class="fchip" onclick="filterCalls(this,'all')">ALL</button>
             <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
           </div>
           <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
@@ -4358,7 +4359,7 @@ function setWidth(id,pct){const e=document.getElementById(id);if(e)e.style.width
 function copyCA(addr){navigator.clipboard?.writeText(addr);const el=event?.target;if(el){const orig=el.textContent;el.textContent='✓';setTimeout(()=>el.textContent=orig,1500);}}
 const decColor=d=>({AUTO_POST:'#00e676',WATCHLIST:'#ffd740',RETEST:'#ff6d00',IGNORE:'#3d4f70',BLOCKLIST:'#ff1744',HOLD_FOR_REVIEW:'#e040fb'}[d]||'#8899bb');
 const stageCol=s=>({LAUNCH:'#ff1744',EARLY:'#ff6d00',PRE_BOND:'#ff6d00',DEVELOPING:'#ffd740',ESTABLISHED:'#18ffff',MATURE:'#8899bb',MIGRATED:'#8899bb'}[s]||'#8899bb');
-const outcomeBadge=o=>o==='WIN'?`<span class="outcome-win">🏆 WIN</span>`:o==='LOSS'?`<span class="outcome-loss">💀 LOSS</span>`:`<span class="outcome-pend">⏳ PENDING</span>`;
+const outcomeBadge=o=>o==='WIN'?`<span class="outcome-win">🏆 WIN</span>`:o==='LOSS'?`<span class="outcome-loss">💀 LOSS</span>`:o==='NEUTRAL'?`<span class="outcome-pend" style="color:var(--cyan);border-color:rgba(24,255,255,0.4)">➖ NEUTRAL</span>`:`<span class="outcome-pend">⏳ PENDING</span>`;
 const gradeColor=g=>({ELITE:'#18ffff',CLEAN:'#00e676',AVERAGE:'#8899bb',MIXED:'#ff6d00',DIRTY:'#ff1744',UNVERIFIED:'#e040fb'}[g]||'#8899bb');
 
 // ── API FETCH ─────────────────────────────────────────────
@@ -9490,7 +9491,7 @@ setInterval(() => {
    📞 CALLS TAB — simple feed of posted calls with outcome
    ═══════════════════════════════════════════════════════════ */
 var _callsAll = [];
-var _callsFilter = 'all';
+var _callsFilter = 'PENDING'; // default — once you label a call, it leaves this view
 
 async function loadCallsTab(){
   const feed = document.getElementById('callsFeed');
@@ -9576,8 +9577,9 @@ function renderCallsFeed(){
   const feed = document.getElementById('callsFeed');
   if (!feed) return;
   let rows = [..._callsAll];
-  if (_callsFilter === 'WIN')     rows = rows.filter(c => c.outcome === 'WIN');
+  if (_callsFilter === 'WIN')          rows = rows.filter(c => c.outcome === 'WIN');
   else if (_callsFilter === 'LOSS')    rows = rows.filter(c => c.outcome === 'LOSS');
+  else if (_callsFilter === 'NEUTRAL') rows = rows.filter(c => c.outcome === 'NEUTRAL');
   else if (_callsFilter === 'PENDING') rows = rows.filter(c => !c.outcome || c.outcome === 'PENDING');
   else if (_callsFilter === 'gem')     rows = rows.filter(c => c.market_cap >= 7500 && c.market_cap <= 40000);
 
@@ -9633,10 +9635,11 @@ function renderCallsFeed(){
     const stopIt = 'event.stopPropagation();event.preventDefault();';
     const btnsRow = callId
       ? '<div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;position:relative;z-index:5" onclick="' + stopIt + '">' +
-          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'WIN\',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='WIN'?'rgba(0,230,118,0.25)':'rgba(0,230,118,0.08)') + ';border:1px solid rgba(0,230,118,0.45);color:var(--green)">🏆 WIN</button>' +
-          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'LOSS\',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='LOSS'?'rgba(255,23,68,0.25)':'rgba(255,23,68,0.08)') + ';border:1px solid rgba(255,23,68,0.45);color:var(--red)">💀 LOSS</button>' +
-          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'PENDING\',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3)">↺ RESET</button>' +
-          '<button type="button" onclick="' + stopIt + 'refreshCallPeak(' + callId + ',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.35);color:var(--cyan)">🔄 PEAK</button>' +
+          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'WIN\',event);return false" style="flex:1;min-width:52px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='WIN'?'rgba(0,230,118,0.25)':'rgba(0,230,118,0.08)') + ';border:1px solid rgba(0,230,118,0.45);color:var(--green)">🏆 WIN</button>' +
+          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'LOSS\',event);return false" style="flex:1;min-width:52px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='LOSS'?'rgba(255,23,68,0.25)':'rgba(255,23,68,0.08)') + ';border:1px solid rgba(255,23,68,0.45);color:var(--red)">💀 LOSS</button>' +
+          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'NEUTRAL\',event);return false" style="flex:1;min-width:60px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='NEUTRAL'?'rgba(24,255,255,0.22)':'rgba(24,255,255,0.08)') + ';border:1px solid rgba(24,255,255,0.4);color:var(--cyan)">➖ NEUTRAL</button>' +
+          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'PENDING\',event);return false" style="flex:1;min-width:52px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3)">↺ RESET</button>' +
+          '<button type="button" onclick="' + stopIt + 'refreshCallPeak(' + callId + ',event);return false" style="flex:1;min-width:52px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.35);color:var(--cyan)">🔄 PEAK</button>' +
         '</div>'
       : '<div style="font-family:var(--mono);font-size:7px;color:var(--red);margin-top:6px">⚠ no call id — cannot mark outcome (reload page)</div>';
 

@@ -6120,7 +6120,7 @@ app.post('/api/calls/:id/outcome', express.json(), (req, res) => {
   try {
     const id = Number(req.params.id);
     const { outcome } = req.body ?? {};
-    const allowed = ['WIN', 'LOSS', 'PENDING'];
+    const allowed = ['WIN', 'LOSS', 'NEUTRAL', 'PENDING'];
     if (!allowed.includes(outcome)) {
       return res.status(400).json({ ok: false, error: `outcome must be one of ${allowed.join('/')}` });
     }
