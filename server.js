@@ -4208,6 +4208,42 @@ app.get('/api/external/token/:ca', async (req, res) => {
       console.warn(`[external-token] ca=${ca.slice(0,8)} owners list is EMPTY — nothing to insert. Solscan/Helius both returned no holders.`);
     }
 
+    // ── Cross-CA overlap tracking: record which CA each wallet appeared in ──────
+    // Wallets that show up across 3+ different CAs are almost certainly smart money
+    // — they identified multiple winners independently. Auto-upgrade them.
+    if (owners.length) {
+      try {
+        const insAppear = dbInstance.prepare(
+          `INSERT OR IGNORE INTO wallet_appearances (address, ca) VALUES (?, ?)`
+        );
+        const updCount = dbInstance.prepare(
+          `UPDATE tracked_wallets
+           SET ca_count = (SELECT COUNT(DISTINCT ca) FROM wallet_appearances WHERE address=tracked_wallets.address)
+           WHERE address = ?`
+        );
+        const upgradeStmt = dbInstance.prepare(
+          `UPDATE tracked_wallets
+           SET category='SMART_MONEY', score=MAX(score, 60),
+               notes=COALESCE(notes||' | ', '') || 'Overlap: seen in ' || ca_count || ' CAs',
+               updated_at=datetime('now')
+           WHERE address=? AND ca_count >= 3 AND category NOT IN ('WINNER','SNIPER','CLUSTER','RUG') AND source!='manual'`
+        );
+        const overlapTx = dbInstance.transaction((addrs) => {
+          let upgrades = 0;
+          for (const a of addrs) {
+            insAppear.run(a, ca);
+            updCount.run(a);
+            upgrades += upgradeStmt.run(a).changes;
+          }
+          return upgrades;
+        });
+        const upgrades = overlapTx(owners);
+        if (upgrades > 0) console.log(`[external-token] ca=${ca.slice(0,8)} Overlap upgrade: ${upgrades} wallets → SMART_MONEY (seen in 3+ CAs)`);
+      } catch (err) {
+        console.warn('[external-token] overlap tracking failed:', err.message);
+      }
+    }
+
     // ── Populate holderStats + classify against tracked_wallets ──
     if (owners.length || holders.length) {
       try {
@@ -6703,7 +6739,7 @@ app.get('/api/wallets/rankings', (req, res) => {
     const { limit = 200, category } = req.query;
     let q = `SELECT address, label, category, win_rate, avg_roi, trade_count, score,
                wins_found_in, losses_in, source, notes, dune_data, updated_at,
-               sol_balance, sol_scanned_at
+               sol_balance, sol_scanned_at, ca_count
              FROM tracked_wallets WHERE is_blacklist=0`;
     const params = [];
     if (category) { q += ' AND category=?'; params.push(category); }

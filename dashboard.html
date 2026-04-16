@@ -7630,6 +7630,11 @@ function renderWalletTiles(){
     const scoreGlow = sc >= 70 ? ' glow' : '';
     const wrGlow    = (w.win_rate ?? 0) >= 0.5 ? ' glow' : '';
     const solGlow   = isWhale ? ' glow' : '';
+    // CA overlap count — the core signal. 3+ means this wallet found multiple winners.
+    const caCount  = w.ca_count || 0;
+    const caLabel  = caCount >= 3 ? `<span style="color:#ffd740;font-weight:900">${caCount} CAs ★</span>`
+                   : caCount >= 2 ? `<span style="color:#18ffff">${caCount} CAs</span>`
+                   : `<span>${esc(short)}</span>`;
     return `<div class="wt-tile ${tier}" style="--tile-cat-col:${col}" onclick="showWalletModal('${esc(addr)}')">
       ${tierBadge ? `<span class="wt-tier-badge">${tierBadge}</span>` : ''}
       <div class="wt-tile-head">
@@ -7642,7 +7647,7 @@ function renderWalletTiles(){
         <div class="wt-tile-stat"><div class="wt-tile-stat-label">WIN%</div><div class="wt-tile-stat-val${wrGlow}" style="color:${wrCol}">${wr}</div></div>
       </div>
       <div class="wt-tile-foot">
-        <span>${esc(short)}</span>
+        ${caLabel}
         <span>${esc(seen)}</span>
       </div>
     </div>`;
