@@ -7436,14 +7436,33 @@ app.get('/api/v8/dashboard', (req, res) => {
         pumpFunPolling:   true,
         dexScreenerFallback: true,
       },
-      intelligence: {
-        walletDbSize:     walletDB.walletDb.totalWallets,
-        walletDbStale:    walletDB.walletDb.isStale,
-        walletCategories: walletDB.walletDb.categories,
-        deployerCount:    walletDB.deployerDb.totalDeployers,
-        openaiConfigured: !!OPENAI_API_KEY,
-        claudeConfigured: !!CLAUDE_API_KEY,
-      },
+      intelligence: (() => {
+        // Read the real tracked_wallets count from SQL rather than the
+        // in-memory Dune cache — user adds wallets via Brain Analyzer
+        // auto-insert, smart-money watcher, etc. Those never touched the
+        // in-memory cache so the tile showed 2 even with hundreds in DB.
+        let sqlCount = 0;
+        let sqlFreshCount = 0;
+        try {
+          sqlCount = dbInstance.prepare(
+            `SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0`
+          ).get().n;
+          sqlFreshCount = dbInstance.prepare(
+            `SELECT COUNT(*) as n FROM tracked_wallets
+             WHERE is_blacklist=0 AND updated_at > datetime('now', '-24 hours')`
+          ).get().n;
+        } catch {}
+        const stale = sqlCount > 0 && sqlFreshCount === 0;
+        return {
+          walletDbSize:     sqlCount,
+          walletDbFresh24h: sqlFreshCount,
+          walletDbStale:    stale,
+          walletCategories: walletDB.walletDb.categories,
+          deployerCount:    walletDB.deployerDb.totalDeployers,
+          openaiConfigured: !!OPENAI_API_KEY,
+          claudeConfigured: !!CLAUDE_API_KEY,
+        };
+      })(),
       performance: {
         totalEvaluations: totalEvals,
         totalCalls,

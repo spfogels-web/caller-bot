@@ -4904,7 +4904,10 @@ function renderV8Row(v8){
   // v8 row
   setText('v8HeliusStatus',detection.heliusConnected?'⚡ ~3s':'90s poll');
   setText('v8WalletDbSize',(intelligence.walletDbSize||0).toLocaleString());
-  setText('v8DbFresh',intelligence.walletDbStale?'⚠ stale':'✓ fresh');
+  // walletDbFresh24h = wallets updated in the last 24h — if 0 the DB is stale
+  const fresh = intelligence.walletDbFresh24h || 0;
+  const size  = intelligence.walletDbSize || 0;
+  setText('v8DbFresh', size === 0 ? '○ empty' : fresh === 0 ? '⚠ stale' : '✓ ' + fresh + ' fresh 24h');
   setText('v8Missed',performance.missedWinnersDetected||0);
   setText('v8OpenAI',intelligence.openaiConfigured?'✅ GPT-4o':'— not set');
   setText('sbHelius',detection.heliusConnected?'HELIUS: ⚡':'HELIUS: polling');
