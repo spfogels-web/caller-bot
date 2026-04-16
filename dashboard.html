@@ -7413,12 +7413,18 @@ async function loadSmartMoneySummary() {
 }
 
 // ── Full wallet rankings table ─────────────────────────────────────
-async function loadWalletRankings(){
+async function loadWalletRankings(catArg){
+  const sel=document.getElementById('smRankCategory');
+  // Optional cat arg lets chip buttons drive this without touching <select>
+  if(sel && catArg !== undefined) sel.value = catArg || '';
+  const label = document.getElementById('smActiveFilter');
+  const catNames = { WINNER:'🐋 WHALE INTEL', SMART_MONEY:'🧠 SMART MONEY', MOMENTUM:'📈 MOMENTUM', SNIPER:'🎯 SNIPERS', CLUSTER:'🎲 DEGEN CLUSTERS' };
   const tbody=document.getElementById('smRankBody');
   if(!tbody)return;
   tbody.innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading...</td></tr>';
   try{
-    const cat=document.getElementById('smRankCategory')?.value||'';
+    const cat=sel?.value||'';
+    if(label) label.textContent = cat ? (catNames[cat] || cat) : 'ALL WALLETS';
     const url='/api/wallets/rankings?limit=200'+(cat?'&category='+encodeURIComponent(cat):'');
     const data=await apiFetch(url);
     if(!data?.ok){tbody.innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--orange)">Failed to load — run a Dune scan first</td></tr>';return;}
@@ -9317,8 +9323,10 @@ async function renderWalletHeatmap() {
   }
 }
 
-// ── PATCH loadWalletRankings to accept optional cat arg and
-//    update the active filter label ─────────────────────────────
+// (loadWalletRankings cat-arg + filter-label logic is inlined into the
+//  original function above — the old wrapper here was another hoisting
+//  recursion footgun that infinite-looped whenever a filter changed.)
+/* REMOVED BROKEN WRAPPER
 var _origLoadWalletRankings = (typeof loadWalletRankings === 'function') ? loadWalletRankings : null;
 
 function loadWalletRankings(cat) {
@@ -9341,6 +9349,7 @@ function loadWalletRankings(cat) {
 
   if (_origLoadWalletRankings) return _origLoadWalletRankings();
 }
+END REMOVED BROKEN WRAPPER */
 
 // (Heatmap rendering is now inlined into loadSmartMoneyTab above — the
 //  old wrapper here double-nested with the wallet-tiles wrapper and caused
