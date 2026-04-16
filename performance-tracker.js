@@ -27,10 +27,10 @@
 const WIN_THRESHOLD  = Number(process.env.WIN_THRESHOLD_PCT  ?? 20);  // +20% = WIN
 const LOSS_THRESHOLD = Number(process.env.LOSS_THRESHOLD_PCT ?? -30); // -30% = LOSS
 
-// Primary check window: 6h after call
-const CHECK_1_HOURS = Number(process.env.TRACK_CHECK_1_HOURS ?? 6);
-// Final check window: 12h after call
-const CHECK_2_HOURS = Number(process.env.TRACK_CHECK_2_HOURS ?? 12);
+// Primary check window: 1h after call
+const CHECK_1_HOURS = Number(process.env.TRACK_CHECK_1_HOURS ?? 1);
+// Final check window: 3h after call
+const CHECK_2_HOURS = Number(process.env.TRACK_CHECK_2_HOURS ?? 3);
 
 const BIRDEYE_KEY  = process.env.BIRDEYE_API_KEY ?? '';
 const HELIUS_KEY   = process.env.HELIUS_API_KEY  ?? '';
@@ -323,9 +323,9 @@ export async function runPerformanceTracker({
       if (!current?.priceUsd) {
         console.warn(`[tracker] No price data for ${call.contract_address} — skipping`);
 
-        // If it's been more than 24h and still no price, token is dead → LOSS
+        // If it's been more than 6h and still no price, token is dead → LOSS
         const hoursAgoNum = parseFloat(hoursAgo);
-        if (hoursAgoNum > 24 && checkWindow === 'FINAL') {
+        if (hoursAgoNum > 6 && checkWindow === 'FINAL') {
           updateCallPerformance(call.id, {
             price_1h:       null,
             price_6h:       null,
