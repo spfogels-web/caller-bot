@@ -2142,12 +2142,18 @@ body::before {
 /* Tile grid — generous column count, scoped scroll */
 .wt-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(160px, 200px));
   gap: 8px;
   max-height: 70vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-right: 4px;
+}
+@media (max-width: 900px) {
+  .wt-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
+@media (max-width: 480px) {
+  .wt-grid { grid-template-columns: repeat(2, 1fr); }
 }
 .wt-grid::-webkit-scrollbar { width: 6px; }
 .wt-grid::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
@@ -9064,6 +9070,7 @@ async function renderWalletHeatmap() {
       } else {
         var cat    = w.category || 'NEUTRAL';
         var wr     = w.win_rate != null ? w.win_rate : 0;
+        var sol    = w.sol_balance != null ? w.sol_balance : 0;
         var catRGB = {
           WINNER:      '255,215,64',
           SMART_MONEY: '24,255,255',
@@ -9073,7 +9080,10 @@ async function renderWalletHeatmap() {
           RUG:         '255,23,68',
           NEUTRAL:     '136,153,187',
         }[cat] || '136,153,187';
-        var opacity = Math.max(0.1, Math.min(0.9, wr + 0.2));
+        // For NEUTRAL wallets with no win rate, use SOL balance for brightness
+        var opacity = (cat === 'NEUTRAL' && wr === 0)
+          ? Math.max(0.25, Math.min(0.85, sol / 200))
+          : Math.max(0.25, Math.min(0.9, wr + 0.25));
         cell.style.background = 'rgba(' + catRGB + ',' + opacity + ')';
         cell.title = (w.label || w.address.slice(0, 8)) + ' | ' + cat + ' | WR: ' + (wr * 100).toFixed(0) + '%';
         cell.addEventListener('click', function() {
