@@ -6298,6 +6298,9 @@ function startAutoRefresh(){
 // ── BOOT ──────────────────────────────────────────────────
 loadOverview();
 loadPromotedSidebar();
+// Pre-load wallet tiles in the background so they're ready the moment
+// the user opens the Smart Money tab — no waiting, no empty grid.
+setTimeout(() => { if (typeof loadWalletTiles === 'function') loadWalletTiles(); }, 2000);
 
 
 // ── MOBILE NAVIGATION ─────────────────────────────────────
