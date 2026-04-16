@@ -4270,34 +4270,44 @@ app.get('/api/external/token/:ca', async (req, res) => {
     let owners = [];  // resolved owner wallet addresses
     let amounts = []; // balance per owner (uiAmount)
 
-    // ── Try Solscan first ──
+    // ── Try Solscan first — cast a wide net, then re-sort by SOL later ──
+    // We fetch up to 100 holders (5 pages × 20) so we have a big enough pool
+    // to rank by SOL balance. Solscan returns holders sorted by TOKEN amount,
+    // which on fresh memecoins surfaces LP/sniper wallets — not the wealthy
+    // wallets we actually care about. We re-rank after the Helius SOL fetch.
     if (process.env.SOLSCAN_API_KEY) {
       try {
-        // Solscan v2.0 only accepts fixed page_size values: 10, 20, 30, 40, 60.
-        // 40/60 sometimes reject silently on mid-tier plans; 20 is rock solid.
-        // 3 pages × 20 = 60 holders guaranteed.
         const pageSize = 20;
-        const pagesNeeded = 3;
+        const pagesNeeded = 5; // up to 100 candidates before SOL ranking
         let collected = [];
+        let lastError = null;
         for (let p = 1; p <= pagesNeeded; p++) {
-          const r = await fetch(
-            `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=${pageSize}&page=${p}`,
-            { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(9_000) }
-          );
-          if (!r.ok) { console.warn(`[external-token] Solscan holders page ${p} returned ${r.status}`); break; }
-          const j = await r.json();
-          const arr = j?.data?.items || j?.data || [];
-          if (!Array.isArray(arr) || arr.length === 0) break;
-          collected = collected.concat(arr);
-          if (arr.length < pageSize) break; // last page
+          try {
+            const r = await fetch(
+              `https://pro-api.solscan.io/v2.0/token/holders?address=${encodeURIComponent(ca)}&page_size=${pageSize}&page=${p}`,
+              { headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(9_000) }
+            );
+            if (!r.ok) {
+              lastError = `page ${p} HTTP ${r.status}`;
+              console.warn(`[external-token] Solscan holders page ${p} returned ${r.status} — stopping pagination`);
+              break;
+            }
+            const j = await r.json();
+            const arr = j?.data?.items || j?.data || [];
+            if (!Array.isArray(arr) || arr.length === 0) break;
+            collected = collected.concat(arr);
+            if (arr.length < pageSize) break; // last page reached
+          } catch (err) {
+            lastError = err.message;
+            console.warn(`[external-token] Solscan page ${p} threw: ${err.message}`);
+            break;
+          }
         }
-        console.log(`[external-token] Solscan pagination: ${collected.length} holders from ${pagesNeeded} page attempts`);
-        const items = collected.slice(0, 60);
-        if (items.length) {
-          owners  = items.map(h => h.owner).filter(Boolean);
-          amounts = items.map(h => h.amount ?? h.uiAmount ?? null);
-          holders = items.map((h, i) => ({ address: h.address || owners[i], uiAmount: amounts[i] }));
-          console.log(`[external-token] Solscan holders: ${items.length} fetched across ${pagesNeeded} pages`);
+        console.log(`[external-token] Solscan pagination: ${collected.length} holders collected${lastError ? ' (halted on: ' + lastError + ')' : ''}`);
+        if (collected.length) {
+          owners  = collected.map(h => h.owner).filter(Boolean);
+          amounts = collected.map(h => h.amount ?? h.uiAmount ?? null);
+          holders = collected.map((h, i) => ({ address: h.address || owners[i], uiAmount: amounts[i] }));
         }
       } catch (err) {
         console.warn('[external-token] Solscan holders failed:', err.message);
@@ -4376,6 +4386,34 @@ app.get('/api/external/token/:ca', async (req, res) => {
       } catch (err) {
         console.warn('[external-token] SOL balance batch failed:', err.message);
       }
+    }
+
+    // ── Re-rank by SOL balance + trim to top 60 ─────────────────────────────
+    // The user's real question when scanning a coin is "who are the wealthy
+    // wallets holding this?", not "who has the biggest bag of this specific
+    // memecoin?". Solscan's default order surfaces LPs and snipers first;
+    // re-sorting by SOL pushes actual smart-money wallets to the top.
+    if (owners.length && solBalances.size) {
+      const ranked = owners
+        .map((addr, i) => ({
+          address:  addr,
+          sol:      solBalances.get(addr) ?? 0,
+          uiAmount: amounts[i] ?? null,
+          tokenAcct: holders[i]?.address ?? null,
+        }))
+        .sort((a, b) => b.sol - a.sol)
+        .slice(0, 60);
+      owners  = ranked.map(r => r.address);
+      amounts = ranked.map(r => r.uiAmount);
+      holders = ranked.map(r => ({ address: r.tokenAcct || r.address, uiAmount: r.uiAmount }));
+      const topSol = ranked[0]?.sol ?? 0;
+      const tenPlus = ranked.filter(r => r.sol >= 10).length;
+      console.log(`[external-token] Ranked by SOL: top=${topSol.toFixed(1)}SOL · ${tenPlus} wallets ≥10 SOL · kept top ${owners.length}`);
+    } else if (owners.length > 60) {
+      // Fallback: no SOL data came through (Helius down?) — keep first 60 by token
+      owners  = owners.slice(0, 60);
+      amounts = amounts.slice(0, 60);
+      holders = holders.slice(0, 60);
     }
 
     // ── Auto-insert every resolved holder into tracked_wallets with SOL ─────
