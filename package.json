@@ -1,0 +1,22 @@
+{
+  "name": "caller-bot",
+  "version": "2.0.0",
+  "description": "Elite automated Solana crypto intelligence and Telegram caller system",
+  "main": "server.js",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node --max-old-space-size=1024 server.js",
+    "dev": "node --max-old-space-size=1024 --watch server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED"
+}
