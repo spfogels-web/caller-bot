@@ -9627,14 +9627,18 @@ function renderCallsFeed(){
           (ttpTxt ? ' · TTP <b style="color:var(--orange)">' + ttpTxt + '</b>' : '') +
         '</div>'
       : '';
+    // Hard-stop propagation on the wrapper AND each button. Without both,
+    // the parent call-card's onclick fires and openFullCandidateDetail
+    // eats the click before setCallOutcome can run.
+    const stopIt = 'event.stopPropagation();event.preventDefault();';
     const btnsRow = callId
-      ? '<div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap" onclick="event.stopPropagation()">' +
-          '<button onclick="setCallOutcome(' + callId + ',\'WIN\',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='WIN'?'rgba(0,230,118,0.25)':'rgba(0,230,118,0.08)') + ';border:1px solid rgba(0,230,118,0.45);color:var(--green)">🏆 WIN</button>' +
-          '<button onclick="setCallOutcome(' + callId + ',\'LOSS\',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='LOSS'?'rgba(255,23,68,0.25)':'rgba(255,23,68,0.08)') + ';border:1px solid rgba(255,23,68,0.45);color:var(--red)">💀 LOSS</button>' +
-          '<button onclick="setCallOutcome(' + callId + ',\'PENDING\',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3)">↺ RESET</button>' +
-          '<button onclick="refreshCallPeak(' + callId + ',event)" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.35);color:var(--cyan)">🔄 PEAK</button>' +
+      ? '<div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;position:relative;z-index:5" onclick="' + stopIt + '">' +
+          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'WIN\',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='WIN'?'rgba(0,230,118,0.25)':'rgba(0,230,118,0.08)') + ';border:1px solid rgba(0,230,118,0.45);color:var(--green)">🏆 WIN</button>' +
+          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'LOSS\',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:1px;border-radius:4px;cursor:pointer;background:' + (outcome==='LOSS'?'rgba(255,23,68,0.25)':'rgba(255,23,68,0.08)') + ';border:1px solid rgba(255,23,68,0.45);color:var(--red)">💀 LOSS</button>' +
+          '<button type="button" onclick="' + stopIt + 'setCallOutcome(' + callId + ',\'PENDING\',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3)">↺ RESET</button>' +
+          '<button type="button" onclick="' + stopIt + 'refreshCallPeak(' + callId + ',event);return false" style="flex:1;min-width:56px;padding:6px 8px;font-family:var(--mono);font-size:9px;letter-spacing:1px;border-radius:4px;cursor:pointer;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.35);color:var(--cyan)">🔄 PEAK</button>' +
         '</div>'
-      : '';
+      : '<div style="font-family:var(--mono);font-size:7px;color:var(--red);margin-top:6px">⚠ no call id — cannot mark outcome (reload page)</div>';
 
     return '<div onclick="openFullCandidateDetail(\'' + esc(ca) + '\')" class="call-card" style="background:linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,14,28,0.92));border:1px solid ' + outCol + '44;border-left:4px solid ' + outCol + ';border-radius:10px;padding:12px 14px;cursor:pointer;transition:all 0.15s" onmouseenter="this.style.background=\'rgba(255,255,255,0.03)\';this.style.transform=\'translateX(2px)\'" onmouseleave="this.style.background=\'linear-gradient(135deg,rgba(4,6,11,0.95),rgba(8,14,28,0.92))\';this.style.transform=\'none\'">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">' +
@@ -9734,18 +9738,25 @@ function renderPerfChart(calls){
 // ─── Manual call outcome + peak refresh ───────────────────────────────
 async function setCallOutcome(callId, outcome, ev) {
   if (ev) { ev.stopPropagation?.(); ev.preventDefault?.(); }
+  console.log('[setCallOutcome] id=' + callId + ' outcome=' + outcome);
+  if (!callId) { alert('No call ID — reload the page and try again'); return; }
   try {
     const res = await fetch('/api/calls/' + callId + '/outcome', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ outcome }),
     });
-    const data = await res.json();
+    const txt = await res.text();
+    let data;
+    try { data = JSON.parse(txt); } catch { throw new Error('Bad response (HTTP ' + res.status + '): ' + txt.slice(0, 200)); }
     if (!data.ok) throw new Error(data.error || 'failed');
+    console.log('[setCallOutcome] ✓ saved', data);
     // Reload calls so the UI reflects the new outcome + MANUAL badge
-    if (typeof loadCalls === 'function') loadCalls();
+    if (typeof loadCallsTab === 'function') loadCallsTab();
+    else if (typeof loadCalls === 'function') loadCalls();
     else if (typeof loadCallsOverview === 'function') loadCallsOverview();
   } catch (err) {
+    console.error('[setCallOutcome] error', err);
     alert('Failed to set outcome: ' + err.message);
   }
 }
