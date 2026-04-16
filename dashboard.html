@@ -9751,6 +9751,22 @@ async function setCallOutcome(callId, outcome, ev) {
     try { data = JSON.parse(txt); } catch { throw new Error('Bad response (HTTP ' + res.status + '): ' + txt.slice(0, 200)); }
     if (!data.ok) throw new Error(data.error || 'failed');
     console.log('[setCallOutcome] ✓ saved', data);
+
+    // ── Optimistic in-memory update ─────────────────────────────────────
+    // Update _callsAll immediately so the user sees the new state without
+    // waiting for the full refresh. Then still kick the reload so any
+    // derived stats / tabs pick it up.
+    if (Array.isArray(_callsAll)) {
+      for (const c of _callsAll) {
+        if (c.id === callId) {
+          c.outcome        = outcome === 'PENDING' ? null : outcome;
+          c.outcome_source = outcome === 'PENDING' ? null : 'MANUAL';
+          break;
+        }
+      }
+      if (typeof renderCallsFeed === 'function') renderCallsFeed();
+    }
+
     // Reload calls so the UI reflects the new outcome + MANUAL badge
     if (typeof loadCallsTab === 'function') loadCallsTab();
     else if (typeof loadCalls === 'function') loadCalls();

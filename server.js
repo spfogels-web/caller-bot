@@ -6132,6 +6132,27 @@ app.post('/api/calls/:id/outcome', express.json(), (req, res) => {
       WHERE id = ?
     `).run(outcome, outcome === 'PENDING' ? null : 'MANUAL', id);
     if (info.changes === 0) return res.status(404).json({ ok: false, error: 'call not found' });
+
+    // ── Mirror to audit_archive so the Calls tab UI (which reads
+    //    /api/archive) reflects manual overrides immediately. Without this,
+    //    you click WIN, the server saves, but the UI keeps showing PENDING
+    //    because it's reading a different table.
+    try {
+      const callRow = dbInstance.prepare(
+        `SELECT contract_address FROM calls WHERE id = ?`
+      ).get(id);
+      if (callRow?.contract_address) {
+        dbInstance.prepare(`
+          UPDATE audit_archive
+          SET outcome           = ?,
+              outcome_locked_at = datetime('now')
+          WHERE contract_address = ?
+        `).run(outcome === 'PENDING' ? null : outcome, callRow.contract_address);
+      }
+    } catch (err) {
+      console.warn('[manual-outcome] audit_archive sync failed:', err.message);
+    }
+
     logEvent('INFO', 'MANUAL_OUTCOME', `call=${id} outcome=${outcome}`);
     res.json({ ok: true, id, outcome, source: outcome === 'PENDING' ? null : 'MANUAL' });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
