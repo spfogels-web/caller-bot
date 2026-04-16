@@ -3101,6 +3101,62 @@ body::before {
 </div>
       </div>
 
+      <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
+      <div class="card ai-learn-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(68,138,255,0.04),rgba(156,39,176,0.04));border:1px solid rgba(156,39,176,0.25)">
+        <div class="card-hdr" style="border-bottom:1px solid rgba(156,39,176,0.2)">
+          <div class="card-title"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(156,39,176,0.8))">🧠</span>AI LEARNING DASHBOARD — trend vs snapshot</div>
+          <div class="aiLearnTrendPill" style="font-family:var(--mono);font-size:9px;padding:3px 10px;border-radius:4px;background:rgba(136,153,187,0.15);color:var(--text3);letter-spacing:1.5px;font-weight:700">— CALIBRATING —</div>
+        </div>
+        <div class="card-body" style="padding:14px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(0,230,118,0.15);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">📈 WIN RATE TREND</div>
+              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
+                <span class="aiLearn7d" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--green)">—</span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">last 7d</span>
+              </div>
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
+                vs 30d: <b class="aiLearn30d" style="color:var(--text2)">—</b>
+                <span class="aiLearnDelta" style="margin-left:4px">—</span>
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,215,64,0.15);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">💎 AVG PEAK THIS WEEK</div>
+              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
+                <span class="aiLearnPeakNow" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--gold)">—</span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" class="aiLearnPeakN"></span>
+              </div>
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
+                vs last week: <b class="aiLearnPeakPrev" style="color:var(--text2)">—</b>
+                <span class="aiLearnPeakDelta" style="margin-left:4px">—</span>
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(68,138,255,0.15);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">🤝 AI CONSENSUS ACCURACY</div>
+              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
+                <span class="aiLearnConsensus" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--blue)">—</span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">win rate</span>
+              </div>
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
+                when Claude + GPT-4o both said POST (<b class="aiLearnConsensusN" style="color:var(--text2)">0</b>)
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">📊 RESOLUTION MIX</div>
+              <div style="font-family:var(--mono);font-size:9px;line-height:1.7">
+                <div>Resolved: <b class="aiLearnResolved" style="color:var(--text1)">—</b> of <b class="aiLearnTotal" style="color:var(--text2)">—</b></div>
+                <div>👤 Manual: <b class="aiLearnManual" style="color:var(--purple)">—</b> · 🤖 Auto: <b class="aiLearnAuto" style="color:var(--cyan)">—</b></div>
+                <div>💎 Peak ≥2x inferred: <b class="aiLearnImplicit" style="color:var(--gold)">—</b></div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05)">
+            <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:8px">🎯 SCORE BUCKET ACCURACY — are higher scores actually winning more?</div>
+            <div class="aiLearnBuckets" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"></div>
+          </div>
+        </div>
+      </div>
+
       <div class="overview-grid">
         <div class="overview-main">
           <!-- Recent Calls Thesis Cards -->
@@ -3419,6 +3475,62 @@ body::before {
   </div>
   <div class="tile-sub" id="v8OpenAI" style="font-size:7px">GPT-4o + Claude</div>
 </div>
+      </div>
+
+      <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
+      <div class="card ai-learn-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(68,138,255,0.04),rgba(156,39,176,0.04));border:1px solid rgba(156,39,176,0.25)">
+        <div class="card-hdr" style="border-bottom:1px solid rgba(156,39,176,0.2)">
+          <div class="card-title"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(156,39,176,0.8))">🧠</span>AI LEARNING DASHBOARD — trend vs snapshot</div>
+          <div class="aiLearnTrendPill" style="font-family:var(--mono);font-size:9px;padding:3px 10px;border-radius:4px;background:rgba(136,153,187,0.15);color:var(--text3);letter-spacing:1.5px;font-weight:700">— CALIBRATING —</div>
+        </div>
+        <div class="card-body" style="padding:14px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(0,230,118,0.15);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">📈 WIN RATE TREND</div>
+              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
+                <span class="aiLearn7d" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--green)">—</span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">last 7d</span>
+              </div>
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
+                vs 30d: <b class="aiLearn30d" style="color:var(--text2)">—</b>
+                <span class="aiLearnDelta" style="margin-left:4px">—</span>
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,215,64,0.15);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">💎 AVG PEAK THIS WEEK</div>
+              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
+                <span class="aiLearnPeakNow" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--gold)">—</span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" class="aiLearnPeakN"></span>
+              </div>
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
+                vs last week: <b class="aiLearnPeakPrev" style="color:var(--text2)">—</b>
+                <span class="aiLearnPeakDelta" style="margin-left:4px">—</span>
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(68,138,255,0.15);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">🤝 AI CONSENSUS ACCURACY</div>
+              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
+                <span class="aiLearnConsensus" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--blue)">—</span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">win rate</span>
+              </div>
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
+                when Claude + GPT-4o both said POST (<b class="aiLearnConsensusN" style="color:var(--text2)">0</b>)
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px">
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">📊 RESOLUTION MIX</div>
+              <div style="font-family:var(--mono);font-size:9px;line-height:1.7">
+                <div>Resolved: <b class="aiLearnResolved" style="color:var(--text1)">—</b> of <b class="aiLearnTotal" style="color:var(--text2)">—</b></div>
+                <div>👤 Manual: <b class="aiLearnManual" style="color:var(--purple)">—</b> · 🤖 Auto: <b class="aiLearnAuto" style="color:var(--cyan)">—</b></div>
+                <div>💎 Peak ≥2x inferred: <b class="aiLearnImplicit" style="color:var(--gold)">—</b></div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05)">
+            <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:8px">🎯 SCORE BUCKET ACCURACY — are higher scores actually winning more?</div>
+            <div class="aiLearnBuckets" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"></div>
+          </div>
+        </div>
       </div>
 
       <div class="overview-grid">
@@ -4650,6 +4762,80 @@ async function loadOverview(){
 
   // update brain rating
   try{ const d=await apiFetch('/api/stats'); if(d) updateBrainRating({wins:d.wins||0,losses:d.losses||0,total:d.total||0}); }catch{}
+  // AI learning dashboard (trend card under the stat tiles)
+  try { loadAILearningMetrics(); } catch {}
+}
+
+// ── AI LEARNING DASHBOARD — fetches /api/ai/learning-metrics and populates
+// the 4 trend tiles + score bucket row. Populates BOTH card instances
+// (desktop + mobile) by iterating class selectors.
+async function loadAILearningMetrics(){
+  const data = await apiFetch('/api/ai/learning-metrics').catch(() => null);
+  if (!data || !data.ok) return;
+
+  const setAll = (cls, html) => {
+    document.querySelectorAll('.' + cls).forEach(el => { el.innerHTML = html; });
+  };
+  const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
+  const delta = (v, suffix) => {
+    if (v == null) return '<span style="color:var(--text3)">—</span>';
+    const sign = v > 0 ? '+' : '';
+    const col = v > 0.01 ? 'var(--green)' : v < -0.01 ? 'var(--red)' : 'var(--text3)';
+    return '<span style="color:' + col + ';font-weight:700">' + sign + (suffix === '%' ? Math.round(v*100)+'%' : v.toFixed(2) + 'x') + '</span>';
+  };
+
+  // 1. Win rate trend
+  setAll('aiLearn7d',     pct(data.winRate?.last7d?.winRate));
+  setAll('aiLearn30d',    pct(data.winRate?.last30d?.winRate));
+  setAll('aiLearnDelta',  delta(data.winRate?.delta, '%'));
+
+  // 2. Peak trend
+  const peakNow  = data.peakTrend?.thisWeek?.avg;
+  const peakPrev = data.peakTrend?.lastWeek?.avg;
+  setAll('aiLearnPeakNow',   peakNow  ? peakNow.toFixed(2) + 'x'  : '—');
+  setAll('aiLearnPeakPrev',  peakPrev ? peakPrev.toFixed(2) + 'x' : '—');
+  setAll('aiLearnPeakN',     data.peakTrend?.thisWeek?.n ? '(' + data.peakTrend.thisWeek.n + ' calls)' : '');
+  setAll('aiLearnPeakDelta', delta(data.peakTrend?.delta, 'x'));
+
+  // 3. AI consensus accuracy
+  setAll('aiLearnConsensus',  pct(data.consensus?.winRate));
+  setAll('aiLearnConsensusN', (data.consensus?.wins || 0) + 'W / ' + (data.consensus?.losses || 0) + 'L');
+
+  // 4. Resolution mix
+  setAll('aiLearnResolved', data.resolution?.resolved ?? '—');
+  setAll('aiLearnTotal',    data.resolution?.total    ?? '—');
+  setAll('aiLearnManual',   data.resolution?.manual   ?? '—');
+  setAll('aiLearnAuto',     data.resolution?.auto     ?? '—');
+  setAll('aiLearnImplicit', data.resolution?.implicitWins ?? '—');
+
+  // Trend pill — the "is it getting smarter?" verdict
+  const pillLabel =
+    data.trend === 'IMPROVING'          ? '📈 IMPROVING'
+    : data.trend === 'DECLINING'        ? '📉 DECLINING'
+    : data.trend === 'STABLE'           ? '➖ STABLE'
+    : '— NEED MORE DATA —';
+  const pillCol =
+    data.trend === 'IMPROVING'   ? { bg: 'rgba(0,230,118,0.18)',  fg: 'var(--green)' }
+    : data.trend === 'DECLINING' ? { bg: 'rgba(255,23,68,0.18)',  fg: 'var(--red)' }
+    : data.trend === 'STABLE'    ? { bg: 'rgba(24,255,255,0.12)', fg: 'var(--cyan)' }
+    : { bg: 'rgba(136,153,187,0.15)', fg: 'var(--text3)' };
+  document.querySelectorAll('.aiLearnTrendPill').forEach(el => {
+    el.textContent       = pillLabel;
+    el.style.background  = pillCol.bg;
+    el.style.color       = pillCol.fg;
+  });
+
+  // Score buckets
+  const bucketHtml = (data.scoreBuckets || []).map(b => {
+    const wrTxt = b.winRate != null ? Math.round(b.winRate * 100) + '%' : '—';
+    const wrCol = b.winRate >= 0.5 ? 'var(--green)' : b.winRate >= 0.3 ? 'var(--gold)' : 'var(--text3)';
+    return '<div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.06);border-radius:6px;padding:8px;text-align:center">' +
+      '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-bottom:3px">SCORE ' + esc(b.bucket) + '</div>' +
+      '<div style="font-family:\'Orbitron\',var(--mono);font-size:18px;font-weight:900;color:' + wrCol + '">' + wrTxt + '</div>' +
+      '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:2px">' + (b.wins || 0) + 'W / ' + (b.losses || 0) + 'L · ' + (b.total || 0) + ' total</div>' +
+    '</div>';
+  }).join('') || '<div style="grid-column:1/-1;text-align:center;padding:12px;font-family:var(--mono);font-size:8px;color:var(--text3)">Need resolved calls in each bucket to compare.</div>';
+  document.querySelectorAll('.aiLearnBuckets').forEach(el => { el.innerHTML = bucketHtml; });
 }
 
 function renderOverviewStats(stats,memory,v8){

@@ -3058,6 +3058,151 @@ app.get('/dashboard', (_req, res) => {
 // Lets the dashboard AI agent and Telegram /config command change bot behavior
 // without a deploy. Changes persist in memory until next restart.
 
+// AI Learning Dashboard metrics — are we actually getting smarter?
+// Returns trend deltas (7d vs 30d), score-bucket accuracy, AI consensus
+// accuracy, and peak-multiple trend. All treats peak_multiple >= 2 as an
+// implicit WIN so stats are meaningful before auto-tracker resolves outcomes.
+app.get('/api/ai/learning-metrics', (req, res) => {
+  setCors(res);
+  try {
+    const safe = (sql, ...p) => { try { return dbInstance.prepare(sql).get(...p); } catch { return {}; } };
+    const safeAll = (sql, ...p) => { try { return dbInstance.prepare(sql).all(...p); } catch { return []; } };
+
+    // Helper: a call counts as WIN if explicit WIN or peaked >=2x
+    //         LOSS if explicit LOSS or peaked <=0.5x and never hit 2x
+    const resolvedSql = `
+      CASE
+        WHEN outcome='WIN' OR peak_multiple >= 2 THEN 'WIN'
+        WHEN outcome='LOSS' OR (peak_multiple IS NOT NULL AND peak_multiple <= 0.5) THEN 'LOSS'
+        WHEN outcome='NEUTRAL' THEN 'NEUTRAL'
+        ELSE NULL
+      END`;
+
+    // ── 1. Win rate: 7d vs 30d ──
+    const winRateOver = (since) => {
+      const r = safe(`
+        SELECT
+          SUM(CASE WHEN (${resolvedSql})='WIN'  THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN (${resolvedSql})='LOSS' THEN 1 ELSE 0 END) as losses,
+          COUNT(*) as total
+        FROM calls
+        WHERE called_at > datetime('now', ?)
+      `, since);
+      const resolved = (r.wins || 0) + (r.losses || 0);
+      return {
+        wins:    r.wins    || 0,
+        losses:  r.losses  || 0,
+        total:   r.total   || 0,
+        winRate: resolved > 0 ? (r.wins / resolved) : null,
+      };
+    };
+    const wr7  = winRateOver('-7 days');
+    const wr30 = winRateOver('-30 days');
+
+    // ── 2. Score bucket accuracy — do higher scores actually win more? ──
+    const bucketStats = safeAll(`
+      SELECT
+        CASE
+          WHEN score_at_call >= 60 THEN '60+'
+          WHEN score_at_call >= 40 THEN '40-59'
+          ELSE '<40'
+        END as bucket,
+        SUM(CASE WHEN (${resolvedSql})='WIN'  THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN (${resolvedSql})='LOSS' THEN 1 ELSE 0 END) as losses,
+        COUNT(*) as total
+      FROM calls
+      WHERE score_at_call IS NOT NULL
+      GROUP BY bucket
+    `).map(b => ({
+      ...b,
+      winRate: (b.wins + b.losses) > 0 ? b.wins / (b.wins + b.losses) : null,
+    }));
+
+    // ── 3. Peak multiple trend: this week vs last week ──
+    const peakOver = (since, until) => {
+      const r = safe(`
+        SELECT AVG(peak_multiple) as avg, MAX(peak_multiple) as max, COUNT(*) as n
+        FROM calls
+        WHERE peak_multiple IS NOT NULL
+          AND called_at > datetime('now', ?)
+          AND called_at <= datetime('now', ?)
+      `, since, until);
+      return { avg: r.avg || 0, max: r.max || 0, n: r.n || 0 };
+    };
+    const peakThisWeek = peakOver('-7 days',  '+0 days');
+    const peakLastWeek = peakOver('-14 days', '-7 days');
+
+    // ── 4. AI Consensus accuracy — when Claude AND OpenAI both said POST ──
+    const consensus = safe(`
+      SELECT
+        COUNT(*) as consensus_posts,
+        SUM(CASE WHEN (c.outcome='WIN' OR c.peak_multiple >= 2) THEN 1 ELSE 0 END) as consensus_wins,
+        SUM(CASE WHEN (c.outcome='LOSS' OR (c.peak_multiple IS NOT NULL AND c.peak_multiple <= 0.5)) THEN 1 ELSE 0 END) as consensus_losses
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE ca.claude_decision='AUTO_POST' AND ca.openai_decision='POST'
+    `);
+
+    // ── 5. Manual vs auto — how engaged is the user in resolving calls ──
+    const resolution = safe(`
+      SELECT
+        SUM(CASE WHEN outcome_source='MANUAL' THEN 1 ELSE 0 END) as manual,
+        SUM(CASE WHEN outcome_source='AUTO'   THEN 1 ELSE 0 END) as auto,
+        SUM(CASE WHEN outcome IN ('WIN','LOSS','NEUTRAL') THEN 1 ELSE 0 END) as resolved,
+        SUM(CASE WHEN peak_multiple >= 2 AND outcome IS NOT 'WIN'  THEN 1 ELSE 0 END) as implicit_wins,
+        COUNT(*) as total
+      FROM calls
+    `);
+
+    // ── Composite "smarter?" verdict ──
+    // Improving if: 7d win rate > 30d win rate AND peakThisWeek >= peakLastWeek
+    const delta7vs30 =
+      (wr7.winRate != null && wr30.winRate != null)
+        ? (wr7.winRate - wr30.winRate)
+        : null;
+    const peakDelta =
+      peakThisWeek.n > 0 && peakLastWeek.n > 0
+        ? (peakThisWeek.avg - peakLastWeek.avg)
+        : null;
+    const trend =
+      delta7vs30 == null ? 'INSUFFICIENT_DATA'
+      : delta7vs30 > 0.05 ? 'IMPROVING'
+      : delta7vs30 < -0.05 ? 'DECLINING'
+      : 'STABLE';
+
+    res.json({
+      ok: true,
+      winRate: {
+        last7d:  wr7,
+        last30d: wr30,
+        delta:   delta7vs30,
+      },
+      scoreBuckets: bucketStats,
+      peakTrend: {
+        thisWeek: peakThisWeek,
+        lastWeek: peakLastWeek,
+        delta:    peakDelta,
+      },
+      consensus: {
+        posts:  consensus.consensus_posts  || 0,
+        wins:   consensus.consensus_wins   || 0,
+        losses: consensus.consensus_losses || 0,
+        winRate: (consensus.consensus_wins + consensus.consensus_losses) > 0
+          ? consensus.consensus_wins / (consensus.consensus_wins + consensus.consensus_losses)
+          : null,
+      },
+      resolution: {
+        manual:       resolution.manual || 0,
+        auto:         resolution.auto   || 0,
+        implicitWins: resolution.implicit_wins || 0,
+        resolved:     resolution.resolved || 0,
+        total:        resolution.total || 0,
+      },
+      trend,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/api/ai/config', (req, res) => {
   setCors(res);
   res.json({
