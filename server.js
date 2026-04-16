@@ -2459,6 +2459,26 @@ async function processCandidate(candidate, isRescan = false) {
       }
     }
 
+    // ── RUG GUARD: $13K-$17.5K sub-band requires higher score ───────────────
+    // This low-end sliver of the sweet spot is the highest-risk micro-range:
+    // fresh launches and rugs cluster here. Require score >= 60 to post,
+    // otherwise demote to WATCHLIST regardless of AI/smart-money overrides.
+    // Cluster smart-money alerts (3+ winners) bypass this guard — they carry
+    // enough conviction on their own.
+    const mcapNow = enrichedCandidate.marketCap ?? 0;
+    const isHighRiskBand = mcapNow >= 13_000 && mcapNow <= 17_500;
+    const isClusterAlert = enrichedCandidate._smartMoney?.kind === 'cluster';
+    if (
+      finalDecision === 'AUTO_POST' &&
+      isHighRiskBand &&
+      !isClusterAlert &&
+      (scoreResult.score ?? 0) < 60
+    ) {
+      logEvent('INFO', 'RUG_GUARD', `${enrichedCandidate.token ?? ca.slice(0,6)} mcap=${Math.round(mcapNow/1000)}K score=${scoreResult.score} < 60 → WATCHLIST (high-risk band guard)`);
+      console.log(`[auto-caller] 🛡  $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — $${Math.round(mcapNow/1000)}K in rug-risk band, score ${scoreResult.score} < 60`);
+      finalDecision = 'WATCHLIST';
+    }
+
     // Attach scoreResult breakdown directly to enrichedCandidate
     // so db.js insertCandidate picks them up if columns exist
     enrichedCandidate.subScores       = scoreResult.subScores;
