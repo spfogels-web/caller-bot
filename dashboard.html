@@ -6070,12 +6070,26 @@ function renderWinRateList(id,data){
 function renderMissedWinners(data){
   const el=document.getElementById('missedWinnersList');if(!el)return;
   if(!data?.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">😢</div><div>No missed winners</div><div class="empty-hint">Learning loop checks every 6h</div></div>';return;}
-  el.innerHTML=data.slice(0,8).map(m=>{
-    const mult=m.missed_winner_peak_multiple||0;
+  el.innerHTML=data.slice(0,12).map(m=>{
+    const mult=m.peak_multiple||m.missed_winner_peak_multiple||0;
     const mc=mult>=10?'var(--gold)':mult>=5?'var(--green)':'var(--cyan)';
-    return`<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border)">
-      <div><div style="font-family:var(--mono);font-size:11px;color:var(--text1)">$${esc(m.token||'?')}</div><div style="font-family:var(--mono);font-size:8px;color:var(--text3)">Was: ${m.final_decision} · Score: ${m.composite_score||'?'}</div></div>
-      <div style="font-family:var(--mono);font-size:20px;font-weight:900;color:${mc}">${mult?mult.toFixed(1)+'×':'?×'}</div>
+    const ca=m.contract_address||'';
+    const tok=m.token||(ca?ca.slice(0,6)+'…':'?');
+    const mcap=m.market_cap?(m.market_cap>=1000?'$'+(m.market_cap/1000).toFixed(1)+'K':'$'+Math.round(m.market_cap)):'';
+    const peakMc=m.peak_mcap?(m.peak_mcap>=1000?'$'+(m.peak_mcap/1000).toFixed(1)+'K':'$'+Math.round(m.peak_mcap)):'';
+    const risk=m.claude_risk?`<span style="padding:1px 5px;border-radius:3px;background:rgba(255,23,68,0.12);color:var(--red);margin-left:4px">${esc(m.claude_risk)}</span>`:'';
+    const tip=m.claude_verdict?` title="${esc(m.claude_verdict.slice(0,200))}"`:'';
+    return`<div${tip} onclick="openFullCandidateDetail('${esc(ca)}')" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s" onmouseenter="this.style.background='rgba(255,255,255,0.03)'" onmouseleave="this.style.background='transparent'">
+      <div style="flex:1;min-width:0">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text1);font-weight:700">$${esc(tok)}${risk}</div>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">Was: <b style="color:var(--red)">${esc(m.final_decision||'?')}</b> · Score: <b>${m.composite_score||m.claude_score||'?'}</b>${mcap?` · MCap at call: <b style="color:var(--cyan)">${mcap}</b>`:''}${peakMc?` → Peak: <b style="color:${mc}">${peakMc}</b>`:''}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div style="font-family:'Orbitron',var(--mono);font-size:18px;font-weight:900;color:${mc}">${mult?mult.toFixed(1)+'×':'—'}</div>
+        <div style="display:flex;gap:4px;margin-top:4px" onclick="event.stopPropagation()">
+          ${ca?`<a href="https://dexscreener.com/solana/${esc(ca)}" target="_blank" style="font-family:var(--mono);font-size:7px;color:var(--green);text-decoration:none;padding:2px 5px;background:rgba(0,230,118,0.1);border-radius:3px">DSC↗</a><a href="https://pump.fun/${esc(ca)}" target="_blank" style="font-family:var(--mono);font-size:7px;color:var(--orange);text-decoration:none;padding:2px 5px;background:rgba(255,109,0,0.1);border-radius:3px">PUMP↗</a>`:''}
+        </div>
+      </div>
     </div>`;
   }).join('');
 }
@@ -6092,11 +6106,11 @@ function renderLearningStats(data){
   if(!data?.ok)return;
   const {topMissedWinners=[],latestRecommendations=null}=data;
   if(topMissedWinners.length){
-    const mwEl=document.getElementById('missedWinnersList');
-    if(mwEl)mwEl.innerHTML=topMissedWinners.map(m=>{
-      const mult=m.missed_winner_peak_multiple;const mc=mult>=10?'var(--gold)':mult>=5?'var(--green)':'var(--cyan)';
-      return`<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border)"><div><div style="font-family:var(--mono);font-size:11px;color:var(--text1)">$${esc(m.token||'?')}</div><div style="font-family:var(--mono);font-size:8px;color:var(--text3)">Was: ${m.final_decision} · Score: ${m.composite_score||'?'} · ${fmtTime(m.created_at)}</div></div><div style="font-family:var(--mono);font-size:20px;font-weight:900;color:${mc}">${mult?mult.toFixed(1)+'×':'?×'}</div></div>`;
-    }).join('');
+    // Delegate to renderMissedWinners so both code paths produce the same
+    // clickable-with-links UI. The learning-stats rows use slightly
+    // different field names (missed_winner_peak_multiple, created_at); the
+    // renderer normalizes those.
+    renderMissedWinners(topMissedWinners);
   }
   if(latestRecommendations?.recommendations?.length){
     const recEl=document.getElementById('aiRecommendations');

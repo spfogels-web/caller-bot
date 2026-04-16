@@ -1286,10 +1286,14 @@ export function getWinRateBySetupType() {
 
 export function getMissedWinners() {
   return db.prepare(`
-    SELECT token, contract_address, claude_score, final_decision,
-           composite_score, structure_grade, setup_type, evaluated_at
-    FROM candidates WHERE final_decision = 'IGNORE' AND claude_score >= 55
-    ORDER BY claude_score DESC LIMIT 20
+    SELECT c.token, c.contract_address, c.claude_score, c.final_decision,
+           c.composite_score, c.structure_grade, c.setup_type, c.evaluated_at,
+           c.market_cap, c.pair_age_hours, c.claude_risk, c.claude_verdict,
+           aa.peak_multiple, aa.peak_mcap, aa.outcome
+    FROM candidates c
+    LEFT JOIN audit_archive aa ON aa.contract_address = c.contract_address
+    WHERE c.final_decision = 'IGNORE' AND c.claude_score >= 55
+    ORDER BY c.claude_score DESC LIMIT 20
   `).all();
 }
 
