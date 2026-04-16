@@ -549,7 +549,11 @@ function computeQuickScore(candidate) {
   if (candidateType === 'NEW_LAUNCH' && p5 >= 0 && b1h >= 5) score += 12;
   if (candidateType === 'EARLY_MOMENTUM')                      score +=  8;
 
-  return { score: clamp(Math.round(score), 0, 100), candidateType };
+  // Cap quick_score at 70 — this is just a basic pre-filter pass, not a full
+  // composite. The remaining 30 points are reserved for the full scoring
+  // pipeline (Claude + OpenAI + structure analysis) so the user can tell
+  // immediately whether a 100 is "scanner approved" vs "actually elite".
+  return { score: clamp(Math.round(score), 0, 70), candidateType };
 }
 
 // ─── Scanner Watchlist ────────────────────────────────────────────────────────
