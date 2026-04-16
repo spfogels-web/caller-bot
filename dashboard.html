@@ -548,6 +548,8 @@ body::before {
 .g4 { display:grid;grid-template-columns:repeat(4,1fr);gap:12px; }
 .g5 { display:grid;grid-template-columns:repeat(5,1fr);gap:10px; }
 .g6 { display:grid;grid-template-columns:repeat(6,1fr);gap:10px; }
+@media(max-width:900px){ .ov-call-summary { grid-template-columns:repeat(3,1fr) !important; } }
+@media(max-width:520px){ .ov-call-summary { grid-template-columns:repeat(2,1fr) !important; } }
 
 /* Stat tiles */
 .stat-tile {
@@ -3101,6 +3103,15 @@ body::before {
 </div>
       </div>
 
+      <!-- ═══ CALL OUTCOME SUMMARY — at a glance ═══ -->
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px" class="ov-call-summary">
+        <div class="stat-tile" style="--tile-color:var(--cyan);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">TOTAL CALLS</div><div class="tile-value" style="color:var(--cyan)" id="ovCallsTotal">—</div><div class="tile-sub">all posted</div></div>
+        <div class="stat-tile" style="--tile-color:var(--green);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-value" style="color:var(--green)" id="ovCallsWins">—</div><div class="tile-sub" id="ovCallsWinsSub">—</div></div>
+        <div class="stat-tile" style="--tile-color:var(--red);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-value" style="color:var(--red)" id="ovCallsLosses">—</div><div class="tile-sub" id="ovCallsLossesSub">—</div></div>
+        <div class="stat-tile" style="--tile-color:#18ffff;cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:#18ffff">➖ NEUTRAL</div><div class="tile-value" style="color:#18ffff" id="ovCallsNeutral">—</div><div class="tile-sub">broke even</div></div>
+        <div class="stat-tile" style="--tile-color:var(--text3);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">⏳ PENDING</div><div class="tile-value" id="ovCallsPending">—</div><div class="tile-sub">unresolved</div></div>
+      </div>
+
       <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
       <div class="card ai-learn-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(68,138,255,0.04),rgba(156,39,176,0.04));border:1px solid rgba(156,39,176,0.25)">
         <div class="card-hdr" style="border-bottom:1px solid rgba(156,39,176,0.2)">
@@ -3475,6 +3486,15 @@ body::before {
   </div>
   <div class="tile-sub" id="v8OpenAI" style="font-size:7px">GPT-4o + Claude</div>
 </div>
+      </div>
+
+      <!-- ═══ CALL OUTCOME SUMMARY — at a glance ═══ -->
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px" class="ov-call-summary">
+        <div class="stat-tile" style="--tile-color:var(--cyan);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">TOTAL CALLS</div><div class="tile-value" style="color:var(--cyan)" id="ovCallsTotal">—</div><div class="tile-sub">all posted</div></div>
+        <div class="stat-tile" style="--tile-color:var(--green);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-value" style="color:var(--green)" id="ovCallsWins">—</div><div class="tile-sub" id="ovCallsWinsSub">—</div></div>
+        <div class="stat-tile" style="--tile-color:var(--red);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-value" style="color:var(--red)" id="ovCallsLosses">—</div><div class="tile-sub" id="ovCallsLossesSub">—</div></div>
+        <div class="stat-tile" style="--tile-color:#18ffff;cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:#18ffff">➖ NEUTRAL</div><div class="tile-value" style="color:#18ffff" id="ovCallsNeutral">—</div><div class="tile-sub">broke even</div></div>
+        <div class="stat-tile" style="--tile-color:var(--text3);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">⏳ PENDING</div><div class="tile-value" id="ovCallsPending">—</div><div class="tile-sub">unresolved</div></div>
       </div>
 
       <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
@@ -4764,6 +4784,39 @@ async function loadOverview(){
   try{ const d=await apiFetch('/api/stats'); if(d) updateBrainRating({wins:d.wins||0,losses:d.losses||0,total:d.total||0}); }catch{}
   // AI learning dashboard (trend card under the stat tiles)
   try { loadAILearningMetrics(); } catch {}
+  // Call outcome summary row (Total / Wins / Losses / Neutral / Pending)
+  try { updateOverviewCallSummary(); } catch {}
+}
+
+// ── OVERVIEW — Call outcome tile row ─────────────────────────────────
+// Pulls the calls list, counts outcomes (with peak-based inference like
+// the Calls tab does), and fills the 5 tiles above the AI Learning card.
+async function updateOverviewCallSummary(){
+  try {
+    const data = await apiFetch('/api/calls?limit=500').catch(() => null);
+    const rows = (data && (data.rows || data.calls)) || [];
+    if (!rows.length) return;
+
+    const isNeutral = c => c.outcome === 'NEUTRAL';
+    const isWin  = c => c.outcome === 'WIN'  || (!isNeutral(c) && c.peak_multiple != null && c.peak_multiple >= 2);
+    const isLoss = c => c.outcome === 'LOSS' || (!isNeutral(c) && c.peak_multiple != null && c.peak_multiple <= 0.5 && (c.peak_multiple || 0) < 2);
+
+    const total    = rows.length;
+    const wins     = rows.filter(isWin).length;
+    const losses   = rows.filter(isLoss).length;
+    const neutrals = rows.filter(isNeutral).length;
+    const pending  = total - wins - losses - neutrals;
+    const resolved = wins + losses;
+    const wr       = resolved > 0 ? Math.round(wins / resolved * 100) : null;
+
+    setText('ovCallsTotal',   total.toLocaleString());
+    setText('ovCallsWins',    wins.toLocaleString());
+    setText('ovCallsLosses',  losses.toLocaleString());
+    setText('ovCallsNeutral', neutrals.toLocaleString());
+    setText('ovCallsPending', pending.toLocaleString());
+    setText('ovCallsWinsSub',   wr != null ? wr + '% win rate' : 'no resolved yet');
+    setText('ovCallsLossesSub', resolved > 0 ? (100 - wr) + '% loss rate' : 'no resolved yet');
+  } catch {}
 }
 
 // ── AI LEARNING DASHBOARD — fetches /api/ai/learning-metrics and populates
