@@ -183,15 +183,18 @@ function detectStealthAccumulation(candidate, stage, structureGrade) {
 // ─── 1. Launch Quality Score (0-100) ─────────────────────────────────────────
 
 export function scoreLaunchQuality(candidate) {
-  let score = 50;
+  // Tightened baselines — "basic rug check passed" should NOT produce 100.
+  // Starting at 40 and with reduced signal rewards means a coin now has
+  // to have actual momentum / unique-buyer diversity / proven dev history
+  // to land in the 80+ zone.
+  let score = 40;
   const signals   = [];
   const penalties = [];
 
-  // v5: tightened 2h → 1h — tokens over 1h should have some verifiable data
   const isVeryNew = (candidate.pairAgeHours ?? 99) < 1;
 
   if (candidate.mintAuthority === 0) {
-    score += 20; signals.push('Mint authority revoked');
+    score += 12; signals.push('Mint authority revoked');
   } else if (candidate.mintAuthority === 1) {
     score -= 25; penalties.push('Mint authority ACTIVE — dev can inflate supply');
   } else {
@@ -200,26 +203,27 @@ export function scoreLaunchQuality(candidate) {
   }
 
   if (candidate.freezeAuthority === 0) {
-    score += 15; signals.push('Freeze authority revoked');
+    score += 10; signals.push('Freeze authority revoked');
   } else if (candidate.freezeAuthority === 1) {
     score -= 20; penalties.push('Freeze authority ACTIVE');
   }
 
   if (candidate.lpLocked === 1) {
-    score += 20; signals.push('LP locked/burned');
+    score += 15; signals.push('LP locked/burned');
   } else if (candidate.lpLocked === 0) {
     score -= 20; penalties.push('LP NOT locked — rug pull risk');
   } else {
     if (!isVeryNew) { score -= 5; penalties.push('LP lock status unverified'); }
   }
 
-  // v5: Age bonuses modestly reduced — freshness is a signal, not a substitute
+  // Age: freshness on its own is NOT a meaningful gem signal. Trimmed bonuses.
+  // A 4-min-old coin with no other signals shouldn't get +6 just for being new.
   const ageHours = candidate.pairAgeHours ?? null;
   if (ageHours !== null) {
-    if      (ageHours < 0.083) { score += 6;  signals.push('Very fresh — under 5 minutes'); }
-    else if (ageHours < 0.5)   { score += 10; signals.push(`Fresh pair (${(ageHours * 60).toFixed(0)}min)`); }
-    else if (ageHours < 2)     { score += 7;  signals.push(`Young pair (${ageHours.toFixed(1)}h)`); }
-    else if (ageHours < 6)     { score += 3;  signals.push(`Established pair (${ageHours.toFixed(1)}h)`); }
+    if      (ageHours < 0.083) { score += 2;  signals.push('Very fresh — under 5 minutes'); } // was +6
+    else if (ageHours < 0.5)   { score += 6;  signals.push(`Fresh pair (${(ageHours * 60).toFixed(0)}min)`); } // was +10
+    else if (ageHours < 2)     { score += 4;  signals.push(`Young pair (${ageHours.toFixed(1)}h)`); } // was +7
+    else if (ageHours < 6)     { score += 2;  signals.push(`Established pair (${ageHours.toFixed(1)}h)`); } // was +3
     else if (ageHours > 24)    { score -= 15; penalties.push(`Old pair (${ageHours.toFixed(0)}h)`); }
     else if (ageHours > 6)     { score -= 8;  penalties.push(`Mature pair (${ageHours.toFixed(1)}h)`); }
   } else {
@@ -247,14 +251,20 @@ export function scoreLaunchQuality(candidate) {
     score -= 5; penalties.push('Helius unavailable');
   }
 
+  // Unique buyer ratio — only a meaningful signal when there's enough sample.
+  // 100% unique on a 4-min coin with 3 buyers is NOT diversity, it's noise.
+  // Require at least 15 unique buyers for the bonus to count.
   const ubr = candidate.launchUniqueBuyerRatio;
+  const ubrCount = candidate.launchUniqueBuyers ?? candidate.launch_unique_buyers ?? 0;
   const ageHrs = candidate.pairAgeHours ?? 99;
   if (ubr != null) {
-    if      (ubr >= 0.75) { score += 12; signals.push(`Excellent buyer diversity: ${(ubr*100).toFixed(0)}% unique`); }
-    else if (ubr >= 0.55) { score += 6;  signals.push(`Good buyer diversity: ${(ubr*100).toFixed(0)}% unique`); }
-    else if (ubr < 0.35) {
-      // Don't punish low unique-buyer ratio on a brand-new pair that hasn't
-      // had time to diversify yet (< 15 minutes). Just note it.
+    if (ubrCount >= 15 && ubr >= 0.75) {
+      score += 8; signals.push(`Excellent buyer diversity: ${(ubr*100).toFixed(0)}% unique (${ubrCount} buyers)`);
+    } else if (ubrCount >= 15 && ubr >= 0.55) {
+      score += 4; signals.push(`Good buyer diversity: ${(ubr*100).toFixed(0)}% unique (${ubrCount} buyers)`);
+    } else if (ubrCount < 15 && ubr >= 0.75) {
+      signals.push(`Early diversity (${ubrCount} buyers) — bonus withheld until 15+ unique`);
+    } else if (ubr < 0.35) {
       if (ageHrs < 0.25) {
         signals.push(`Early buyer sample — only ${(ubr*100).toFixed(0)}% unique so far (too new to judge)`);
       } else {
@@ -271,20 +281,21 @@ export function scoreLaunchQuality(candidate) {
 // differentiator between a real early gem and manufactured momentum.
 
 export function scoreWalletStructure(candidate) {
-  let score = 50;
+  // Tightened: baseline 50 → 42, positive bonuses reduced ~30%. Basic rug
+  // safety (low dev %, spread top10, no snipers) shouldn't by itself push
+  // past 80 — that range is reserved for coins where we ALSO see smart
+  // money entering or real on-chain wallet signals.
+  let score = 42;
   const signals   = [];
   const penalties = [];
 
-  // v6: leniency mode — dev %, top10, bundle, snipers, insider penalties
-  // all significantly reduced so we get posts flowing + can study outcomes.
-  // We'll tighten back once we have real WIN/LOSS data per band.
   const isVeryNew = (candidate.pairAgeHours ?? 99) < 1;
 
   const devPct = candidate.devWalletPct ?? null;
   if (devPct !== null) {
-    if      (devPct < 1)  { score += 18; signals.push(`Dev wallet ${devPct.toFixed(2)}% — extremely clean`); }
-    else if (devPct < 3)  { score += 13; signals.push(`Dev wallet ${devPct.toFixed(1)}% — healthy`); }
-    else if (devPct < 5)  { score += 7;  signals.push(`Dev wallet ${devPct.toFixed(1)}% — acceptable`); }
+    if      (devPct < 1)  { score += 12; signals.push(`Dev wallet ${devPct.toFixed(2)}% — extremely clean`); }
+    else if (devPct < 3)  { score += 8;  signals.push(`Dev wallet ${devPct.toFixed(1)}% — healthy`); }
+    else if (devPct < 5)  { score += 4;  signals.push(`Dev wallet ${devPct.toFixed(1)}% — acceptable`); }
     else if (devPct < 10) { score -= 5;  penalties.push(`Dev wallet ${devPct.toFixed(1)}% — elevated`); }     // was -10
     else if (devPct < 20) { score -= 12; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — dangerous`); }   // was -25
     else if (devPct < 50) { score -= 22; penalties.push(`Dev wallet ${devPct.toFixed(1)}% — high insider risk`); } // was -40
@@ -296,9 +307,9 @@ export function scoreWalletStructure(candidate) {
 
   const top10 = candidate.top10HolderPct ?? null;
   if (top10 !== null) {
-    if      (top10 < 15)  { score += 18; signals.push(`Top10 holders ${top10.toFixed(1)}% — excellent`); }
-    else if (top10 < 25)  { score += 11; signals.push(`Top10 holders ${top10.toFixed(1)}% — healthy spread`); }
-    else if (top10 < 35)  { score += 4;  signals.push(`Top10 holders ${top10.toFixed(1)}% — moderate`); }
+    if      (top10 < 15)  { score += 12; signals.push(`Top10 holders ${top10.toFixed(1)}% — excellent`); }
+    else if (top10 < 25)  { score += 7;  signals.push(`Top10 holders ${top10.toFixed(1)}% — healthy spread`); }
+    else if (top10 < 35)  { score += 2;  signals.push(`Top10 holders ${top10.toFixed(1)}% — moderate`); }
     else if (top10 < 50)  { score -= 5;  penalties.push(`Top10 holders ${top10.toFixed(1)}% — concentrated`); }  // was -10
     else if (top10 < 65)  { score -= 12; penalties.push(`Top10 holders ${top10.toFixed(1)}% — high`); }          // was -25
     else if (top10 < 85)  { score -= 20; penalties.push(`Top10 holders ${top10.toFixed(1)}% — very concentrated`); }
@@ -309,8 +320,8 @@ export function scoreWalletStructure(candidate) {
 
   const bundle = candidate.bundleRisk ?? null;
   if (bundle && bundle !== 'PENDING') {
-    if      (bundle === 'NONE')   { score += 13; signals.push('No bundle activity'); }
-    else if (bundle === 'LOW')    { score += 4;  signals.push('Low bundle activity'); }
+    if      (bundle === 'NONE')   { score += 8;  signals.push('No bundle activity'); }
+    else if (bundle === 'LOW')    { score += 2;  signals.push('Low bundle activity'); }
     else if (bundle === 'MEDIUM') { score -= 8;  penalties.push('Medium bundle risk'); }   // was -15
     else if (bundle === 'HIGH')   { score -= 18; penalties.push('High bundle risk'); }     // was -30
     else if (bundle === 'SEVERE') { score -= 28; penalties.push('SEVERE bundle risk'); }   // was -45
@@ -322,8 +333,10 @@ export function scoreWalletStructure(candidate) {
 
   const snipers = candidate.sniperWalletCount ?? null;
   if (snipers !== null) {
-    if      (snipers === 0)  { score += 9;  signals.push('No sniper wallets'); }
-    else if (snipers <= 3)   { score += 2;  signals.push(`${snipers} sniper(s) — minor`); }
+    // Zero-sniper bonus withheld for brand-new coins — nobody's had time to snipe yet
+    if      (snipers === 0 && !isVeryNew) { score += 5;  signals.push('No sniper wallets (established)'); }
+    else if (snipers === 0)               { signals.push('No snipers yet (too early to confirm)'); }
+    else if (snipers <= 3)                { score += 1;  signals.push(`${snipers} sniper(s) — minor`); }
     else if (snipers <= 10)  { score -= 5;  penalties.push(`${snipers} sniper wallets`); }          // was -10
     else if (snipers <= 25)  { score -= 12; penalties.push(`${snipers} sniper wallets — heavy`); }  // was -20
     else                     { score -= 20; penalties.push(`${snipers} sniper wallets — extreme`); } // was -35

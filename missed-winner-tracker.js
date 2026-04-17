@@ -437,27 +437,32 @@ export async function runOutcomeTracker(dbInstance) {
         }
         console.log(`[outcome-tracker] ✅ Auto-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)`);
       } else if (finalCheckDue && !reachedWinBar) {
-        // 6h passed and never hit 1.5x → LOSS
+        // 6h passed and never hit 1.5x.
+        // Small drawdown (within 10%) → NEUTRAL. Bigger drawdown → LOSS.
+        // A coin that's within ±10% of entry at 6h isn't a real loss,
+        // it's dead money — doesn't punish the win rate.
+        const finalOutcome = Math.abs(result.pctChange) <= 10 ? 'NEUTRAL' : 'LOSS';
+        const emoji = finalOutcome === 'NEUTRAL' ? '➖' : '❌';
         dbInstance.prepare(`
           UPDATE calls SET
-            outcome = 'LOSS',
+            outcome = ?,
             pct_change_1h = ?,
             auto_resolved = 1,
             auto_resolved_at = datetime('now'),
             outcome_source = 'AUTO',
             outcome_set_at = datetime('now')
           WHERE id = ?
-        `).run(result.pctChange, call.id);
+        `).run(finalOutcome, result.pctChange, call.id);
         if (ca) {
           try {
             dbInstance.prepare(`
               UPDATE audit_archive
-              SET outcome = 'LOSS', outcome_locked_at = datetime('now')
+              SET outcome = ?, outcome_locked_at = datetime('now')
               WHERE contract_address = ? AND (outcome IS NULL OR outcome = 'PENDING')
-            `).run(ca);
+            `).run(finalOutcome, ca);
           } catch {}
         }
-        console.log(`[outcome-tracker] ❌ Auto-LOSS: $${call.token} peak=${peakNow.toFixed(2)}x after 6h (current ${result.pctChange.toFixed(0)}%)`);
+        console.log(`[outcome-tracker] ${emoji} Auto-${finalOutcome}: $${call.token} peak=${peakNow.toFixed(2)}x after 6h (current ${result.pctChange.toFixed(0)}%)`);
       } else {
         // Still in observation window — log without resolving
         const phase = minutesSince < 60 ? 'pre-1h' : (minutesSince < 360 ? '1h-6h watch' : '???');
