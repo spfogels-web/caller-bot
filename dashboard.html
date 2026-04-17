@@ -7755,9 +7755,18 @@ async function loadWalletTiles(){
       .reduce((a,b)=>Math.max(a,b),0);
     setText('wsStatLast', latest > 0 ? timeAgo(new Date(latest).toISOString()) : 'never');
 
-    // Category quick-counts
+    // Category quick-counts — ALWAYS use server-side GROUP BY category so the
+    // chips match the top tiles. Counting from _walletTilesAll under-reports
+    // when the DB has more rows than the fetch limit (we only pull top 1000
+    // by score, so low-scored WINNERs beyond the slice were missing from the
+    // chip counts while the top tiles used the real SQL count of 55).
     const allCounts = { '': total, WINNER:0, SMART_MONEY:0, MOMENTUM:0, SNIPER:0, CLUSTER:0, NEUTRAL:0 };
-    _walletTilesAll.forEach(w => { const k = w.category || 'NEUTRAL'; allCounts[k] = (allCounts[k]||0)+1; });
+    cats.forEach(c => { if (c.category) allCounts[c.category] = c.count; });
+    // Derive NEUTRAL if the server didn't include it (it usually does)
+    if (!allCounts.NEUTRAL) {
+      const known = (allCounts.WINNER||0) + (allCounts.SMART_MONEY||0) + (allCounts.MOMENTUM||0) + (allCounts.SNIPER||0) + (allCounts.CLUSTER||0);
+      allCounts.NEUTRAL = Math.max(0, total - known);
+    }
     setText('wtCnt-all', total);
     ['WINNER','SMART_MONEY','MOMENTUM','SNIPER','CLUSTER'].forEach(k => setText('wtCnt-'+k, allCounts[k] || 0));
     setText('wtCountBadge', total + ' wallets');
