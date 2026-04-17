@@ -3190,7 +3190,7 @@ body::before {
       <!-- ═══ LIVE SCORING CONTROLS — edit & save without redeploy ═══ -->
       <div class="card scoring-config-card" style="margin-bottom:14px;border:1px solid rgba(255,215,64,0.25);background:linear-gradient(135deg,rgba(255,215,64,0.03),rgba(255,109,0,0.03))">
         <div class="card-hdr" style="border-bottom:1px solid rgba(255,215,64,0.2)">
-          <div class="card-title"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(255,215,64,0.8))">⚙️</span>SCORING CONTROLS — edit any value · save applies live</div>
+          <div class="card-title" style="color:#ffffff;font-size:13px"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(255,215,64,0.8))">⚙️</span>SCORING CONTROLS — edit any value · save applies live</div>
           <div style="display:flex;gap:6px">
             <button type="button" class="scoringResetBtn" onclick="resetScoringConfig(this)" style="background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3);border-radius:4px;padding:5px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px">↺ RESET</button>
             <button type="button" class="scoringSaveBtn" onclick="saveScoringConfig(this)" style="background:linear-gradient(135deg,rgba(255,215,64,0.2),rgba(255,109,0,0.15));border:1px solid rgba(255,215,64,0.45);color:var(--gold);border-radius:4px;padding:5px 12px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">💾 SAVE</button>
@@ -3499,230 +3499,6 @@ body::before {
     </div><!-- /candidates -->
 
 
-    <div class="tab-panel active" id="tab-overview">
-      <!-- v8 Intelligence Row -->
-      <div class="g6" style="margin-bottom:14px" id="v8Row">
-        <div class="stat-tile" style="--tile-color:var(--cyan)"><div class="tile-label">HELIUS STREAM</div><div class="tile-value" style="font-size:14px" id="v8HeliusStatus">—</div><div class="tile-sub">detection speed</div></div>
-        <div class="stat-tile" style="--tile-color:var(--purple)"><div class="tile-label">WALLET DB</div><div class="tile-value" id="v8WalletDbSize">—</div><div class="tile-sub" id="v8DbFresh">loading</div></div>
-        <div class="stat-tile" style="--tile-color:var(--green)"><div class="tile-label">EVALUATIONS</div><div class="tile-value" id="statEvaluated">—</div><div class="tile-sub" id="statEval24h">—</div></div>
-        <div class="stat-tile" style="--tile-color:var(--gold)"><div class="tile-label">WIN RATE</div><div class="tile-value" id="statWinRate">—</div><div class="tile-sub" id="statWL">—</div></div>
-        <div class="stat-tile" style="--tile-color:var(--orange)"><div class="tile-label">MISSED 3X+</div><div class="tile-value" id="v8Missed">—</div><div class="tile-sub">last 24h</div></div>
-        <div class="stat-tile" style="--tile-color:var(--purple);cursor:pointer" onclick="switchTab('ai')" title="View AI Brain">
-  <div class="tile-label">🧠 AI RANKING</div>
-  <div style="display:flex;align-items:center;gap:6px;margin:4px 0">
-    <div class="tile-value" style="font-size:18px;color:var(--purple)" id="aiBrainRank">—</div>
-    <div style="flex:1">
-      <div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-bottom:2px" id="aiBrainLabel">INITIALIZING</div>
-      <div style="height:6px;background:rgba(0,0,0,0.4);border-radius:3px;overflow:hidden">
-        <div id="aiBrainBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--purple),var(--cyan));border-radius:3px;transition:width 0.8s ease"></div>
-      </div>
-    </div>
-  </div>
-  <div class="tile-sub" id="v8OpenAI" style="font-size:7px">GPT-4o + Claude</div>
-</div>
-      </div>
-
-      <!-- ═══ CALL OUTCOME SUMMARY — at a glance ═══ -->
-      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px" class="ov-call-summary">
-        <div class="stat-tile" style="--tile-color:var(--cyan);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">TOTAL CALLS</div><div class="tile-value" style="color:var(--cyan)" id="ovCallsTotal">—</div><div class="tile-sub">all posted</div></div>
-        <div class="stat-tile" style="--tile-color:var(--green);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-value" style="color:var(--green)" id="ovCallsWins">—</div><div class="tile-sub" id="ovCallsWinsSub">—</div></div>
-        <div class="stat-tile" style="--tile-color:var(--red);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-value" style="color:var(--red)" id="ovCallsLosses">—</div><div class="tile-sub" id="ovCallsLossesSub">—</div></div>
-        <div class="stat-tile" style="--tile-color:#18ffff;cursor:pointer" onclick="switchTab('calls')"><div class="tile-label" style="color:#18ffff">➖ NEUTRAL</div><div class="tile-value" style="color:#18ffff" id="ovCallsNeutral">—</div><div class="tile-sub">broke even</div></div>
-        <div class="stat-tile" style="--tile-color:var(--text3);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">⏳ PENDING</div><div class="tile-value" id="ovCallsPending">—</div><div class="tile-sub">unresolved</div></div>
-      </div>
-
-      <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
-      <div class="card ai-learn-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(68,138,255,0.04),rgba(156,39,176,0.04));border:1px solid rgba(156,39,176,0.25)">
-        <div class="card-hdr" style="border-bottom:1px solid rgba(156,39,176,0.2)">
-          <div class="card-title"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(156,39,176,0.8))">🧠</span>AI LEARNING DASHBOARD — trend vs snapshot</div>
-          <div class="aiLearnTrendPill" style="font-family:var(--mono);font-size:9px;padding:3px 10px;border-radius:4px;background:rgba(136,153,187,0.15);color:var(--text3);letter-spacing:1.5px;font-weight:700">— CALIBRATING —</div>
-        </div>
-        <div class="card-body" style="padding:14px">
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">
-            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(0,230,118,0.15);border-radius:8px;padding:10px">
-              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">📈 WIN RATE TREND</div>
-              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
-                <span class="aiLearn7d" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--green)">—</span>
-                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">last 7d</span>
-              </div>
-              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
-                vs 30d: <b class="aiLearn30d" style="color:var(--text2)">—</b>
-                <span class="aiLearnDelta" style="margin-left:4px">—</span>
-              </div>
-            </div>
-            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,215,64,0.15);border-radius:8px;padding:10px">
-              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">💎 AVG PEAK THIS WEEK</div>
-              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
-                <span class="aiLearnPeakNow" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--gold)">—</span>
-                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" class="aiLearnPeakN"></span>
-              </div>
-              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
-                vs last week: <b class="aiLearnPeakPrev" style="color:var(--text2)">—</b>
-                <span class="aiLearnPeakDelta" style="margin-left:4px">—</span>
-              </div>
-            </div>
-            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(68,138,255,0.15);border-radius:8px;padding:10px">
-              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">🤝 AI CONSENSUS ACCURACY</div>
-              <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">
-                <span class="aiLearnConsensus" style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--blue)">—</span>
-                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">win rate</span>
-              </div>
-              <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">
-                when Claude + GPT-4o both said POST (<b class="aiLearnConsensusN" style="color:var(--text2)">0</b>)
-              </div>
-            </div>
-            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px">
-              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:6px">📊 RESOLUTION MIX</div>
-              <div style="font-family:var(--mono);font-size:9px;line-height:1.7">
-                <div>Resolved: <b class="aiLearnResolved" style="color:var(--text1)">—</b> of <b class="aiLearnTotal" style="color:var(--text2)">—</b></div>
-                <div>👤 Manual: <b class="aiLearnManual" style="color:var(--purple)">—</b> · 🤖 Auto: <b class="aiLearnAuto" style="color:var(--cyan)">—</b></div>
-                <div>💎 Peak ≥2x inferred: <b class="aiLearnImplicit" style="color:var(--gold)">—</b></div>
-              </div>
-            </div>
-          </div>
-          <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05)">
-            <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:8px">🎯 SCORE BUCKET ACCURACY — are higher scores actually winning more?</div>
-            <div class="aiLearnBuckets" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ═══ LIVE SCORING CONTROLS — edit & save without redeploy ═══ -->
-      <div class="card scoring-config-card" style="margin-bottom:14px;border:1px solid rgba(255,215,64,0.25);background:linear-gradient(135deg,rgba(255,215,64,0.03),rgba(255,109,0,0.03))">
-        <div class="card-hdr" style="border-bottom:1px solid rgba(255,215,64,0.2)">
-          <div class="card-title"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(255,215,64,0.8))">⚙️</span>SCORING CONTROLS — edit any value · save applies live</div>
-          <div style="display:flex;gap:6px">
-            <button type="button" class="scoringResetBtn" onclick="resetScoringConfig(this)" style="background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3);border-radius:4px;padding:5px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px">↺ RESET</button>
-            <button type="button" class="scoringSaveBtn" onclick="saveScoringConfig(this)" style="background:linear-gradient(135deg,rgba(255,215,64,0.2),rgba(255,109,0,0.15));border:1px solid rgba(255,215,64,0.45);color:var(--gold);border-radius:4px;padding:5px 12px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">💾 SAVE</button>
-          </div>
-        </div>
-        <div class="card-body" style="padding:14px">
-          <div class="scoringGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px"></div>
-          <div class="scoringStatus" style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:10px;min-height:12px"></div>
-        </div>
-      </div>
-
-      <div class="overview-grid">
-        <div class="overview-main">
-          <!-- Recent Calls Thesis Cards -->
-          <div class="card">
-            <div class="card-hdr">
-              <div class="card-title"><span class="icon">📋</span>RECENT CALLS — WITH THESIS & TRADE LEVELS</div>
-              <button onclick="switchTab('calls')" style="background:transparent;border:1px solid var(--border2);color:var(--text3);border-radius:4px;padding:4px 12px;font-family:var(--mono);font-size:9px;cursor:pointer;letter-spacing:1px">VIEW ALL →</button>
-            </div>
-            <div class="card-body" style="padding:12px">
-              <div class="calls-grid" id="recentCallsCards">
-                <div class="spinner"><div class="spin-dot" style="background:var(--green)"></div><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="overview-side">
-          <!-- Market Regime -->
-          <div class="card">
-            <div class="card-hdr"><div class="card-title"><span class="icon">🌡</span>MARKET REGIME</div><span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="regimeAge">—</span></div>
-            <div class="card-body">
-              <div class="regime-big" id="regimeDisplay">—</div>
-              <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:12px" id="regimeConf">—</div>
-              <div style="display:flex;flex-direction:column;gap:6px;font-family:var(--mono);font-size:9px">
-                <div style="display:flex;justify-content:space-between"><span style="color:var(--text3)">Activity</span><span id="regimeActivity">—</span></div>
-                <div style="display:flex;justify-content:space-between"><span style="color:var(--text3)">Narrative</span><span id="regimeNarrative">—</span></div>
-                <div style="display:flex;justify-content:space-between"><span style="color:var(--text3)">Launches</span><span id="regimeLaunches">—</span></div>
-              </div>
-              <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
-                <div style="font-family:var(--mono);font-size:8px;letter-spacing:2px;color:var(--text3);margin-bottom:6px">SCORE ADJUSTMENTS</div>
-                <div id="regimeAdj" style="font-family:var(--mono);font-size:9px;display:flex;flex-direction:column;gap:4px"></div>
-              </div>
-            </div>
-          </div>
-
-          <!-- AI Status mini -->
-          <div class="card">
-            <div class="card-hdr"><div class="card-title"><span class="icon">🧠</span>AI OS STATUS</div><span class="status-chip chip-cyan" style="font-size:8px;padding:2px 8px" id="aiOsStatusChip">ALWAYS ON</span></div>
-            <div class="card-body" style="padding:10px 14px">
-              <div class="intel-row">
-                <div class="intel-tile"><div class="intel-label">Total Calls</div><div class="intel-value" style="color:var(--green)" id="aiTotalCalls">—</div></div>
-                <div class="intel-tile"><div class="intel-label">Resolved</div><div class="intel-value" style="color:var(--cyan)" id="aiResolved">—</div></div>
-                <div class="intel-tile"><div class="intel-label">FT Model</div><div class="intel-value" style="font-size:12px" id="aiFtStatus">—</div></div>
-              </div>
-              <div style="margin-top:10px">
-                <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:5px"><span>WIN RATE TREND</span><span id="aiWinRatePct" style="color:var(--green)">—</span></div>
-                <div class="prog-track"><div class="prog-fill" id="aiWinBar" style="background:linear-gradient(90deg,var(--green),var(--cyan));width:0%"></div></div>
-              </div>
-              <div style="margin-top:10px;font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.5" id="aiStatusMsg">In-context learning active — evaluating every scanned token with full outcome history.</div>
-            </div>
-          </div>
-
-          <!-- AI Brain Intelligence Rating -->
-          <div class="card" style="border-color:rgba(68,138,255,0.3)">
-            <div class="card-hdr" style="background:rgba(68,138,255,0.04)">
-              <div class="card-title" style="color:var(--blue)"><span class="icon">🧠</span>AI INTELLIGENCE RATING</div>
-              <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" id="brainRatingLabel">—</span>
-            </div>
-            <div class="card-body" style="padding:12px 14px">
-              <!-- Brain SVG + ring -->
-              <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">
-                <div style="position:relative;width:72px;height:72px;flex-shrink:0">
-                  <svg viewBox="0 0 72 72" width="72" height="72" style="position:absolute;inset:0">
-                    <circle cx="36" cy="36" r="32" fill="none" stroke="rgba(68,138,255,0.15)" stroke-width="6"/>
-                    <circle cx="36" cy="36" r="32" fill="none" stroke="url(#brainGrad)" stroke-width="6"
-                      stroke-linecap="round" stroke-dasharray="201" id="brainRingArc"
-                      stroke-dashoffset="201" transform="rotate(-90 36 36)" style="transition:stroke-dashoffset 1.2s ease"/>
-                    <defs>
-                      <linearGradient id="brainGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                        <stop offset="0%" stop-color="#448aff"/>
-                        <stop offset="100%" stop-color="#e040fb"/>
-                      </linearGradient>
-                    </defs>
-                  </svg>
-                  <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:26px">🧠</div>
-                </div>
-                <div style="flex:1">
-                  <div style="font-family:var(--mono);font-size:22px;font-weight:900;color:var(--blue)" id="brainScore">—</div>
-                  <div style="font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:1px;margin-top:2px" id="brainClass" style="color:var(--blue)">—</div>
-                  <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:4px" id="brainDesc">—</div>
-                </div>
-              </div>
-              <!-- Growth bars -->
-              <div style="display:flex;flex-direction:column;gap:5px">
-                <div>
-                  <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px">
-                    <span>WIN INTELLIGENCE</span><span id="brainWinPct" style="color:var(--green)">—</span>
-                  </div>
-                  <div class="prog-track"><div class="prog-fill" id="brainWinBar" style="background:linear-gradient(90deg,var(--green),var(--cyan));width:0%;transition:width 1s ease"></div></div>
-                </div>
-                <div>
-                  <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px">
-                    <span>CALL EXPERIENCE</span><span id="brainExpPct" style="color:var(--blue)">—</span>
-                  </div>
-                  <div class="prog-track"><div class="prog-fill" id="brainExpBar" style="background:linear-gradient(90deg,var(--blue),var(--purple));width:0%;transition:width 1s ease"></div></div>
-                </div>
-                <div>
-                  <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px">
-                    <span>MEMORY DEPTH</span><span id="brainMemPct" style="color:var(--purple)">—</span>
-                  </div>
-                  <div class="prog-track"><div class="prog-fill" id="brainMemBar" style="background:linear-gradient(90deg,var(--purple),#ff6d00);width:0%;transition:width 1s ease"></div></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Quick queues -->
-          <div class="card">
-            <div class="card-hdr"><div class="card-title"><span class="icon">📊</span>QUEUE STATUS</div></div>
-            <div class="card-body" style="padding:8px 14px">
-              <div style="display:flex;flex-direction:column;gap:6px;font-family:var(--mono);font-size:10px">
-                <div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--text3)">Watchlist</span><span style="color:var(--gold);font-weight:700" id="qWatchlist">—</span></div>
-                <div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--text3)">Retest Queue</span><span style="color:var(--orange);font-weight:700" id="qRetest">—</span></div>
-                <div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--text3)">Calls Posted</span><span style="color:var(--green);font-weight:700" id="qPosted">—</span></div>
-                <div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--text3)">Scan Interval</span><span id="qInterval">—</span></div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div><!-- /overview -->
 
     <!-- PROMOTED TAB — Full promoted feed -->
     <div class="tab-panel" id="tab-analytics">
@@ -4869,15 +4645,15 @@ async function loadScoringConfig(){
       const isModified = cur[m.key] != null && cur[m.key] !== def[m.key];
       const border = isModified ? 'rgba(255,215,64,0.55)' : 'rgba(255,255,255,0.1)';
       const modTag = isModified ? '<span style="font-family:var(--mono);font-size:7px;color:var(--gold);margin-left:5px" title="Modified from default ' + def[m.key] + '">✎</span>' : '';
-      return `<div style="background:rgba(0,0,0,0.3);border:1px solid ${border};border-radius:6px;padding:8px 10px">
-        <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-bottom:4px;display:flex;justify-content:space-between">
+      return `<div style="background:rgba(0,0,0,0.35);border:1px solid ${border};border-radius:6px;padding:10px 12px">
+        <div style="font-family:var(--mono);font-size:10px;color:#ffffff;letter-spacing:1px;margin-bottom:6px;display:flex;justify-content:space-between;font-weight:700">
           <span>${m.label}${modTag}</span>
-          <span style="color:var(--text3)" title="Default: ${def[m.key]}">def ${def[m.key]}</span>
+          <span style="color:var(--text3);font-weight:400" title="Default: ${def[m.key]}">def ${def[m.key]}</span>
         </div>
         <input type="number" step="${m.step}" data-cfg-key="${m.key}" value="${v}"
           title="${m.help}"
-          style="width:100%;background:rgba(0,0,0,0.5);border:1px solid var(--border2);border-radius:4px;color:${m.col};font-family:'Orbitron',var(--mono);font-size:16px;font-weight:900;padding:5px 8px;outline:none;text-align:center" />
-        <div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:4px;line-height:1.3">${m.help}</div>
+          style="width:100%;background:rgba(0,0,0,0.5);border:1px solid var(--border2);border-radius:4px;color:${m.col};font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;padding:8px 10px;outline:none;text-align:center" />
+        <div style="font-family:var(--mono);font-size:10px;color:#ffffff;margin-top:6px;line-height:1.4;font-weight:500">${m.help}</div>
       </div>`;
     }).join('');
     grids.forEach(g => { g.innerHTML = html; });
