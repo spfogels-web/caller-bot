@@ -975,6 +975,38 @@ function persistAIConfig() {
     dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('ai_config_overrides', ?)`).run(JSON.stringify(AI_CONFIG_OVERRIDES));
   } catch {}
 }
+
+// ─── Runtime Scoring Config ───────────────────────────────────────────────
+// User-editable scoring knobs persisted to kv_store. Loaded once at boot
+// and whenever a POST /api/config/scoring lands. Every hot-path site below
+// that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
+const SCORING_CONFIG_DEFAULTS = {
+  minScoreToPost:         50,   // hard floor for AUTO_POST
+  sweetSpotBonus:          4,   // $13K-$40K MCap
+  secondaryBonus:          2,   // $40K-$80K MCap
+  preLaunchBonus:          6,   // dev funded by CEX within 6h
+  crossChainBonus:         4,   // matching ETH/Base token mooning
+  devFingerprintCap:       3,   // max positive delta from dev history
+  noSignalCap:            65,   // structure-only coins capped here
+  rugGuardMinScore:       60,   // $13K-$17.5K requires this score
+  consensusOverrideScore: 65,   // single-AI override floor
+  winPeakMultiple:         1.5, // peak X to lock WIN
+  neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
+};
+let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
+try {
+  const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scoring_config'`).get();
+  if (row?.value) {
+    SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS, ...JSON.parse(row.value) };
+    console.log('[config] Restored SCORING_CONFIG from DB:', JSON.stringify(SCORING_CONFIG));
+  }
+} catch (err) { console.warn('[config] Failed to restore scoring config:', err.message); }
+
+function persistScoringConfig() {
+  try {
+    dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoring_config', ?)`).run(JSON.stringify(SCORING_CONFIG));
+  } catch {}
+}
 function getAIConfigSummary() {
   const overrides = Object.keys(AI_CONFIG_OVERRIDES).length;
   return overrides > 0
@@ -2201,14 +2233,16 @@ async function processCandidate(candidate, isRescan = false) {
     const mcap = enrichedCandidate.marketCap ?? 0;
     let mcapTier = null;
     if (mcap >= 13_000 && mcap <= 40_000) {
-      scoreResult.score = Math.min(100, scoreResult.score + 4);
+      const b = SCORING_CONFIG.sweetSpotBonus;
+      scoreResult.score = Math.min(100, scoreResult.score + b);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push('+4 sweet-spot MCap ($13K-$40K)');
+      scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($13K-$40K)`);
       mcapTier = 'SWEET_SPOT';
     } else if (mcap > 40_000 && mcap <= 80_000) {
-      scoreResult.score = Math.min(100, scoreResult.score + 2);
+      const b = SCORING_CONFIG.secondaryBonus;
+      scoreResult.score = Math.min(100, scoreResult.score + b);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push('+2 secondary MCap ($40K-$80K)');
+      scoreResult.signals.launch.push(`+${b} secondary MCap ($40K-$80K)`);
       mcapTier = 'SECONDARY';
     } else if (mcap > 0 && mcap < 13_000) {
       mcapTier = 'PRE_SWEETSPOT';
@@ -2225,7 +2259,7 @@ async function processCandidate(candidate, isRescan = false) {
         if (adj.delta !== 0) {
           // Cap dev fingerprint bonus at +3 (penalties left uncapped — RUGGER
           // should still hurt as much as the model says).
-          const cappedDelta = adj.delta > 0 ? Math.min(adj.delta, 3) : adj.delta;
+          const cappedDelta = adj.delta > 0 ? Math.min(adj.delta, SCORING_CONFIG.devFingerprintCap) : adj.delta;
           scoreResult.score = Math.max(0, Math.min(100, scoreResult.score + cappedDelta));
           scoreResult.devFingerprint = { ...fp, adjustment: { ...adj, delta: cappedDelta } };
           (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
@@ -2242,7 +2276,7 @@ async function processCandidate(candidate, isRescan = false) {
         const { isPreLaunchSuspect, markSuspectConsumed } = await import('./pre-launch-detector.js');
         const suspect = isPreLaunchSuspect(deployer, dbInstance);
         if (suspect) {
-          scoreResult.score = Math.min(100, scoreResult.score + 6);
+          scoreResult.score = Math.min(100, scoreResult.score + SCORING_CONFIG.preLaunchBonus);
           scoreResult.preLaunchPredicted = true;
           (scoreResult.signals = scoreResult.signals || {}).launch =
             [...(scoreResult.signals.launch || []),
@@ -2257,7 +2291,7 @@ async function processCandidate(candidate, isRescan = false) {
       const { getCrossChainMatch } = await import('./cross-chain-tracker.js');
       const match = getCrossChainMatch(ca, dbInstance);
       if (match && match.match_confidence >= 0.85) {
-        scoreResult.score = Math.min(100, scoreResult.score + 4);
+        scoreResult.score = Math.min(100, scoreResult.score + SCORING_CONFIG.crossChainBonus);
         scoreResult.crossChainMatch = match;
         (scoreResult.signals = scoreResult.signals || {}).social =
           [...(scoreResult.signals.social || []),
@@ -2286,12 +2320,13 @@ async function processCandidate(candidate, isRescan = false) {
                         || enrichedCandidate._smartMoney
                         || scoreResult.preLaunchPredicted
                         || scoreResult.crossChainMatch;
-    if (!hasWalletIntel && scoreResult.score > 65) {
+    const CAP = SCORING_CONFIG.noSignalCap;
+    if (!hasWalletIntel && scoreResult.score > CAP) {
       const prior = scoreResult.score;
-      scoreResult.score = 65;
+      scoreResult.score = CAP;
       (scoreResult.penalties = scoreResult.penalties || {}).wallet = scoreResult.penalties.wallet || [];
-      scoreResult.penalties.wallet.push(`-${prior - 65} NO_ALPHA_SIGNAL cap — no smart money, no wallet intel, no pre-launch/cross-chain hit`);
-      console.log(`[auto-caller] 🚧 $${enrichedCandidate.token??ca.slice(0,6)} capped at 65 (was ${prior}) — structure-only, no alpha signal`);
+      scoreResult.penalties.wallet.push(`-${prior - CAP} NO_ALPHA_SIGNAL cap — no smart money, no wallet intel, no pre-launch/cross-chain hit`);
+      console.log(`[auto-caller] 🚧 $${enrichedCandidate.token??ca.slice(0,6)} capped at ${CAP} (was ${prior}) — structure-only, no alpha signal`);
     }
 
     let similarity = {};
@@ -2511,7 +2546,7 @@ async function processCandidate(candidate, isRescan = false) {
       const claudeOK = verdict && (verdict.decision === 'AUTO_POST' || verdict.decision === 'POST');
       const openaiOK = openAIDecision && (openAIDecision.decision === 'POST' || openAIDecision.decision === 'PROMOTE');
       const bothAgree   = claudeOK && openaiOK;
-      const eitherAndScore = (claudeOK || openaiOK) && scoreResult.score >= 65;
+      const eitherAndScore = (claudeOK || openaiOK) && scoreResult.score >= SCORING_CONFIG.consensusOverrideScore;
 
       if (!bothAgree && !eitherAndScore) {
         const reason = `Claude=${verdict?.decision ?? 'none'} OpenAI=${openAIDecision?.decision ?? 'none'} score=${scoreResult.score}`;
@@ -2554,10 +2589,10 @@ async function processCandidate(candidate, isRescan = false) {
       finalDecision === 'AUTO_POST' &&
       isHighRiskBand &&
       !isClusterAlert &&
-      (scoreResult.score ?? 0) < 60
+      (scoreResult.score ?? 0) < SCORING_CONFIG.rugGuardMinScore
     ) {
-      logEvent('INFO', 'RUG_GUARD', `${enrichedCandidate.token ?? ca.slice(0,6)} mcap=${Math.round(mcapNow/1000)}K score=${scoreResult.score} < 60 → WATCHLIST (high-risk band guard)`);
-      console.log(`[auto-caller] 🛡  $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — $${Math.round(mcapNow/1000)}K in rug-risk band, score ${scoreResult.score} < 60`);
+      logEvent('INFO', 'RUG_GUARD', `${enrichedCandidate.token ?? ca.slice(0,6)} mcap=${Math.round(mcapNow/1000)}K score=${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore} → WATCHLIST (high-risk band guard)`);
+      console.log(`[auto-caller] 🛡  $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — $${Math.round(mcapNow/1000)}K in rug-risk band, score ${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore}`);
       finalDecision = 'WATCHLIST';
     }
 
@@ -3204,6 +3239,44 @@ app.get('/dashboard', (_req, res) => {
 // Returns trend deltas (7d vs 30d), score-bucket accuracy, AI consensus
 // accuracy, and peak-multiple trend. All treats peak_multiple >= 2 as an
 // implicit WIN so stats are meaningful before auto-tracker resolves outcomes.
+// ─── Scoring Config — dashboard editable knobs ───────────────────────────
+app.get('/api/config/scoring', (req, res) => {
+  setCors(res);
+  res.json({
+    ok: true,
+    defaults: SCORING_CONFIG_DEFAULTS,
+    current: SCORING_CONFIG,
+  });
+});
+app.post('/api/config/scoring', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const updates = req.body ?? {};
+    const allowed = Object.keys(SCORING_CONFIG_DEFAULTS);
+    const applied = {};
+    for (const key of allowed) {
+      if (updates[key] == null || updates[key] === '') continue;
+      const num = Number(updates[key]);
+      if (Number.isFinite(num)) {
+        SCORING_CONFIG[key] = num;
+        applied[key] = num;
+      }
+    }
+    persistScoringConfig();
+    logEvent('INFO', 'SCORING_CONFIG_UPDATED', JSON.stringify(applied));
+    console.log('[config] scoring updated:', applied);
+    res.json({ ok: true, applied, current: SCORING_CONFIG });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+// Reset all scoring knobs back to code defaults
+app.post('/api/config/scoring/reset', (req, res) => {
+  setCors(res);
+  SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
+  persistScoringConfig();
+  logEvent('INFO', 'SCORING_CONFIG_RESET', 'back to defaults');
+  res.json({ ok: true, current: SCORING_CONFIG });
+});
+
 app.get('/api/ai/learning-metrics', (req, res) => {
   setCors(res);
   try {

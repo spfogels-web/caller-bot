@@ -3187,6 +3187,21 @@ body::before {
         </div>
       </div>
 
+      <!-- ═══ LIVE SCORING CONTROLS — edit & save without redeploy ═══ -->
+      <div class="card scoring-config-card" style="margin-bottom:14px;border:1px solid rgba(255,215,64,0.25);background:linear-gradient(135deg,rgba(255,215,64,0.03),rgba(255,109,0,0.03))">
+        <div class="card-hdr" style="border-bottom:1px solid rgba(255,215,64,0.2)">
+          <div class="card-title"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(255,215,64,0.8))">⚙️</span>SCORING CONTROLS — edit any value · save applies live</div>
+          <div style="display:flex;gap:6px">
+            <button type="button" class="scoringResetBtn" onclick="resetScoringConfig(this)" style="background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3);border-radius:4px;padding:5px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px">↺ RESET</button>
+            <button type="button" class="scoringSaveBtn" onclick="saveScoringConfig(this)" style="background:linear-gradient(135deg,rgba(255,215,64,0.2),rgba(255,109,0,0.15));border:1px solid rgba(255,215,64,0.45);color:var(--gold);border-radius:4px;padding:5px 12px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">💾 SAVE</button>
+          </div>
+        </div>
+        <div class="card-body" style="padding:14px">
+          <div class="scoringGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px"></div>
+          <div class="scoringStatus" style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:10px;min-height:12px"></div>
+        </div>
+      </div>
+
       <div class="overview-grid">
         <div class="overview-main">
           <!-- Recent Calls Thesis Cards -->
@@ -3569,6 +3584,21 @@ body::before {
             <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:8px">🎯 SCORE BUCKET ACCURACY — are higher scores actually winning more?</div>
             <div class="aiLearnBuckets" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"></div>
           </div>
+        </div>
+      </div>
+
+      <!-- ═══ LIVE SCORING CONTROLS — edit & save without redeploy ═══ -->
+      <div class="card scoring-config-card" style="margin-bottom:14px;border:1px solid rgba(255,215,64,0.25);background:linear-gradient(135deg,rgba(255,215,64,0.03),rgba(255,109,0,0.03))">
+        <div class="card-hdr" style="border-bottom:1px solid rgba(255,215,64,0.2)">
+          <div class="card-title"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(255,215,64,0.8))">⚙️</span>SCORING CONTROLS — edit any value · save applies live</div>
+          <div style="display:flex;gap:6px">
+            <button type="button" class="scoringResetBtn" onclick="resetScoringConfig(this)" style="background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text3);border-radius:4px;padding:5px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px">↺ RESET</button>
+            <button type="button" class="scoringSaveBtn" onclick="saveScoringConfig(this)" style="background:linear-gradient(135deg,rgba(255,215,64,0.2),rgba(255,109,0,0.15));border:1px solid rgba(255,215,64,0.45);color:var(--gold);border-radius:4px;padding:5px 12px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">💾 SAVE</button>
+          </div>
+        </div>
+        <div class="card-body" style="padding:14px">
+          <div class="scoringGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px"></div>
+          <div class="scoringStatus" style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:10px;min-height:12px"></div>
         </div>
       </div>
 
@@ -4805,6 +4835,109 @@ async function loadOverview(){
   try { loadAILearningMetrics(); } catch {}
   // Call outcome summary row (Total / Wins / Losses / Neutral / Pending)
   try { updateOverviewCallSummary(); } catch {}
+  // Live scoring controls — keys to tune the system on the fly
+  try { loadScoringConfig(); } catch {}
+}
+
+// ── LIVE SCORING CONTROLS ─────────────────────────────────────────────
+// 11 editable knobs. Reads /api/config/scoring, renders fields, saves
+// changes back via POST. Effective immediately on next candidate.
+const _SCORING_META = [
+  { key:'minScoreToPost',         label:'MIN SCORE TO POST',     help:'Hard floor for AUTO_POST (0-100)',     step:1,    col:'var(--green)' },
+  { key:'sweetSpotBonus',         label:'SWEET SPOT BONUS',      help:'+N for $13K-$40K MCap',                step:1,    col:'var(--gold)' },
+  { key:'secondaryBonus',         label:'SECONDARY BONUS',       help:'+N for $40K-$80K MCap',                step:1,    col:'var(--cyan)' },
+  { key:'preLaunchBonus',         label:'PRE-LAUNCH BONUS',      help:'+N when dev just funded by CEX',       step:1,    col:'var(--purple)' },
+  { key:'crossChainBonus',        label:'CROSS-CHAIN BONUS',     help:'+N when ETH/Base twin is pumping',     step:1,    col:'var(--blue)' },
+  { key:'devFingerprintCap',      label:'DEV FINGERPRINT CAP',   help:'Max +N from ELITE/PROVEN dev history', step:1,    col:'var(--cyan)' },
+  { key:'noSignalCap',            label:'NO-SIGNAL CAP',         help:'Max score when no alpha/wallet signal',step:1,    col:'var(--orange)' },
+  { key:'rugGuardMinScore',       label:'RUG GUARD MIN SCORE',   help:'$13K-$17.5K requires this score',      step:1,    col:'var(--red)' },
+  { key:'consensusOverrideScore', label:'CONSENSUS OVERRIDE',    help:'Score that lets 1 AI (not both) post', step:1,    col:'var(--green)' },
+  { key:'winPeakMultiple',        label:'WIN PEAK MULTIPLE',     help:'Peak X needed to count as WIN',        step:0.1,  col:'var(--gold)' },
+  { key:'neutralDrawdownPct',     label:'NEUTRAL DRAWDOWN %',    help:'≤N% drawdown at 6h = NEUTRAL not LOSS',step:1,    col:'var(--cyan)' },
+];
+
+async function loadScoringConfig(){
+  const grids = document.querySelectorAll('.scoringGrid');
+  if (!grids.length) return;
+  try {
+    const data = await apiFetch('/api/config/scoring');
+    if (!data?.ok) return;
+    const cur  = data.current || {};
+    const def  = data.defaults || {};
+    const html = _SCORING_META.map(m => {
+      const v = cur[m.key] ?? def[m.key] ?? '';
+      const isModified = cur[m.key] != null && cur[m.key] !== def[m.key];
+      const border = isModified ? 'rgba(255,215,64,0.55)' : 'rgba(255,255,255,0.1)';
+      const modTag = isModified ? '<span style="font-family:var(--mono);font-size:7px;color:var(--gold);margin-left:5px" title="Modified from default ' + def[m.key] + '">✎</span>' : '';
+      return `<div style="background:rgba(0,0,0,0.3);border:1px solid ${border};border-radius:6px;padding:8px 10px">
+        <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>${m.label}${modTag}</span>
+          <span style="color:var(--text3)" title="Default: ${def[m.key]}">def ${def[m.key]}</span>
+        </div>
+        <input type="number" step="${m.step}" data-cfg-key="${m.key}" value="${v}"
+          title="${m.help}"
+          style="width:100%;background:rgba(0,0,0,0.5);border:1px solid var(--border2);border-radius:4px;color:${m.col};font-family:'Orbitron',var(--mono);font-size:16px;font-weight:900;padding:5px 8px;outline:none;text-align:center" />
+        <div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:4px;line-height:1.3">${m.help}</div>
+      </div>`;
+    }).join('');
+    grids.forEach(g => { g.innerHTML = html; });
+  } catch (err) {
+    console.warn('[scoring-config] load failed:', err.message);
+  }
+}
+
+async function saveScoringConfig(btn){
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ SAVING…'; }
+  const updates = {};
+  document.querySelectorAll('input[data-cfg-key]').forEach(el => {
+    const k = el.getAttribute('data-cfg-key');
+    if (k && el.value !== '') updates[k] = el.value;
+  });
+  try {
+    const res = await fetch('/api/config/scoring', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'save failed');
+    document.querySelectorAll('.scoringStatus').forEach(s => {
+      s.textContent = '✓ Applied ' + Object.keys(data.applied || {}).length + ' changes — live immediately';
+      s.style.color = 'var(--green)';
+    });
+    loadScoringConfig(); // refresh modified-marker chips
+  } catch (err) {
+    document.querySelectorAll('.scoringStatus').forEach(s => {
+      s.textContent = '✕ ' + err.message;
+      s.style.color = 'var(--red)';
+    });
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '💾 SAVE'; }
+  }
+}
+
+async function resetScoringConfig(btn){
+  if (!confirm('Reset all scoring values to defaults?')) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  try {
+    const res = await fetch('/api/config/scoring/reset', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'reset failed');
+    document.querySelectorAll('.scoringStatus').forEach(s => {
+      s.textContent = '✓ Reset to defaults';
+      s.style.color = 'var(--cyan)';
+    });
+    loadScoringConfig();
+  } catch (err) {
+    document.querySelectorAll('.scoringStatus').forEach(s => {
+      s.textContent = '✕ ' + err.message;
+      s.style.color = 'var(--red)';
+    });
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '↺ RESET'; }
+  }
 }
 
 // ── OVERVIEW — Call outcome tile row ─────────────────────────────────

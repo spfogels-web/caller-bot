@@ -307,7 +307,21 @@ Required output format:
  * Check all unresolved posted calls and auto-update outcomes where possible.
  * Run this every 30 minutes via setInterval.
  */
+// Read live scoring config from kv_store each run so dashboard edits
+// take effect on the very next outcome check — no restart needed.
+function getScoringConfig(dbInstance) {
+  const defaults = { winPeakMultiple: 1.5, neutralDrawdownPct: 10 };
+  try {
+    const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scoring_config'`).get();
+    if (row?.value) return { ...defaults, ...JSON.parse(row.value) };
+  } catch {}
+  return defaults;
+}
+
 export async function runOutcomeTracker(dbInstance) {
+  const cfg = getScoringConfig(dbInstance);
+  const WIN_PEAK  = Number(cfg.winPeakMultiple)    || 1.5;
+  const NEUT_PCT  = Number(cfg.neutralDrawdownPct) || 10;
   let unresolvedCalls;
   try {
     unresolvedCalls = dbInstance.prepare(`
@@ -411,7 +425,7 @@ export async function runOutcomeTracker(dbInstance) {
         if (r?.peak_multiple != null) peakNow = Math.max(peakNow, r.peak_multiple);
       } catch {}
 
-      const reachedWinBar = peakNow >= 1.5;
+      const reachedWinBar = peakNow >= WIN_PEAK;
       const finalCheckDue = minutesSince >= 360; // 6h confirmation window
 
       if (reachedWinBar && minutesSince >= 60) {
@@ -441,7 +455,7 @@ export async function runOutcomeTracker(dbInstance) {
         // Small drawdown (within 10%) → NEUTRAL. Bigger drawdown → LOSS.
         // A coin that's within ±10% of entry at 6h isn't a real loss,
         // it's dead money — doesn't punish the win rate.
-        const finalOutcome = Math.abs(result.pctChange) <= 10 ? 'NEUTRAL' : 'LOSS';
+        const finalOutcome = Math.abs(result.pctChange) <= NEUT_PCT ? 'NEUTRAL' : 'LOSS';
         const emoji = finalOutcome === 'NEUTRAL' ? '➖' : '❌';
         dbInstance.prepare(`
           UPDATE calls SET
