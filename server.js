@@ -2490,17 +2490,16 @@ async function processCandidate(candidate, isRescan = false) {
       console.warn(`[ai-os] AUTO_POST without Claude key — scoring only`);
     }
 
-    // ── STEP 6: OpenAI GPT-4o Final Decision ─────────────────────────────────
-    // This is the FINAL AUTHORITY. Claude gives analysis; OpenAI decides.
+    // ── STEP 6: OpenAI GPT-4o — Advisory Only (Claude is final authority) ────
+    // OpenAI still runs for data collection and its verdict is logged, but
+    // it NEVER overrides Claude's decision. Claude is the final authority.
     let openAIDecision = null;
-    // OpenAI runs on: AUTO_POST, WATCHLIST, and any IGNORE with score >= 45
-    // This lets it: (a) confirm calls, (b) override Claude's IGNORE if it sees opportunity, (c) learn from bad tokens
     const shouldRunOpenAI = OPENAI_API_KEY && (
       finalDecision === 'AUTO_POST' ||
       finalDecision === 'WATCHLIST' ||
       finalDecision === 'RETEST' ||
       finalDecision === 'HOLD_FOR_REVIEW' ||
-      (scoreResult.score >= 38 && finalDecision !== 'BLOCKLIST') // Loosened 45→38: more final verdicts = more training data
+      (scoreResult.score >= 38 && finalDecision !== 'BLOCKLIST')
     );
 
     if (shouldRunOpenAI) {
@@ -2526,23 +2525,12 @@ async function processCandidate(candidate, isRescan = false) {
           if (openAIDecision) {
             const aiAction = openAIDecision.decision;
             const conviction = openAIDecision.conviction;
-            console.log(`[openai-v8] $${enrichedCandidate.token} → ${aiAction} (${conviction}% conviction) | was: ${finalDecision}`);
-            logEvent('INFO', 'OPENAI_DECISION', `${enrichedCandidate.token} openai=${aiAction} conviction=${conviction} prev=${finalDecision}`);
+            console.log(`[openai-v8] $${enrichedCandidate.token} → ${aiAction} (${conviction}% conviction) | Claude decision: ${finalDecision} (KEPT)`);
+            logEvent('INFO', 'OPENAI_ADVISORY', `${enrichedCandidate.token} openai=${aiAction} conviction=${conviction} claude_decision=${finalDecision} (OpenAI advisory only)`);
 
-            // OpenAI is the final authority — UNLESS Claude hard-blocked it.
-            // Claude hard-blocks (IGNORE with score < 25 or EXTREME risk) can't
-            // be overridden — those are data-void or manipulation signals.
-            const claudeHardBlocked = verdict?.risk === 'EXTREME' && (verdict?.score ?? 100) < 25;
-            if (claudeHardBlocked && aiAction === 'POST') {
-              console.log(`[openai-v8] 🛑 OpenAI wanted POST but Claude hard-blocked (score ${verdict.score}, ${verdict.risk}) — keeping IGNORE`);
-              logEvent('INFO', 'OPENAI_OVERRIDE_BLOCKED', `${enrichedCandidate.token} OpenAI=POST blocked by Claude hard-block`);
-            } else {
-              if (aiAction === 'POST')       finalDecision = 'AUTO_POST';
-              else if (aiAction === 'PROMOTE')   finalDecision = 'WATCHLIST';
-              else if (aiAction === 'WATCHLIST') finalDecision = 'WATCHLIST';
-              else if (aiAction === 'RETEST')    finalDecision = 'RETEST';
-              else if (aiAction === 'IGNORE')    finalDecision = 'IGNORE';
-            }
+            // OpenAI is ADVISORY ONLY — Claude's decision stands.
+            // OpenAI's verdict is logged and stored for training data
+            // but does NOT change finalDecision.
 
             // For RETEST, set the timer from OpenAI's recommendation
             if (aiAction === 'RETEST' && openAIDecision.retestInMinutes) {
