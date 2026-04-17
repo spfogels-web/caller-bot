@@ -7034,6 +7034,126 @@ app.get('/api/diagnose/claude', async (req, res) => {
   }
 });
 
+// Comprehensive live-check of every external API the bot depends on.
+// Returns per-API: keyPresent, status, latency, ok, sample data, error.
+app.get('/api/diagnose/apis', async (req, res) => {
+  setCors(res);
+  // Use a known-good SOL mint so every endpoint has something to chew on.
+  const testCA = 'So11111111111111111111111111111111111111112';
+  const started = Date.now();
+  const out = {
+    helius:      { keyPresent: !!process.env.HELIUS_API_KEY,    ok: false, ms: 0, status: null, error: null, sample: null },
+    birdeye:     { keyPresent: !!process.env.BIRDEYE_API_KEY,   ok: false, ms: 0, status: null, error: null, sample: null },
+    bubblemap:   {                                              ok: false, ms: 0, status: null, error: null, sample: null },
+    solscan:     { keyPresent: !!process.env.SOLSCAN_API_KEY,   ok: false, ms: 0, status: null, error: null, sample: null },
+    dexscreener: {                                              ok: false, ms: 0, status: null, error: null, sample: null },
+    dune:        { keyPresent: !!process.env.DUNE_API_KEY,      ok: false, ms: 0, status: null, error: null, sample: null },
+  };
+
+  // Helius
+  if (out.helius.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'diag', method: 'getHealth' }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.helius.status = r.status; out.helius.ms = Date.now() - t0;
+      const j = await r.json();
+      out.helius.ok = r.ok && j?.result === 'ok';
+      out.helius.sample = j?.result ?? j?.error ?? null;
+      if (j?.error) out.helius.error = JSON.stringify(j.error);
+    } catch (e) { out.helius.error = e.message; out.helius.ms = Date.now() - t0; }
+  }
+
+  // Birdeye
+  if (out.birdeye.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://public-api.birdeye.so/defi/token_overview?address=${testCA}`, {
+        headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.birdeye.status = r.status; out.birdeye.ms = Date.now() - t0;
+      const j = await r.json();
+      out.birdeye.ok = r.ok && !!j?.data?.price;
+      out.birdeye.sample = j?.data ? { price: j.data.price, mc: j.data.mc } : null;
+      if (!r.ok) out.birdeye.error = j?.message || 'HTTP ' + r.status;
+    } catch (e) { out.birdeye.error = e.message; out.birdeye.ms = Date.now() - t0; }
+  }
+
+  // BubbleMaps (no key needed)
+  {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://api-legacy.bubblemaps.io/map-metadata?token=${testCA}&chain=sol`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.bubblemap.status = r.status; out.bubblemap.ms = Date.now() - t0;
+      const j = await r.json();
+      out.bubblemap.ok = r.ok && !!j;
+      out.bubblemap.sample = j?.status ?? j?.message ?? 'ok';
+      if (!r.ok) out.bubblemap.error = 'HTTP ' + r.status;
+    } catch (e) { out.bubblemap.error = e.message; out.bubblemap.ms = Date.now() - t0; }
+  }
+
+  // Solscan
+  if (out.solscan.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://pro-api.solscan.io/v2.0/token/meta?address=${testCA}`, {
+        headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.solscan.status = r.status; out.solscan.ms = Date.now() - t0;
+      const j = await r.json();
+      out.solscan.ok = r.ok && !!j?.data;
+      if (!r.ok) out.solscan.error = j?.message || 'HTTP ' + r.status;
+    } catch (e) { out.solscan.error = e.message; out.solscan.ms = Date.now() - t0; }
+  }
+
+  // DexScreener (no key needed — primary price fallback)
+  {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${testCA}`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.dexscreener.status = r.status; out.dexscreener.ms = Date.now() - t0;
+      const j = await r.json();
+      out.dexscreener.ok = r.ok && (j?.pairs?.length ?? 0) > 0;
+      out.dexscreener.sample = { pairs: j?.pairs?.length ?? 0 };
+      if (!r.ok) out.dexscreener.error = 'HTTP ' + r.status;
+    } catch (e) { out.dexscreener.error = e.message; out.dexscreener.ms = Date.now() - t0; }
+  }
+
+  // Dune — test with a cheap list-queries call (no SQL execution)
+  if (out.dune.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch('https://api.dune.com/api/v1/query?limit=1', {
+        headers: { 'X-Dune-Api-Key': process.env.DUNE_API_KEY },
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.dune.status = r.status; out.dune.ms = Date.now() - t0;
+      out.dune.ok = r.ok || r.status === 401 ? true : false; // 401 means key issue, anything else connectivity
+      if (!r.ok) out.dune.error = 'HTTP ' + r.status;
+    } catch (e) { out.dune.error = e.message; out.dune.ms = Date.now() - t0; }
+  }
+
+  const total = Date.now() - started;
+  const up   = Object.values(out).filter(x => x.ok).length;
+  const total_n = Object.keys(out).length;
+  res.json({
+    ok: true,
+    summary: `${up}/${total_n} APIs healthy`,
+    total_ms: total,
+    checked_at: new Date().toISOString(),
+    result: out,
+  });
+});
+
 app.get('/api/db/health', (req, res) => {
   setCors(res);
   try {
