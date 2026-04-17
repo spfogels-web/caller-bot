@@ -8082,6 +8082,16 @@ app.listen(PORT, async () => {
   console.log('[server] Performance tracker: starts in 5min, runs every 30min');
   console.log('[server] WIN criteria: +20% at 6h or 12h | LOSS: -30% at 6h or 12h');
 
+  // ── BOOT CLEANUP: purge void calls/archive/candidates from data-void era ──
+  try {
+    const r1 = dbInstance.prepare(`DELETE FROM calls WHERE token IS NULL AND market_cap_at_call IS NULL AND price_at_call IS NULL`).run();
+    const r2 = dbInstance.prepare(`DELETE FROM audit_archive WHERE (token IS NULL OR token='') AND market_cap IS NULL AND final_decision='AUTO_POST'`).run();
+    const r3 = dbInstance.prepare(`UPDATE candidates SET posted=0, final_decision='IGNORE' WHERE (token IS NULL OR token='') AND market_cap IS NULL AND final_decision='AUTO_POST' AND posted=1`).run();
+    if (r1.changes || r2.changes || r3.changes) {
+      console.log(`[boot-cleanup] Removed ${r1.changes} void calls + ${r2.changes} void archive + ${r3.changes} void candidates fixed`);
+    }
+  } catch (err) { console.warn('[boot-cleanup]', err.message); }
+
   setTimeout(async () => {
     try { await uploadBannerToTelegram(); }
     catch (err) { console.warn('[TG] Banner pre-upload failed:', err.message); }
