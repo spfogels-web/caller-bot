@@ -3867,6 +3867,73 @@ If Claude's proposal is vague or unprovable, REJECT it and demand specifics.`;
   }
 });
 
+// ── Web Fetch utility — strips HTML to clean text for AI consumption ─────────
+async function fetchWebContent(url, maxChars = 12000) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseCallerBot/1.0)' },
+      signal: AbortSignal.timeout(15_000),
+      redirect: 'follow',
+    });
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}`, url };
+    const contentType = r.headers.get('content-type') || '';
+    const raw = await r.text();
+
+    let text;
+    if (contentType.includes('application/json')) {
+      text = JSON.stringify(JSON.parse(raw), null, 2);
+    } else {
+      // Strip HTML tags, scripts, styles → clean text
+      text = raw
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+        .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+        .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    }
+    return { ok: true, url, chars: text.length, text: text.slice(0, maxChars) };
+  } catch (err) {
+    return { ok: false, error: err.message, url };
+  }
+}
+
+// Endpoint: fetch any URL and return clean text
+app.post('/api/agent/browse', express.json(), async (req, res) => {
+  setCors(res);
+  const { url } = req.body ?? {};
+  if (!url) return res.status(400).json({ ok: false, error: 'url required' });
+  const result = await fetchWebContent(url);
+  res.json(result);
+});
+
+// Web search via DuckDuckGo instant answers (free, no key)
+app.post('/api/agent/search', express.json(), async (req, res) => {
+  setCors(res);
+  const { query } = req.body ?? {};
+  if (!query) return res.status(400).json({ ok: false, error: 'query required' });
+  try {
+    const r = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    const d = await r.json();
+    const results = [];
+    if (d.Abstract) results.push({ title: d.Heading || 'Summary', text: d.Abstract, url: d.AbstractURL });
+    for (const t of (d.RelatedTopics || []).slice(0, 8)) {
+      if (t.Text) results.push({ title: t.FirstURL?.split('/').pop() || '', text: t.Text, url: t.FirstURL });
+      if (t.Topics) for (const sub of t.Topics.slice(0, 3)) {
+        if (sub.Text) results.push({ title: sub.FirstURL?.split('/').pop() || '', text: sub.Text, url: sub.FirstURL });
+      }
+    }
+    res.json({ ok: true, query, results });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.post('/api/agent', express.json({ limit: '10mb' }), async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) {
@@ -3885,6 +3952,26 @@ app.post('/api/agent', express.json({ limit: '10mb' }), async (req, res) => {
         ).run(saveToMemory.title || null, saveToMemory.content, saveToMemory.category || 'general');
         invalidateMemoryCache();
       } catch {}
+    }
+
+    // ── Auto-fetch URLs in the latest user message ───────────────────────────
+    // If the user pastes a URL, fetch the page content and inject it so
+    // Claude can read articles, docs, tweets, dashboards — anything on the web.
+    let webContext = '';
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+    const lastText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : (lastUserMsg?.content?.find?.(b => b.type === 'text')?.text || '');
+    const urlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
+    const urls = (lastText.match(urlPattern) || []).slice(0, 3);
+    if (urls.length) {
+      const fetched = await Promise.all(urls.map(u => fetchWebContent(u, 8000)));
+      for (const f of fetched) {
+        if (f.ok) {
+          webContext += `\n\n── WEB PAGE: ${f.url} (${f.chars} chars) ──\n${f.text}\n── END ──`;
+          console.log(`[agent] Fetched ${f.url} (${f.chars} chars)`);
+        } else {
+          webContext += `\n\n── FAILED TO FETCH: ${f.url} — ${f.error} ──`;
+        }
+      }
     }
 
     // Optional wallet-context block — used by the Smart Money tab chat so the
@@ -4031,6 +4118,7 @@ ${memoryBlock}
 LIVE BOT DATA:
 ${liveContext}
 ${walletBlock}
+${webContext ? '\nWEB CONTENT FETCHED FOR THIS CONVERSATION:' + webContext : ''}
 
 BOT PARAMETERS (v7.0):
 - Target: $10K–$25K MCap micro-cap stealth launches
@@ -4041,6 +4129,8 @@ BOT PARAMETERS (v7.0):
 PERSONALITY: Direct, data-driven, decisive. You give clear actionable answers. Reference real numbers when available. Flag when data is missing.
 
 IMAGE/DOCUMENT ANALYSIS: When the operator sends images (charts, screenshots, documents), analyze them thoroughly — identify patterns, tokens, wallet behaviors, entry/exit signals. Extract every actionable insight.
+
+WEB BROWSING: When the operator pastes a URL, the system automatically fetches and injects the page content. You can read articles, Twitter threads, Solscan pages, DexScreener data, research docs — anything on the open web. Analyze the content and extract actionable intelligence. If you need the operator to search for something, ask them to paste the URL.
 
 MEMORY: When the operator teaches you something important (strategy, pattern, rule, insight), end your reply with a line starting with "💾 SAVED:" followed by a one-line summary of what you learned. The system will persist this to your knowledge base automatically.`;
 

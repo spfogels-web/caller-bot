@@ -3740,7 +3740,8 @@ body::before {
           <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
             <input type="file" id="agentFileInput" accept="image/*,.pdf,.txt,.md,.csv" style="display:none" onchange="handleAgentUpload(this)">
             <button onclick="document.getElementById('agentFileInput').click()" title="Upload image or document" style="background:rgba(156,39,176,0.15);border:1px solid rgba(156,39,176,0.3);color:#ce93d8;border-radius:6px;padding:10px 12px;font-size:14px;cursor:pointer;flex-shrink:0">📎</button>
-            <input id="agentInput" placeholder="Ask the agent anything, or upload images/docs to teach it..." style="flex:1;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:6px;padding:10px 14px;color:var(--text1);font-family:var(--mono);font-size:11px;outline:none" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}">
+            <button onclick="agentWebSearch()" title="Search the web" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:6px;padding:10px 12px;font-size:14px;cursor:pointer;flex-shrink:0">🌐</button>
+            <input id="agentInput" placeholder="Paste URLs, upload files, or ask anything..." style="flex:1;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:6px;padding:10px 14px;color:var(--text1);font-family:var(--mono);font-size:11px;outline:none" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}">
             <button onclick="sendAgentMessage()" style="background:linear-gradient(135deg,rgba(68,138,255,0.2),rgba(156,39,176,0.15));border:1px solid var(--blue);color:var(--blue);border-radius:6px;padding:10px 20px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:1px;white-space:nowrap" id="agentSendBtn">SEND ↵</button>
           </div>
         </div>
@@ -6862,6 +6863,35 @@ function handleAgentUpload(input) {
   if (isImage) reader.readAsDataURL(file);
   else reader.readAsText(file);
   input.value = '';
+}
+
+async function agentWebSearch() {
+  const query = prompt('Search the web:');
+  if (!query?.trim()) return;
+  appendAgentMessage('user', '🌐 Web search: ' + query);
+  showAgentTyping();
+  try {
+    const res = await fetch('/api/agent/search', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ query }), signal: AbortSignal.timeout(15000),
+    });
+    const data = await res.json();
+    removeAgentTyping();
+    if (data.ok && data.results?.length) {
+      const summary = data.results.slice(0, 6).map(r => '• ' + r.text?.slice(0, 150)).join('\n');
+      const urls = data.results.filter(r => r.url).slice(0, 3).map(r => r.url);
+      appendAgentMessage('bot', '🌐 Search results for "' + query + '":\n\n' + summary);
+      if (urls.length) {
+        appendAgentMessage('bot', 'Top sources:\n' + urls.join('\n') + '\n\nPaste any URL to read the full page.');
+      }
+      _agentMsgs.push({ role: 'assistant', content: 'Web search results for "' + query + '":\n' + summary });
+    } else {
+      appendAgentMessage('bot', '🌐 No results found for "' + query + '". Try pasting a direct URL instead.');
+    }
+  } catch (e) {
+    removeAgentTyping();
+    appendAgentMessage('bot', '⚠ Search failed: ' + e.message);
+  }
 }
 
 function clearAgentUpload() {
