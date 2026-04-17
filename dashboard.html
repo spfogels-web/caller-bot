@@ -10123,12 +10123,15 @@ async function refreshCallPeak(callId, ev) {
 let _callsAutoRefreshTimer = null;
 function startCallsAutoRefresh() {
   if (_callsAutoRefreshTimer) return;
+  // 5 min cadence: tight enough to expire the 1h-old analyzer rows soon after
+  // they cross the threshold, loose enough to not spam the backend.
   _callsAutoRefreshTimer = setInterval(() => {
     const callsTab = document.getElementById('tab-calls');
     if (callsTab && callsTab.classList.contains('active')) {
-      if (typeof loadCalls === 'function') loadCalls();
+      if      (typeof loadCallsTab === 'function') loadCallsTab();
+      else if (typeof loadCalls    === 'function') loadCalls();
     }
-  }, 15 * 60_000);
+  }, 5 * 60_000);
 }
 if (typeof window !== 'undefined') window.addEventListener('DOMContentLoaded', startCallsAutoRefresh);
 
@@ -10219,15 +10222,29 @@ function renderAnalyzerFeed(scoredRows, calledCAs){
 
   // Accept rows with any positive score (composite OR quick). Previous filter
   // was too strict and hid valid scanner_feed evaluations.
+  // Also drop rows older than 1h so the analyzer shows only recent activity
+  // (per user — keeps the section from growing stale).
+  const parseTs = (s) => {
+    if (!s) return 0;
+    let t = String(s).trim();
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(t)) t = t.replace(' ','T') + 'Z';
+    const n = new Date(t).getTime();
+    return isNaN(n) ? 0 : n;
+  };
+  const ONE_HOUR_AGO = Date.now() - 60 * 60 * 1000;
   const rows = (scoredRows || [])
     .filter(r => r && r.contract_address && (Number(r.composite_score) > 0 || Number(r.quick_score) > 0))
+    .filter(r => {
+      const t = parseTs(r.evaluated_at || r.scanned_at || r.created_at);
+      return t === 0 || t >= ONE_HOUR_AGO; // missing ts = keep (can't prove it's old)
+    })
     .map(r => ({
       ...r,
       composite_score: Number(r.composite_score) > 0 ? Number(r.composite_score) : Number(r.quick_score || 0),
     }))
     .sort((a, b) => {
-      const ta = new Date(a.evaluated_at || a.scanned_at || a.created_at || 0).getTime();
-      const tb = new Date(b.evaluated_at || b.scanned_at || b.created_at || 0).getTime();
+      const ta = parseTs(a.evaluated_at || a.scanned_at || a.created_at);
+      const tb = parseTs(b.evaluated_at || b.scanned_at || b.created_at);
       return tb - ta;
     })
     .slice(0, 25);
