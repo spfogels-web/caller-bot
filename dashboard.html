@@ -10215,10 +10215,47 @@ function renderRejectionAudit(data){
 // ─── Analyzer YES/NO verdicts ─────────────────────────────────────────
 // Shows EVERY row with any score (composite OR quick) so the section is
 // never empty when the pipeline has any activity at all.
+// ── Analyzer manual dismiss ──────────────────────────────────────────
+// Each X click stores the CA + dismiss timestamp in localStorage. Rows
+// stay hidden for 24h so they don't reappear on every refresh, then
+// naturally expire so we can reconsider later.
+const _ANALYZER_DISMISS_KEY = 'pc_analyzer_dismissed_v1';
+const _ANALYZER_DISMISS_TTL = 24 * 60 * 60 * 1000;
+function _getAnalyzerDismissed(){
+  try {
+    const raw = localStorage.getItem(_ANALYZER_DISMISS_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    const now = Date.now();
+    // Prune expired on read
+    let changed = false;
+    for (const k of Object.keys(obj)) {
+      if (now - obj[k] > _ANALYZER_DISMISS_TTL) { delete obj[k]; changed = true; }
+    }
+    if (changed) localStorage.setItem(_ANALYZER_DISMISS_KEY, JSON.stringify(obj));
+    return obj;
+  } catch { return {}; }
+}
+function dismissAnalyzerRow(ca, ev){
+  if (ev) { ev.stopPropagation?.(); ev.preventDefault?.(); }
+  if (!ca) return;
+  try {
+    const obj = _getAnalyzerDismissed();
+    obj[ca] = Date.now();
+    localStorage.setItem(_ANALYZER_DISMISS_KEY, JSON.stringify(obj));
+  } catch {}
+  // Optimistic UI: remove the row immediately
+  const row = document.querySelector(`.analyzer-row[data-ca="${ca}"]`);
+  if (row) row.remove();
+  const count = document.querySelectorAll('#analyzerFeed .analyzer-row').length;
+  const badge = document.getElementById('analyzerCount');
+  if (badge) badge.textContent = String(count);
+}
+
 function renderAnalyzerFeed(scoredRows, calledCAs){
   const el = document.getElementById('analyzerFeed');
   if (!el) return;
   console.log('[analyzer] rows received:', scoredRows?.length || 0, scoredRows?.[0]);
+  const dismissed = _getAnalyzerDismissed();
 
   // Accept rows with any positive score (composite OR quick). Previous filter
   // was too strict and hid valid scanner_feed evaluations.
@@ -10234,6 +10271,7 @@ function renderAnalyzerFeed(scoredRows, calledCAs){
   const ONE_HOUR_AGO = Date.now() - 60 * 60 * 1000;
   const rows = (scoredRows || [])
     .filter(r => r && r.contract_address && (Number(r.composite_score) > 0 || Number(r.quick_score) > 0))
+    .filter(r => !dismissed[r.contract_address]) // skip manually dismissed CAs
     .filter(r => {
       const t = parseTs(r.evaluated_at || r.scanned_at || r.created_at);
       return t === 0 || t >= ONE_HOUR_AGO; // missing ts = keep (can't prove it's old)
@@ -10310,11 +10348,13 @@ function renderAnalyzerFeed(scoredRows, calledCAs){
       ? '<span style="font-family:var(--mono);font-size:7px;color:rgba(24,255,255,0.7);letter-spacing:1px;margin-left:5px;padding:1px 5px;border-radius:3px;border:1px dashed rgba(24,255,255,0.35)" title="Scanner-only quick score — NOT a full composite. Awaiting AI scoring.">SCANNER</span>'
       : '<span style="font-family:var(--mono);font-size:7px;color:var(--green);letter-spacing:1px;margin-left:5px;padding:1px 5px;border-radius:3px;background:rgba(0,230,118,0.12);border:1px solid rgba(0,230,118,0.3)" title="Full pipeline composite score (scorer + Claude + OpenAI)">SCORED</span>';
     const scoreSuffix = isQuick ? '<span style="font-size:9px;color:var(--text3);font-weight:400;letter-spacing:1px;margin-left:2px">q</span>' : '';
-    return `<div class="analyzer-row" style="--v-col:${v.col}" onclick="openFullCandidateDetail('${esc(r.contract_address||'')}')">
+    const ca = esc(r.contract_address || '');
+    return `<div class="analyzer-row" data-ca="${ca}" style="--v-col:${v.col}" onclick="openFullCandidateDetail('${ca}')">
       <div class="analyzer-row-token">$${esc(tok)}${sourceTag}</div>
       <div class="analyzer-row-verdict">${v.label}</div>
       <div class="analyzer-row-reason">${v.reason}</div>
       <div class="analyzer-row-score" style="color:${scCol}" title="${isQuick ? 'Scanner quick-filter score (NOT composite)' : 'Full composite score'}">${score}${scoreSuffix}</div>
+      <button type="button" onclick="dismissAnalyzerRow('${ca}',event);return false" title="Dismiss — hide for 24h" style="background:transparent;border:1px solid rgba(255,255,255,0.12);color:var(--text3);border-radius:4px;width:22px;height:22px;cursor:pointer;font-family:var(--mono);font-size:11px;font-weight:700;flex-shrink:0;margin-left:6px;transition:all 0.15s" onmouseenter="this.style.background='rgba(255,23,68,0.15)';this.style.borderColor='rgba(255,23,68,0.45)';this.style.color='var(--red)'" onmouseleave="this.style.background='transparent';this.style.borderColor='rgba(255,255,255,0.12)';this.style.color='var(--text3)'">✕</button>
     </div>`;
   }).join('');
 }
