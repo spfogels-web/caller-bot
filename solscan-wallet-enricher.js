@@ -29,7 +29,6 @@ const SOLSCAN_API_KEY    = process.env.SOLSCAN_API_KEY;
 const SOLSCAN_BASE       = 'https://pro-api.solscan.io/v2.0';
 const REQUEST_TIMEOUT_MS = 9_000;
 const RATE_DELAY_MS      = 250;          // 4 req/sec
-const TRANSFERS_PER_WALLET = 200;
 const STALE_AFTER_HOURS  = 24;           // refresh wallets older than this
 const MAX_PER_RUN        = 50;           // wallets to enrich per cron tick
 
@@ -42,6 +41,7 @@ async function solscanFetchTransfers(address, pageSize = 100) {
   }
   // Solscan Pro v2 splits results across pages; pull two pages to get ~200
   const all = [];
+  let lastStatus = null;
   for (const page of [1, 2]) {
     const url = `${SOLSCAN_BASE}/account/transfer`
               + `?address=${encodeURIComponent(address)}`
@@ -61,6 +61,7 @@ async function solscanFetchTransfers(address, pageSize = 100) {
       console.warn(`[solscan] network error for ${address.slice(0, 8)}: ${err.message}`);
       break;
     }
+    lastStatus = res.status;
     if (res.status === 429) {
       console.warn('[solscan] rate-limited, sleeping 5s');
       await sleep(5_000);
@@ -81,7 +82,7 @@ async function solscanFetchTransfers(address, pageSize = 100) {
     if (items.length < pageSize) break;        // no more pages
     await sleep(RATE_DELAY_MS);
   }
-  return all;
+  return { transfers: all, lastStatus };
 }
 
 // Normalize Solscan transfer rows into { tokenAddress, blockTime, side }.
@@ -198,8 +199,27 @@ function persistEnrichment(address, stats, dbInstance) {
 export async function enrichWallet(address, dbInstance) {
   if (!address || !dbInstance) return null;
   try {
-    const transfers = await solscanFetchTransfers(address, 100);
-    if (!transfers.length) return null;
+    const { transfers, lastStatus } = await solscanFetchTransfers(address, 100);
+    if (!transfers.length) {
+      // Mark as "scanned but empty" so this wallet moves out of the stale
+      // queue. Without this, the same 50 dead wallets cycle every 6h and
+      // the enricher reports "failed 50" forever. We stamp updated_at and
+      // set trade_count=0 so categorizeWallet returns NEUTRAL next time.
+      try {
+        dbInstance.prepare(`
+          UPDATE tracked_wallets
+          SET trade_count = 0, updated_at = datetime('now'), last_seen = datetime('now')
+          WHERE address = ?
+        `).run(address);
+        // Insert a stub row if one doesn't exist yet (early_wallets path)
+        dbInstance.prepare(`
+          INSERT OR IGNORE INTO tracked_wallets (address, category, source, updated_at, last_seen, trade_count)
+          VALUES (?, 'NEUTRAL', 'solscan_empty', datetime('now'), datetime('now'), 0)
+        `).run(address);
+      } catch {}
+      console.log(`[solscan-enricher] ${address.slice(0,8)}… no transfers (status=${lastStatus ?? 'none'}) — marked scanned, skipping future cycles`);
+      return null;
+    }
     const normalized = normalizeTransfers(transfers, address);
     const stats = scoreWalletAgainstArchive(normalized, dbInstance);
     if (stats) persistEnrichment(address, stats, dbInstance);
