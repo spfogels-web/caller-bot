@@ -6478,6 +6478,27 @@ app.get('/api/candidates/:id', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Must be defined BEFORE /api/calls/:id routes to avoid param collision
+app.post('/api/calls/cleanup-void', (req, res) => {
+  setCors(res);
+  try {
+    const voidCalls = dbInstance.prepare(
+      `SELECT id, contract_address FROM calls
+       WHERE token IS NULL AND market_cap_at_call IS NULL AND price_at_call IS NULL`
+    ).all();
+    if (!voidCalls.length) return res.json({ ok: true, removed: 0, message: 'No void calls to clean' });
+    const del = dbInstance.prepare(`DELETE FROM calls WHERE id=?`);
+    const tx = dbInstance.transaction((ids) => {
+      let n = 0;
+      for (const id of ids) n += del.run(id).changes;
+      return n;
+    });
+    const removed = tx(voidCalls.map(c => c.id));
+    console.log(`[cleanup] Removed ${removed} void calls (no token, no mcap, no price)`);
+    res.json({ ok: true, removed, ids: voidCalls.map(c => c.id) });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/api/calls', (req, res) => {
   setCors(res);
   try {
@@ -6911,31 +6932,6 @@ app.get('/api/v8/wallet-db-status', (req, res) => {
 
 // Remove bogus calls that had no enrichment data (token=NULL, mcap=NULL).
 // These pollute win-rate stats and clutter the dashboard.
-app.post('/api/calls/cleanup-void', (req, res) => {
-  setCors(res);
-  try {
-    const voidCalls = dbInstance.prepare(
-      `SELECT id, contract_address FROM calls
-       WHERE token IS NULL AND market_cap_at_call IS NULL AND price_at_call IS NULL`
-    ).all();
-
-    if (!voidCalls.length) return res.json({ ok: true, removed: 0, message: 'No void calls to clean' });
-
-    const del = dbInstance.prepare(`DELETE FROM calls WHERE id=?`);
-    const tx = dbInstance.transaction((ids) => {
-      let n = 0;
-      for (const id of ids) n += del.run(id).changes;
-      return n;
-    });
-    const removed = tx(voidCalls.map(c => c.id));
-
-    console.log(`[cleanup] Removed ${removed} void calls (no token, no mcap, no price)`);
-    res.json({ ok: true, removed, ids: voidCalls.map(c => c.id) });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
 app.get('/api/v8/learning-stats', (req, res) => {
   setCors(res);
   res.json({ ok: true, ...getLearningStats(dbInstance) });
