@@ -3390,7 +3390,10 @@ body::before {
         <div id="perfChartSection" class="calls-section" style="display:none">
           <div class="calls-section-hdr" style="--hdr-col:#ffd740">
             <span>📊 CALL PERFORMANCE · peak multiple per call</span>
-            <span class="calls-section-sub">latest calls left-to-right</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="calls-section-sub">latest calls left-to-right</span>
+              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
+            </div>
           </div>
           <div id="perfChart" class="perf-chart"></div>
         </div>
@@ -9965,6 +9968,27 @@ function renderPerfChart(calls){
       <span class="perf-bar-value" style="color:${col}">${peak.toFixed(2)}x</span>
     </div>`;
   }).join('');
+}
+
+// Force a fresh pass over all unresolved calls — kicks runOutcomeTracker
+// server-side. Use when a coin just pumped and the 3-min cycle hasn't
+// fired yet, so the chart stays stale for a few minutes.
+async function refreshAllPeaks(btn){
+  const orig = btn?.textContent;
+  if (btn){ btn.disabled = true; btn.textContent = '⏳ REFRESHING…'; }
+  try {
+    const res = await fetch('/api/calls/refresh-all-peaks', { method: 'POST' });
+    const data = await res.json().catch(() => null);
+    if (!data?.ok) throw new Error(data?.error || 'refresh failed');
+    // Brief wait then reload the calls so the fresh peaks render
+    await new Promise(r => setTimeout(r, 600));
+    if      (typeof loadCallsTab === 'function') await loadCallsTab();
+    else if (typeof loadCalls    === 'function') await loadCalls();
+  } catch (err) {
+    alert('Peak refresh failed: ' + err.message);
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = orig || '🔄 REFRESH PEAKS'; }
+  }
 }
 
 // ─── Manual call outcome + peak refresh ───────────────────────────────

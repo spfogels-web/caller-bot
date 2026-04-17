@@ -526,12 +526,14 @@ async function fetchCurrentMarketCap(contractAddress) {
 export function startLearningLoop(dbInstance, claudeApiKey) {
   console.log('[learning-loop] Starting automated outcome tracking and missed winner detection...');
 
-  // Outcome tracking: every 15 minutes — faster feedback loop for active calls
+  // Outcome tracking: every 3 minutes for fresh calls (peak capture is
+  // lossy at 15 min — coins pump-and-fade inside one cycle). The tracker
+  // queries a max of 50 unresolved calls per run so Helius load stays sane.
   const outcomeInterval = setInterval(() => {
     runOutcomeTracker(dbInstance).catch(err =>
       console.warn('[learning-loop] Outcome tracker error:', err.message)
     );
-  }, 15 * 60_000);
+  }, 3 * 60_000);
 
   // Missed winner detection + analysis: every 6 hours
   const missedWinnerInterval = setInterval(async () => {

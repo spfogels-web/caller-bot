@@ -6743,8 +6743,25 @@ app.post('/api/calls/:id/outcome', express.json(), (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Force-refresh peak_multiple on ALL unresolved calls right now. Used by
+// the Call Performance chart's 🔄 REFRESH PEAKS button when the user
+// wants the chart to reflect a pump that just happened.
+app.post('/api/calls/refresh-all-peaks', async (_req, res) => {
+  setCors(res);
+  try {
+    const before = dbInstance.prepare(
+      `SELECT COUNT(*) as n FROM calls WHERE (outcome IS NULL OR outcome = 'PENDING') AND called_at > datetime('now', '-48 hours')`
+    ).get().n;
+    await runOutcomeTracker(dbInstance);
+    const resolved = dbInstance.prepare(
+      `SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND auto_resolved_at > datetime('now','-60 seconds')`
+    ).get().n;
+    res.json({ ok: true, scanned: before, resolvedInPass: resolved });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // On-demand snapshot refresh for a single call — user clicks "refresh peak"
-// without waiting for the 15-min loop. Fetches DexScreener live and rolls peaks.
+// without waiting for the tracker loop. Fetches DexScreener live and rolls peaks.
 app.post('/api/calls/:id/refresh', async (req, res) => {
   setCors(res);
   try {
