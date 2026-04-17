@@ -960,6 +960,21 @@ function invalidateMemoryCache() {
  * Get current AI config overrides set by the operator or AI agent.
  */
 let AI_CONFIG_OVERRIDES = {};
+// Persist AI_CONFIG_OVERRIDES to SQLite so pausePosting survives restarts.
+try {
+  dbInstance.exec(`CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)`);
+  const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='ai_config_overrides'`).get();
+  if (row?.value) {
+    AI_CONFIG_OVERRIDES = JSON.parse(row.value);
+    console.log('[config] Restored AI_CONFIG_OVERRIDES from DB:', JSON.stringify(AI_CONFIG_OVERRIDES));
+  }
+} catch (err) { console.warn('[config] Failed to restore overrides:', err.message); }
+
+function persistAIConfig() {
+  try {
+    dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('ai_config_overrides', ?)`).run(JSON.stringify(AI_CONFIG_OVERRIDES));
+  } catch {}
+}
 function getAIConfigSummary() {
   const overrides = Object.keys(AI_CONFIG_OVERRIDES).length;
   return overrides > 0
@@ -1639,6 +1654,7 @@ async function handleConfigCommand(chatId, input, fromAdminId) {
   const parts = input.trim().split(/\s+/);
   if (parts[0].toLowerCase() === 'reset') {
     AI_CONFIG_OVERRIDES = {};
+    persistAIConfig();
     setMode(activeMode.name);
     logEvent('INFO', 'AI_CONFIG_RESET', 'via telegram');
     await sendTelegramMessage(chatId, '✅ All AI config overrides cleared. Reset to defaults.');
@@ -1654,6 +1670,7 @@ async function handleConfigCommand(chatId, input, fromAdminId) {
   }
   const prev = AI_CONFIG_OVERRIDES[key];
   AI_CONFIG_OVERRIDES[key] = value;
+  persistAIConfig();
   if (key === 'maxMarketCapOverride' && typeof value === 'number') activeMode.maxMarketCap = value;
   if (key === 'minScoreOverride' && typeof value === 'number') activeMode.minScore = value;
   logEvent('INFO', 'AI_CONFIG_CHANGE', JSON.stringify({key, prev, value, source: 'telegram'}));
@@ -3320,6 +3337,7 @@ app.post('/api/ai/config', (req, res) => {
 
     const prev = AI_CONFIG_OVERRIDES[key];
     AI_CONFIG_OVERRIDES[key] = value;
+    persistAIConfig();
 
     // Apply live mode overrides immediately
     if (key === 'maxMarketCapOverride'      && typeof value === 'number') activeMode.maxMarketCap   = value;
@@ -3351,6 +3369,7 @@ app.delete('/api/ai/config', (req, res) => {
   setCors(res);
   const prev = { ...AI_CONFIG_OVERRIDES };
   AI_CONFIG_OVERRIDES = {};
+  persistAIConfig();
   // Reset mode to defaults
   setMode(activeMode.name);
   logEvent('INFO', 'AI_CONFIG_RESET', JSON.stringify(prev));
@@ -3905,6 +3924,7 @@ app.post('/api/agent/apply', (req, res) => {
     }
     const prev = AI_CONFIG_OVERRIDES[key];
     AI_CONFIG_OVERRIDES[key] = value;
+    persistAIConfig();
     if (key === 'maxMarketCapOverride' && typeof value === 'number') activeMode.maxMarketCap = value;
     if (key === 'minScoreOverride' && typeof value === 'number') activeMode.minScore = value;
     if (key === 'sweetSpotMin' && typeof value === 'number') AI_CONFIG_OVERRIDES.sweetSpotMin = value;
