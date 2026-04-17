@@ -3752,16 +3752,43 @@ app.post('/api/agent', async (req, res) => {
     const walletBlock = (() => {
       if (!walletContext) return '';
       try {
-        const top = dbInstance.prepare(
-          `SELECT address, label, category, win_rate, avg_roi, score, wins_found_in, losses_in
+        const totalRow    = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0`).get();
+        const cats        = dbInstance.prepare(`SELECT category, COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 GROUP BY category`).all();
+
+        // SOL-balance buckets — user wants the oracle to know where the whales are
+        const megaWhales  = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 AND sol_balance >= 100`).get();
+        const whales      = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 AND sol_balance >= 10 AND sol_balance < 100`).get();
+        const active      = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 AND sol_balance >= 1 AND sol_balance < 10`).get();
+        const dust        = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 AND (sol_balance IS NULL OR sol_balance < 1)`).get();
+        const solScanned  = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 AND sol_balance IS NOT NULL`).get();
+
+        // Top 15 by SOL balance (the "find the whales" answer)
+        const topBySol = dbInstance.prepare(
+          `SELECT address, label, category, sol_balance, win_rate, avg_roi, score, wins_found_in
+           FROM tracked_wallets
+           WHERE is_blacklist=0 AND sol_balance IS NOT NULL
+           ORDER BY sol_balance DESC LIMIT 15`
+        ).all();
+
+        // Top 15 by score (existing — keeps the "best performers" answer)
+        const topByScore = dbInstance.prepare(
+          `SELECT address, label, category, sol_balance, win_rate, avg_roi, score, wins_found_in, losses_in
            FROM tracked_wallets WHERE is_blacklist=0
-           ORDER BY score DESC LIMIT 25`
+           ORDER BY score DESC LIMIT 15`
         ).all();
-        const totalRow = dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0`).get();
-        const cats = dbInstance.prepare(
-          `SELECT category, COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0 GROUP BY category`
+
+        // Top 10 by wins (the "most reliable" answer)
+        const topByWins = dbInstance.prepare(
+          `SELECT address, label, category, sol_balance, score, wins_found_in, losses_in
+           FROM tracked_wallets WHERE is_blacklist=0 AND wins_found_in > 0
+           ORDER BY wins_found_in DESC, score DESC LIMIT 10`
         ).all();
-        // Extract wallet addresses from the most recent user message
+
+        const fmtSol = (s) => s == null ? '?' : s >= 1000 ? (s/1000).toFixed(1)+'K◎' : s >= 1 ? s.toFixed(1)+'◎' : s.toFixed(3)+'◎';
+        const shortAddr = (a) => a ? a.slice(0,6)+'…'+a.slice(-4) : '?';
+        const oneLine = (w, i) => `  ${i+1}. ${w.label||shortAddr(w.address)} | ${w.category||'—'} | SOL:${fmtSol(w.sol_balance)} | score:${w.score||0} | wr:${w.win_rate?Math.round(w.win_rate*100):'?'}% | wins:${w.wins_found_in||0}`;
+
+        // Address extraction for drilldown (up to 3 mentioned)
         const lastUserMsg = [...(messages||[])].reverse().find(m => m.role === 'user')?.content || '';
         const addrPattern = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
         const mentioned = (lastUserMsg.match(addrPattern) || []).slice(0, 3);
@@ -3771,22 +3798,35 @@ app.post('/api/agent', async (req, res) => {
             if (w) {
               return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}:
   Label: ${w.label||'(none)'} | Category: ${w.category} | Score: ${w.score}/100
+  SOL balance: ${fmtSol(w.sol_balance)} (scanned ${w.sol_scanned_at||'never'})
   Win rate: ${w.win_rate ? Math.round(w.win_rate*100)+'%' : 'n/a'} | Avg ROI: ${w.avg_roi ? Math.round(w.avg_roi*100)+'%' : 'n/a'}
-  Found in: ${w.wins_found_in||0} wins / ${w.losses_in||0} losses`;
+  Found in: ${w.wins_found_in||0} wins / ${w.losses_in||0} losses
+  Source: ${w.source||'?'} | Updated: ${w.updated_at||'?'}`;
             }
-            return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}: NOT IN DATABASE — recommend running enrichment`;
+            return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}: NOT IN DATABASE — can be added via the Brain Analyzer or manual add.`;
           } catch { return ''; }
         }).filter(Boolean).join('\n\n');
+
         return `
 
-WALLET DATABASE CONTEXT (you have access to all tracked wallets):
-- Total wallets tracked: ${totalRow.n}
-- By category: ${cats.map(c=>`${c.category}=${c.n}`).join(', ')}
-- Top 25 wallets (by score):
-${top.map((w,i)=>`  ${i+1}. ${w.label||(w.address||'').slice(0,8)+'…'+(w.address||'').slice(-4)} | ${w.category} | score:${w.score} | wr:${w.win_rate?Math.round(w.win_rate*100):'?'}% | roi:${w.avg_roi?Math.round(w.avg_roi*100)+'%':'?'} | wins:${w.wins_found_in||0}`).join('\n')}
-${drilldowns ? '\n' + drilldowns : ''}
+WALLET DATABASE CONTEXT (you have FULL read access to the tracked_wallets table):
 
-You can answer questions about wallets, label them ("call this one X"), spot patterns across them, and recommend which to follow.`;
+TOTALS:
+- ${totalRow.n} total wallets tracked (${solScanned.n} with SOL balance scanned)
+- SOL tiers: ${megaWhales.n} mega-whales (≥100 SOL) · ${whales.n} whales (10-100) · ${active.n} active (1-10) · ${dust.n} dust/unscanned
+- Categories: ${cats.map(c=>`${c.category}=${c.n}`).join(', ')}
+
+TOP 15 BY SOL BALANCE (the wealthiest wallets in the DB):
+${topBySol.length ? topBySol.map(oneLine).join('\n') : '  (none scanned yet — run 🐋 SCAN FOR WHALES)'}
+
+TOP 15 BY SCORE (performance metric):
+${topByScore.map(oneLine).join('\n')}
+
+TOP 10 BY WINS (appeared as early holder in our winning calls):
+${topByWins.length ? topByWins.map(oneLine).join('\n') : '  (no wins overlapped yet)'}
+
+${drilldowns ? drilldowns + '\n' : ''}
+You can answer questions about specific wallets, compare them, spot patterns (high SOL + high score = likely alpha whale; high SOL + zero wins = passive bag-holder), and recommend which to label WINNER / SMART_MONEY. When asked about "largest wallet" or "biggest whales", use the TOP 15 BY SOL BALANCE list above — those numbers are real.`;
       } catch (err) { return `\n(wallet context unavailable: ${err.message})`; }
     })();
 
