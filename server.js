@@ -1784,7 +1784,13 @@ function buildSLTPBlock(candidate) {
 }
 
 function buildCallAlertCaption(candidate, verdict, scoreResult) {
-  const { score=0, risk='?', setup_type='?' } = verdict;
+  const { risk='?', setup_type='?' } = verdict;
+  // Use the COMPOSITE score (full pipeline: scorer + bonuses + AI adjustments),
+  // NOT verdict.score (which is just Claude's opinion). Claude's score can be
+  // much lower than the composite when Claude disagrees with the scorer —
+  // showing it on TG made posts look low-rated when the bot actually scored
+  // them high overall.
+  const score = scoreResult?.score ?? verdict.score ?? 0;
   const grade = scoreResult?.structureGrade ?? '?';
   const stage = scoreResult?.stage ?? '?';
 
@@ -2537,6 +2543,24 @@ async function processCandidate(candidate, isRescan = false) {
 
     // Mark discovery time for pipeline budget tracking
     if (!enrichedCandidate._discoveredAt) enrichedCandidate._discoveredAt = Date.now();
+
+    // ── CLAUDE-EXTREME VETO ──────────────────────────────────────────────────
+    // Claude is the forensic-analysis layer. When it flags EXTREME risk AND
+    // gives a very low score (<35), it's almost always catching real rug/
+    // manipulation signals that OpenAI is hallucinating through. No matter
+    // what OpenAI or the scorer says, block the post — these are the
+    // split-brain cases that embarrass the channel.
+    // Smart-money cluster alerts (3+ winners buying) still bypass this veto.
+    if (
+      finalDecision === 'AUTO_POST' &&
+      !enrichedCandidate._smartMoney &&
+      verdict?.risk === 'EXTREME' &&
+      (verdict?.score ?? 100) < 35
+    ) {
+      logEvent('WARN', 'CLAUDE_EXTREME_VETO', `${enrichedCandidate.token ?? ca.slice(0,6)} Claude=${verdict.score}/100 EXTREME — vetoed AUTO_POST despite OpenAI=${openAIDecision?.decision ?? '?'} ${openAIDecision?.conviction ?? '?'}%`);
+      console.log(`[auto-caller] 🚨 Claude EXTREME veto — $${enrichedCandidate.token ?? ca.slice(0,6)} (Claude score ${verdict.score}, OpenAI ${openAIDecision?.decision ?? '?'}) → WATCHLIST`);
+      finalDecision = 'WATCHLIST';
+    }
 
     // ── CLAUDE + OPENAI CONSENSUS GATE ───────────────────────────────────────
     // Before AUTO_POST fires, require both AI layers to agree OR a single
