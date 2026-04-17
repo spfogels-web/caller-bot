@@ -3785,8 +3785,9 @@ app.post('/api/agent', async (req, res) => {
         ).all();
 
         const fmtSol = (s) => s == null ? '?' : s >= 1000 ? (s/1000).toFixed(1)+'K◎' : s >= 1 ? s.toFixed(1)+'◎' : s.toFixed(3)+'◎';
-        const shortAddr = (a) => a ? a.slice(0,6)+'…'+a.slice(-4) : '?';
-        const oneLine = (w, i) => `  ${i+1}. ${w.label||shortAddr(w.address)} | ${w.category||'—'} | SOL:${fmtSol(w.sol_balance)} | score:${w.score||0} | wr:${w.win_rate?Math.round(w.win_rate*100):'?'}% | wins:${w.wins_found_in||0}`;
+        // Include FULL address on every row so the oracle can reference or
+        // construct links. A display label is still shown for readability.
+        const oneLine = (w, i) => `  ${i+1}. ${w.label||''} [${w.address}] | ${w.category||'—'} | SOL:${fmtSol(w.sol_balance)} | score:${w.score||0} | wr:${w.win_rate?Math.round(w.win_rate*100):'?'}% | wins:${w.wins_found_in||0}`;
 
         // Address extraction for drilldown (up to 3 mentioned)
         const lastUserMsg = [...(messages||[])].reverse().find(m => m.role === 'user')?.content || '';
@@ -3826,7 +3827,15 @@ TOP 10 BY WINS (appeared as early holder in our winning calls):
 ${topByWins.length ? topByWins.map(oneLine).join('\n') : '  (no wins overlapped yet)'}
 
 ${drilldowns ? drilldowns + '\n' : ''}
-You can answer questions about specific wallets, compare them, spot patterns (high SOL + high score = likely alpha whale; high SOL + zero wins = passive bag-holder), and recommend which to label WINNER / SMART_MONEY. When asked about "largest wallet" or "biggest whales", use the TOP 15 BY SOL BALANCE list above — those numbers are real.`;
+You can answer questions about specific wallets, compare them, spot patterns (high SOL + high score = likely alpha whale; high SOL + zero wins = passive bag-holder), and recommend which to label WINNER / SMART_MONEY.
+
+WALLET LINK CONSTRUCTION (you CAN build these — the full address is in [brackets] on every row above):
+  Solscan:  https://solscan.io/account/<ADDRESS>
+  Birdeye:  https://birdeye.so/profile/<ADDRESS>?chain=solana
+  GMGN:     https://gmgn.ai/sol/address/<ADDRESS>
+When the user asks for "the link" / "profile" / "where can I see this wallet", respond with the full address AND a ready-to-click Solscan URL. Never say "I can't access links" — you have the full address and the URL pattern.
+
+When asked about "largest wallet" or "biggest whales", use the TOP 15 BY SOL BALANCE list above — those numbers are real.`;
       } catch (err) { return `\n(wallet context unavailable: ${err.message})`; }
     })();
 
