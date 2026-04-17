@@ -2606,10 +2606,11 @@ async function processCandidate(candidate, isRescan = false) {
     // 5min or 30%+ in the last hour is a slow rug in progress. Walking away
     // is the right move, NOT catching the falling knife.
     //
-    // Tiers:
-    //   5m ≤ -15%  OR  1h ≤ -30%  →  WATCHLIST (demoted, not blacklisted)
-    //   5m ≤ -30%  OR  1h ≤ -60%  →  BLOCKLIST (slow rug — never call)
-    //   1h ≤ -40% AND 5m ≤ -10%   →  BLOCKLIST (accelerating dump)
+    // Tiers (tuned — memecoins routinely wiggle 10% in 5min and bounce back,
+    // so we only blacklist on genuinely severe/accelerating drops):
+    //   5m ≤ -20%  OR  1h ≤ -30%  →  WATCHLIST (demoted, not blacklisted)
+    //   1h ≤ -40% AND 5m ≤ -18%   →  BLOCKLIST (accelerating — still bleeding)
+    //   5m ≤ -35%  OR  1h ≤ -60%  →  BLOCKLIST (severe rug — never call)
     //
     // Cluster smart-money alerts bypass (3+ winners buying a dip is alpha,
     // not a slow rug). Single-winner alerts do NOT bypass — gotta be careful.
@@ -2619,11 +2620,11 @@ async function processCandidate(candidate, isRescan = false) {
       const isCluster = enrichedCandidate._smartMoney?.kind === 'cluster';
       if (!isCluster && finalDecision === 'AUTO_POST') {
         let momentumBlock = null;
-        if ((p5  != null && p5  <= -30) || (p1h != null && p1h <= -60)) {
+        if ((p5  != null && p5  <= -35) || (p1h != null && p1h <= -60)) {
           momentumBlock = `SEVERE_DUMP 5m=${p5}% 1h=${p1h}%`;
-        } else if (p1h != null && p1h <= -40 && p5 != null && p5 <= -10) {
+        } else if (p1h != null && p1h <= -40 && p5 != null && p5 <= -18) {
           momentumBlock = `ACCELERATING_DUMP 5m=${p5}% 1h=${p1h}%`;
-        } else if ((p5 != null && p5 <= -15) || (p1h != null && p1h <= -30)) {
+        } else if ((p5 != null && p5 <= -20) || (p1h != null && p1h <= -30)) {
           momentumBlock = `DUMPING 5m=${p5 ?? '?'}% 1h=${p1h ?? '?'}%`;
         }
         if (momentumBlock) {
