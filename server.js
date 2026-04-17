@@ -93,7 +93,7 @@ const {
   ADMIN_TELEGRAM_ID,
   PORT              = 3000,
   NODE_ENV          = 'development',
-  MIN_SCORE_TO_POST = 35,
+  MIN_SCORE_TO_POST = 50,
   SCAN_INTERVAL_MS  = 90 * 1000,
 } = process.env;
 
@@ -2274,6 +2274,26 @@ async function processCandidate(candidate, isRescan = false) {
     scoreResult.regimeAdjustedScore = regimeAdj.adjustedScore ?? scoreResult.score;
     scoreResult.regimeNotes         = regimeAdj.regimeNotes ?? [];
 
+    // ── NO-SIGNAL FLOOR: cap composite at 65 when no real alpha signal ─────
+    // "Structure-only" coins (clean dev, low top10, no snipers, but nothing
+    // else) were trivially hitting 80-100. Without actual smart money
+    // presence — or any wallet intel score above 0 — the ceiling stays at
+    // 65. Those coins can still hit WATCHLIST but never AUTO_POST on the
+    // strength of structure alone.
+    const hasWalletIntel = (enrichedCandidate.walletIntelScore ?? 0) > 0
+                        || (enrichedCandidate.smartMoneyScore  ?? 0) > 0
+                        || (enrichedCandidate.knownWinnerWalletCount ?? 0) > 0
+                        || enrichedCandidate._smartMoney
+                        || scoreResult.preLaunchPredicted
+                        || scoreResult.crossChainMatch;
+    if (!hasWalletIntel && scoreResult.score > 65) {
+      const prior = scoreResult.score;
+      scoreResult.score = 65;
+      (scoreResult.penalties = scoreResult.penalties || {}).wallet = scoreResult.penalties.wallet || [];
+      scoreResult.penalties.wallet.push(`-${prior - 65} NO_ALPHA_SIGNAL cap — no smart money, no wallet intel, no pre-launch/cross-chain hit`);
+      console.log(`[auto-caller] 🚧 $${enrichedCandidate.token??ca.slice(0,6)} capped at 65 (was ${prior}) — structure-only, no alpha signal`);
+    }
+
     let similarity = {};
     try { similarity = computeSimilarityScores(scoreResult) ?? {}; } catch {}
 
@@ -2482,6 +2502,24 @@ async function processCandidate(candidate, isRescan = false) {
 
     // Mark discovery time for pipeline budget tracking
     if (!enrichedCandidate._discoveredAt) enrichedCandidate._discoveredAt = Date.now();
+
+    // ── CLAUDE + OPENAI CONSENSUS GATE ───────────────────────────────────────
+    // Before AUTO_POST fires, require both AI layers to agree OR a single
+    // high-conviction override (score >= 65 AND at least one AI said yes).
+    // Bypassed only by smart-money cluster alert — checked in the next block.
+    if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney) {
+      const claudeOK = verdict && (verdict.decision === 'AUTO_POST' || verdict.decision === 'POST');
+      const openaiOK = openAIDecision && (openAIDecision.decision === 'POST' || openAIDecision.decision === 'PROMOTE');
+      const bothAgree   = claudeOK && openaiOK;
+      const eitherAndScore = (claudeOK || openaiOK) && scoreResult.score >= 65;
+
+      if (!bothAgree && !eitherAndScore) {
+        const reason = `Claude=${verdict?.decision ?? 'none'} OpenAI=${openAIDecision?.decision ?? 'none'} score=${scoreResult.score}`;
+        logEvent('INFO', 'CONSENSUS_GATE', `${enrichedCandidate.token ?? ca.slice(0,6)} AUTO_POST→WATCHLIST — ${reason}`);
+        console.log(`[auto-caller] 🧠 Consensus gate — $${enrichedCandidate.token ?? ca.slice(0,6)} demoted to WATCHLIST (${reason})`);
+        finalDecision = 'WATCHLIST';
+      }
+    }
 
     // ── Smart Money Watcher override ─────────────────────────────────────────
     // Cluster of ≥3 WINNER wallets in 10min is the highest-conviction signal
