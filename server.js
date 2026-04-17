@@ -6494,8 +6494,38 @@ app.post('/api/calls/cleanup-void', (req, res) => {
       return n;
     });
     const removed = tx(voidCalls.map(c => c.id));
-    console.log(`[cleanup] Removed ${removed} void calls (no token, no mcap, no price)`);
-    res.json({ ok: true, removed, ids: voidCalls.map(c => c.id) });
+    // Also clean the audit_archive table — the calls tab pulls from there
+    let archiveRemoved = 0;
+    try {
+      const voidArchive = dbInstance.prepare(
+        `SELECT id FROM audit_archive
+         WHERE (token IS NULL OR token = '') AND market_cap IS NULL
+           AND final_decision = 'AUTO_POST'`
+      ).all();
+      if (voidArchive.length) {
+        const delA = dbInstance.prepare(`DELETE FROM audit_archive WHERE id=?`);
+        const txA = dbInstance.transaction((ids) => {
+          let n = 0;
+          for (const id of ids) n += delA.run(id).changes;
+          return n;
+        });
+        archiveRemoved = txA(voidArchive.map(r => r.id));
+      }
+    } catch {}
+
+    // Clean candidates table — void AUTO_POSTs inflate totalPosted count
+    let candidatesFixed = 0;
+    try {
+      const r = dbInstance.prepare(
+        `UPDATE candidates SET posted=0, final_decision='IGNORE'
+         WHERE (token IS NULL OR token = '') AND market_cap IS NULL
+           AND final_decision = 'AUTO_POST' AND posted = 1`
+      ).run();
+      candidatesFixed = r.changes;
+    } catch {}
+
+    console.log(`[cleanup] Removed ${removed} void calls + ${archiveRemoved} void archive + ${candidatesFixed} void candidates fixed`);
+    res.json({ ok: true, removed, archiveRemoved, candidatesFixed });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
