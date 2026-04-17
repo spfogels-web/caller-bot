@@ -3263,6 +3263,46 @@ app.get('/dashboard', (_req, res) => {
 // Returns trend deltas (7d vs 30d), score-bucket accuracy, AI consensus
 // accuracy, and peak-multiple trend. All treats peak_multiple >= 2 as an
 // implicit WIN so stats are meaningful before auto-tracker resolves outcomes.
+// Wallet activity log — every buy detected by the smart-money watcher.
+// Query by wallet address OR by token mint. Used by the oracle for
+// "what did wallet X buy this week" and "who's accumulating $MEME right now".
+app.get('/api/wallets/activity', (req, res) => {
+  setCors(res);
+  try {
+    const { address, token, limit = 50, hours = 168 } = req.query;
+    if (!address && !token) {
+      return res.status(400).json({ ok: false, error: 'address or token query param required' });
+    }
+    const lim = Math.min(Number(limit), 200);
+    const h   = Math.min(Number(hours), 30 * 24);
+    let rows = [];
+    try {
+      if (address) {
+        rows = dbInstance.prepare(`
+          SELECT wa.*, tw.label, tw.category, tw.sol_balance
+          FROM wallet_activity wa
+          LEFT JOIN tracked_wallets tw ON tw.address = wa.wallet_address
+          WHERE wa.wallet_address = ?
+            AND wa.detected_at > datetime('now', '-' || ? || ' hours')
+          ORDER BY wa.block_time DESC, wa.id DESC
+          LIMIT ?
+        `).all(address, h, lim);
+      } else {
+        rows = dbInstance.prepare(`
+          SELECT wa.*, tw.label, tw.category, tw.sol_balance
+          FROM wallet_activity wa
+          LEFT JOIN tracked_wallets tw ON tw.address = wa.wallet_address
+          WHERE wa.token_mint = ?
+            AND wa.detected_at > datetime('now', '-' || ? || ' hours')
+          ORDER BY wa.block_time DESC, wa.id DESC
+          LIMIT ?
+        `).all(token, h, lim);
+      }
+    } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+    res.json({ ok: true, count: rows.length, rows });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // ─── Scoring Config — dashboard editable knobs ───────────────────────────
 app.get('/api/config/scoring', (req, res) => {
   setCors(res);
@@ -3820,15 +3860,29 @@ app.post('/api/agent', async (req, res) => {
         const drilldowns = mentioned.map(addr => {
           try {
             const w = dbInstance.prepare(`SELECT * FROM tracked_wallets WHERE address=?`).get(addr);
+            // Pull last 10 buys from the activity log (populated by the
+            // smart-money watcher for all 200 tracked top wallets).
+            let recent = [];
+            try {
+              recent = dbInstance.prepare(`
+                SELECT token_mint, token_amount, block_time, detected_at
+                FROM wallet_activity
+                WHERE wallet_address = ?
+                ORDER BY block_time DESC, id DESC LIMIT 10
+              `).all(addr);
+            } catch {}
+            const activityBlock = recent.length
+              ? `\n  Recent buys (${recent.length}):\n${recent.map(r => `    • ${r.token_mint} — ${r.token_amount ?? '?'} tokens @ ${r.detected_at}`).join('\n')}`
+              : '\n  Recent buys: none logged yet (activity only tracked for top 200 wallets)';
             if (w) {
-              return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}:
+              return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)} [${addr}]:
   Label: ${w.label||'(none)'} | Category: ${w.category} | Score: ${w.score}/100
   SOL balance: ${fmtSol(w.sol_balance)} (scanned ${w.sol_scanned_at||'never'})
   Win rate: ${w.win_rate ? Math.round(w.win_rate*100)+'%' : 'n/a'} | Avg ROI: ${w.avg_roi ? Math.round(w.avg_roi*100)+'%' : 'n/a'}
   Found in: ${w.wins_found_in||0} wins / ${w.losses_in||0} losses
-  Source: ${w.source||'?'} | Updated: ${w.updated_at||'?'}`;
+  Source: ${w.source||'?'} | Updated: ${w.updated_at||'?'}${activityBlock}`;
             }
-            return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}: NOT IN DATABASE — can be added via the Brain Analyzer or manual add.`;
+            return `MENTIONED WALLET ${addr.slice(0,8)}…${addr.slice(-4)}: NOT IN DATABASE — can be added via the Brain Analyzer or manual add.${activityBlock}`;
           } catch { return ''; }
         }).filter(Boolean).join('\n\n');
 

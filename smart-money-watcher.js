@@ -21,9 +21,11 @@ const HELIUS_API_BASE = 'https://api.helius.xyz/v0';
 const CLUSTER_WINDOW_MS       = 10 * 60_000;  // 10-min sliding cluster window
 const CLUSTER_THRESHOLD       = 3;             // ≥3 WINNER buys = cluster alert
 const POLL_INTERVAL_MS        = 90_000;        // poll every 90s
-const TOP_N_WATCHED           = 60;            // watch top 60 WINNERs
+// User upgraded from 60 → 200 watched wallets. Helius Enhanced Transactions
+// tolerates the 3x load easily at this cadence (~130 req/min peak).
+const TOP_N_WATCHED           = 200;
 const PER_WALLET_TX_LIMIT     = 10;            // last 10 swaps each wallet
-const INTER_WALLET_DELAY_MS   = 180;           // gentle rate-limit between reqs
+const INTER_WALLET_DELAY_MS   = 120;           // tightened for larger watchlist
 const SEEN_TX_TTL_MS          = 6 * 3_600_000; // forget signatures after 6h
 const ALERT_COOLDOWN_HOURS    = 24;            // dedupe alerts per coin
 
@@ -146,9 +148,6 @@ async function fetchWalletSwaps(address) {
 function extractBoughtMint(tx, walletAddress) {
   // Helius Enhanced Transactions shape: tokenTransfers[] with fromUserAccount/toUserAccount/mint
   const transfers = tx.tokenTransfers ?? [];
-  // The buyer is receiving the token — find a transfer TO the watched wallet
-  // where the mint is NOT a stable/wrapped token. Prefer the largest transfer
-  // if there are multiple (avoids picking up fee-token dust).
   let best = null;
   for (const t of transfers) {
     if (t.toUserAccount !== walletAddress) continue;
@@ -158,6 +157,26 @@ function extractBoughtMint(tx, walletAddress) {
     if (!best || amt > Number(best.tokenAmount ?? 0)) best = t;
   }
   return best?.mint ?? null;
+}
+
+// Persist every detected buy to wallet_activity so we can later query
+// "every token wallet X bought" or "which wallets are accumulating token Y."
+function recordWalletActivity(wallet, tokenMint, tx) {
+  if (!_db || !wallet?.address || !tokenMint || !tx?.signature) return;
+  try {
+    const xfer = (tx.tokenTransfers ?? []).find(t =>
+      t.toUserAccount === wallet.address && t.mint === tokenMint
+    );
+    const amount = xfer ? Number(xfer.tokenAmount ?? 0) : null;
+    _db.prepare(`
+      INSERT OR IGNORE INTO wallet_activity
+        (wallet_address, token_mint, tx_signature, side, token_amount, block_time)
+      VALUES (?, ?, ?, 'BUY', ?, ?)
+    `).run(wallet.address, tokenMint, tx.signature, amount, tx.timestamp || null);
+  } catch (err) {
+    // Don't let DB write errors stop the watcher loop — log once and move on
+    console.warn('[smart-money] wallet_activity write failed:', err.message);
+  }
 }
 
 const STABLE_OR_WRAPPED = new Set([
@@ -171,6 +190,12 @@ function isStableOrWrapped(mint) { return STABLE_OR_WRAPPED.has(mint); }
 
 function onWinnerBuy(token, wallet, tx) {
   const now = Date.now();
+
+  // Persist EVERY detected buy to wallet_activity — even ones that don't
+  // trigger an alert. Builds a permanent ledger the oracle can query
+  // ("show me every token wallet X bought this week").
+  recordWalletActivity(wallet, token, tx);
+
   if (!clusterMap.has(token)) clusterMap.set(token, new Map());
   const buyers = clusterMap.get(token);
   // Record only the first buy per wallet in this window

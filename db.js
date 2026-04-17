@@ -568,6 +568,26 @@ function runMigrations() {
        UNIQUE(address, ca)
      )`,
     `CREATE INDEX IF NOT EXISTS idx_wa_address ON wallet_appearances(address)`,
+    // ── Wallet activity log — every buy detected by the smart-money watcher ──
+    // Populated in real-time as the top-200 tracked wallets swap. Lets the
+    // oracle answer "show me every token wallet X bought this week" or
+    // "which wallets are accumulating $MEME right now".
+    `CREATE TABLE IF NOT EXISTS wallet_activity (
+       id              INTEGER PRIMARY KEY AUTOINCREMENT,
+       wallet_address  TEXT    NOT NULL,
+       token_mint      TEXT    NOT NULL,
+       tx_signature    TEXT    NOT NULL,
+       side            TEXT    NOT NULL DEFAULT 'BUY',
+       token_amount    REAL,
+       block_time      INTEGER,
+       detected_at     TEXT    DEFAULT (datetime('now')),
+       UNIQUE(tx_signature, wallet_address)
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_wact_wallet      ON wallet_activity(wallet_address, block_time DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_wact_token       ON wallet_activity(token_mint, block_time DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_wact_detected_at ON wallet_activity(detected_at DESC)`,
+    // Keep history bounded — 30 days is plenty for cluster analysis
+    `DELETE FROM wallet_activity WHERE detected_at < datetime('now', '-30 days')`,
   ];
 
   let added = 0;
