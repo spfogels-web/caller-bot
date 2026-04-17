@@ -960,6 +960,21 @@ function invalidateMemoryCache() {
  * Get current AI config overrides set by the operator or AI agent.
  */
 let AI_CONFIG_OVERRIDES = {};
+// Persist AI_CONFIG_OVERRIDES to SQLite so pausePosting survives restarts.
+try {
+  dbInstance.exec(`CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)`);
+  const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='ai_config_overrides'`).get();
+  if (row?.value) {
+    AI_CONFIG_OVERRIDES = JSON.parse(row.value);
+    console.log('[config] Restored AI_CONFIG_OVERRIDES from DB:', JSON.stringify(AI_CONFIG_OVERRIDES));
+  }
+} catch (err) { console.warn('[config] Failed to restore overrides:', err.message); }
+
+function persistAIConfig() {
+  try {
+    dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('ai_config_overrides', ?)`).run(JSON.stringify(AI_CONFIG_OVERRIDES));
+  } catch {}
+}
 function getAIConfigSummary() {
   const overrides = Object.keys(AI_CONFIG_OVERRIDES).length;
   return overrides > 0
@@ -1639,6 +1654,7 @@ async function handleConfigCommand(chatId, input, fromAdminId) {
   const parts = input.trim().split(/\s+/);
   if (parts[0].toLowerCase() === 'reset') {
     AI_CONFIG_OVERRIDES = {};
+    persistAIConfig();
     setMode(activeMode.name);
     logEvent('INFO', 'AI_CONFIG_RESET', 'via telegram');
     await sendTelegramMessage(chatId, '✅ All AI config overrides cleared. Reset to defaults.');
@@ -1654,6 +1670,7 @@ async function handleConfigCommand(chatId, input, fromAdminId) {
   }
   const prev = AI_CONFIG_OVERRIDES[key];
   AI_CONFIG_OVERRIDES[key] = value;
+  persistAIConfig();
   if (key === 'maxMarketCapOverride' && typeof value === 'number') activeMode.maxMarketCap = value;
   if (key === 'minScoreOverride' && typeof value === 'number') activeMode.minScore = value;
   logEvent('INFO', 'AI_CONFIG_CHANGE', JSON.stringify({key, prev, value, source: 'telegram'}));
@@ -2167,6 +2184,16 @@ async function processCandidate(candidate, isRescan = false) {
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
 
+    // ── DATA QUALITY GATE: reject tokens with zero enrichment data ────────
+    // If Birdeye AND Helius both failed AND we have no market cap, this token
+    // has no real data — scoring is meaningless. Don't waste Claude/OpenAI
+    // credits evaluating air.
+    if (!enrichedCandidate.birdeyeOk && !enrichedCandidate.heliusOk && enrichedCandidate.marketCap == null) {
+      console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
+      logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
+      return;
+    }
+
     // ── MCap tier bonuses ─────────────────────────────────────────────────
     // Sweet spot $13K-$40K: +8 points (historical data shows best ROI here)
     // Secondary $40K-$80K: +3 points (100% WR 2/2 historically, still viable)
@@ -2348,10 +2375,16 @@ async function processCandidate(candidate, isRescan = false) {
             console.log(`[ai-os] ⬆️  AI upgraded $${enrichedCandidate.token}: HOLD → AUTO_POST (gem range)`);
           }
           // AI downgrades: Claude sees red flags scorer missed → block post
-          if (aiDecision === 'IGNORE' && finalDecision === 'AUTO_POST' && (verdict.score ?? 100) < 40) {
-            finalDecision = 'WATCHLIST';
-            logEvent('INFO', 'AI_DOWNGRADE', `${enrichedCandidate.token} AUTO_POST→WATCHLIST ai=${verdict.score}`);
-            console.log(`[ai-os] ⬇️  AI downgraded $${enrichedCandidate.token}: AUTO_POST → WATCHLIST`);
+          if (aiDecision === 'IGNORE' && finalDecision === 'AUTO_POST') {
+            if ((verdict.score ?? 100) < 25 || verdict.risk === 'EXTREME') {
+              finalDecision = 'IGNORE';
+              logEvent('INFO', 'AI_HARD_BLOCK', `${enrichedCandidate.token} AUTO_POST→IGNORE ai=${verdict.score} risk=${verdict.risk}`);
+              console.log(`[ai-os] 🛑 AI HARD BLOCKED $${enrichedCandidate.token}: AUTO_POST → IGNORE (score ${verdict.score}, risk ${verdict.risk})`);
+            } else if ((verdict.score ?? 100) < 40) {
+              finalDecision = 'WATCHLIST';
+              logEvent('INFO', 'AI_DOWNGRADE', `${enrichedCandidate.token} AUTO_POST→WATCHLIST ai=${verdict.score}`);
+              console.log(`[ai-os] ⬇️  AI downgraded $${enrichedCandidate.token}: AUTO_POST → WATCHLIST`);
+            }
           }
           // AI instant blocklist override
           if (aiDecision === 'BLOCKLIST') {
@@ -2407,12 +2440,20 @@ async function processCandidate(candidate, isRescan = false) {
             console.log(`[openai-v8] $${enrichedCandidate.token} → ${aiAction} (${conviction}% conviction) | was: ${finalDecision}`);
             logEvent('INFO', 'OPENAI_DECISION', `${enrichedCandidate.token} openai=${aiAction} conviction=${conviction} prev=${finalDecision}`);
 
-            // OpenAI is the final authority — apply its decision
-            if (aiAction === 'POST')       finalDecision = 'AUTO_POST';
-            else if (aiAction === 'PROMOTE')   finalDecision = 'WATCHLIST'; // promote = watchlist internally
-            else if (aiAction === 'WATCHLIST') finalDecision = 'WATCHLIST';
-            else if (aiAction === 'RETEST')    finalDecision = 'RETEST';
-            else if (aiAction === 'IGNORE')    finalDecision = 'IGNORE';
+            // OpenAI is the final authority — UNLESS Claude hard-blocked it.
+            // Claude hard-blocks (IGNORE with score < 25 or EXTREME risk) can't
+            // be overridden — those are data-void or manipulation signals.
+            const claudeHardBlocked = verdict?.risk === 'EXTREME' && (verdict?.score ?? 100) < 25;
+            if (claudeHardBlocked && aiAction === 'POST') {
+              console.log(`[openai-v8] 🛑 OpenAI wanted POST but Claude hard-blocked (score ${verdict.score}, ${verdict.risk}) — keeping IGNORE`);
+              logEvent('INFO', 'OPENAI_OVERRIDE_BLOCKED', `${enrichedCandidate.token} OpenAI=POST blocked by Claude hard-block`);
+            } else {
+              if (aiAction === 'POST')       finalDecision = 'AUTO_POST';
+              else if (aiAction === 'PROMOTE')   finalDecision = 'WATCHLIST';
+              else if (aiAction === 'WATCHLIST') finalDecision = 'WATCHLIST';
+              else if (aiAction === 'RETEST')    finalDecision = 'RETEST';
+              else if (aiAction === 'IGNORE')    finalDecision = 'IGNORE';
+            }
 
             // For RETEST, set the timer from OpenAI's recommendation
             if (aiAction === 'RETEST' && openAIDecision.retestInMinutes) {
@@ -2619,8 +2660,9 @@ async function processCandidate(candidate, isRescan = false) {
       // ── CA beacon for third-party bots (Phanes, Sect, etc.) ──────────────
       // Sent as plain text, no HTML parse_mode, no preview, just the CA —
       // this is what the leaderboard bots scan the chat for.
+      // Respect pausePosting — if posting is paused, don't send the beacon either.
       const caBeacon = enrichedCandidate.contractAddress ?? '';
-      if (caBeacon && TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID) {
+      if (caBeacon && TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID && !AI_CONFIG_OVERRIDES.pausePosting) {
         try {
           const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
             method: 'POST',
@@ -3319,6 +3361,7 @@ app.post('/api/ai/config', (req, res) => {
 
     const prev = AI_CONFIG_OVERRIDES[key];
     AI_CONFIG_OVERRIDES[key] = value;
+    persistAIConfig();
 
     // Apply live mode overrides immediately
     if (key === 'maxMarketCapOverride'      && typeof value === 'number') activeMode.maxMarketCap   = value;
@@ -3350,6 +3393,7 @@ app.delete('/api/ai/config', (req, res) => {
   setCors(res);
   const prev = { ...AI_CONFIG_OVERRIDES };
   AI_CONFIG_OVERRIDES = {};
+  persistAIConfig();
   // Reset mode to defaults
   setMode(activeMode.name);
   logEvent('INFO', 'AI_CONFIG_RESET', JSON.stringify(prev));
@@ -3904,6 +3948,7 @@ app.post('/api/agent/apply', (req, res) => {
     }
     const prev = AI_CONFIG_OVERRIDES[key];
     AI_CONFIG_OVERRIDES[key] = value;
+    persistAIConfig();
     if (key === 'maxMarketCapOverride' && typeof value === 'number') activeMode.maxMarketCap = value;
     if (key === 'minScoreOverride' && typeof value === 'number') activeMode.minScore = value;
     if (key === 'sweetSpotMin' && typeof value === 'number') AI_CONFIG_OVERRIDES.sweetSpotMin = value;
@@ -6433,6 +6478,57 @@ app.get('/api/candidates/:id', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Must be defined BEFORE /api/calls/:id routes to avoid param collision
+app.post('/api/calls/cleanup-void', (req, res) => {
+  setCors(res);
+  try {
+    const voidCalls = dbInstance.prepare(
+      `SELECT id, contract_address FROM calls
+       WHERE token IS NULL AND market_cap_at_call IS NULL AND price_at_call IS NULL`
+    ).all();
+    if (!voidCalls.length) return res.json({ ok: true, removed: 0, message: 'No void calls to clean' });
+    const del = dbInstance.prepare(`DELETE FROM calls WHERE id=?`);
+    const tx = dbInstance.transaction((ids) => {
+      let n = 0;
+      for (const id of ids) n += del.run(id).changes;
+      return n;
+    });
+    const removed = tx(voidCalls.map(c => c.id));
+    // Also clean the audit_archive table — the calls tab pulls from there
+    let archiveRemoved = 0;
+    try {
+      const voidArchive = dbInstance.prepare(
+        `SELECT id FROM audit_archive
+         WHERE (token IS NULL OR token = '') AND market_cap IS NULL
+           AND final_decision = 'AUTO_POST'`
+      ).all();
+      if (voidArchive.length) {
+        const delA = dbInstance.prepare(`DELETE FROM audit_archive WHERE id=?`);
+        const txA = dbInstance.transaction((ids) => {
+          let n = 0;
+          for (const id of ids) n += delA.run(id).changes;
+          return n;
+        });
+        archiveRemoved = txA(voidArchive.map(r => r.id));
+      }
+    } catch {}
+
+    // Clean candidates table — void AUTO_POSTs inflate totalPosted count
+    let candidatesFixed = 0;
+    try {
+      const r = dbInstance.prepare(
+        `UPDATE candidates SET posted=0, final_decision='IGNORE'
+         WHERE (token IS NULL OR token = '') AND market_cap IS NULL
+           AND final_decision = 'AUTO_POST' AND posted = 1`
+      ).run();
+      candidatesFixed = r.changes;
+    } catch {}
+
+    console.log(`[cleanup] Removed ${removed} void calls + ${archiveRemoved} void archive + ${candidatesFixed} void candidates fixed`);
+    res.json({ ok: true, removed, archiveRemoved, candidatesFixed });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/api/calls', (req, res) => {
   setCors(res);
   try {
@@ -6864,6 +6960,8 @@ app.get('/api/v8/wallet-db-status', (req, res) => {
   res.json({ ok: true, ...getWalletDbStatus() });
 });
 
+// Remove bogus calls that had no enrichment data (token=NULL, mcap=NULL).
+// These pollute win-rate stats and clutter the dashboard.
 app.get('/api/v8/learning-stats', (req, res) => {
   setCors(res);
   res.json({ ok: true, ...getLearningStats(dbInstance) });
@@ -7032,6 +7130,126 @@ app.get('/api/diagnose/claude', async (req, res) => {
     result.diagnosis = '⚠ Network/timeout — could not reach api.anthropic.com';
     res.status(500).json(result);
   }
+});
+
+// Comprehensive live-check of every external API the bot depends on.
+// Returns per-API: keyPresent, status, latency, ok, sample data, error.
+app.get('/api/diagnose/apis', async (req, res) => {
+  setCors(res);
+  // Use a known-good SOL mint so every endpoint has something to chew on.
+  const testCA = 'So11111111111111111111111111111111111111112';
+  const started = Date.now();
+  const out = {
+    helius:      { keyPresent: !!process.env.HELIUS_API_KEY,    ok: false, ms: 0, status: null, error: null, sample: null },
+    birdeye:     { keyPresent: !!process.env.BIRDEYE_API_KEY,   ok: false, ms: 0, status: null, error: null, sample: null },
+    bubblemap:   {                                              ok: false, ms: 0, status: null, error: null, sample: null },
+    solscan:     { keyPresent: !!process.env.SOLSCAN_API_KEY,   ok: false, ms: 0, status: null, error: null, sample: null },
+    dexscreener: {                                              ok: false, ms: 0, status: null, error: null, sample: null },
+    dune:        { keyPresent: !!process.env.DUNE_API_KEY,      ok: false, ms: 0, status: null, error: null, sample: null },
+  };
+
+  // Helius
+  if (out.helius.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'diag', method: 'getHealth' }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.helius.status = r.status; out.helius.ms = Date.now() - t0;
+      const j = await r.json();
+      out.helius.ok = r.ok && j?.result === 'ok';
+      out.helius.sample = j?.result ?? j?.error ?? null;
+      if (j?.error) out.helius.error = JSON.stringify(j.error);
+    } catch (e) { out.helius.error = e.message; out.helius.ms = Date.now() - t0; }
+  }
+
+  // Birdeye
+  if (out.birdeye.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://public-api.birdeye.so/defi/token_overview?address=${testCA}`, {
+        headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.birdeye.status = r.status; out.birdeye.ms = Date.now() - t0;
+      const j = await r.json();
+      out.birdeye.ok = r.ok && !!j?.data?.price;
+      out.birdeye.sample = j?.data ? { price: j.data.price, mc: j.data.mc } : null;
+      if (!r.ok) out.birdeye.error = j?.message || 'HTTP ' + r.status;
+    } catch (e) { out.birdeye.error = e.message; out.birdeye.ms = Date.now() - t0; }
+  }
+
+  // BubbleMaps (no key needed)
+  {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://api-legacy.bubblemaps.io/map-metadata?token=${testCA}&chain=sol`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.bubblemap.status = r.status; out.bubblemap.ms = Date.now() - t0;
+      const j = await r.json();
+      out.bubblemap.ok = r.ok && !!j;
+      out.bubblemap.sample = j?.status ?? j?.message ?? 'ok';
+      if (!r.ok) out.bubblemap.error = 'HTTP ' + r.status;
+    } catch (e) { out.bubblemap.error = e.message; out.bubblemap.ms = Date.now() - t0; }
+  }
+
+  // Solscan
+  if (out.solscan.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://pro-api.solscan.io/v2.0/token/meta?address=${testCA}`, {
+        headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.solscan.status = r.status; out.solscan.ms = Date.now() - t0;
+      const j = await r.json();
+      out.solscan.ok = r.ok && !!j?.data;
+      if (!r.ok) out.solscan.error = j?.message || 'HTTP ' + r.status;
+    } catch (e) { out.solscan.error = e.message; out.solscan.ms = Date.now() - t0; }
+  }
+
+  // DexScreener (no key needed — primary price fallback)
+  {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${testCA}`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.dexscreener.status = r.status; out.dexscreener.ms = Date.now() - t0;
+      const j = await r.json();
+      out.dexscreener.ok = r.ok && (j?.pairs?.length ?? 0) > 0;
+      out.dexscreener.sample = { pairs: j?.pairs?.length ?? 0 };
+      if (!r.ok) out.dexscreener.error = 'HTTP ' + r.status;
+    } catch (e) { out.dexscreener.error = e.message; out.dexscreener.ms = Date.now() - t0; }
+  }
+
+  // Dune — test with a cheap list-queries call (no SQL execution)
+  if (out.dune.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch('https://api.dune.com/api/v1/query?limit=1', {
+        headers: { 'X-Dune-Api-Key': process.env.DUNE_API_KEY },
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.dune.status = r.status; out.dune.ms = Date.now() - t0;
+      out.dune.ok = r.ok || r.status === 401 ? true : false; // 401 means key issue, anything else connectivity
+      if (!r.ok) out.dune.error = 'HTTP ' + r.status;
+    } catch (e) { out.dune.error = e.message; out.dune.ms = Date.now() - t0; }
+  }
+
+  const total = Date.now() - started;
+  const up   = Object.values(out).filter(x => x.ok).length;
+  const total_n = Object.keys(out).length;
+  res.json({
+    ok: true,
+    summary: `${up}/${total_n} APIs healthy`,
+    total_ms: total,
+    checked_at: new Date().toISOString(),
+    result: out,
+  });
 });
 
 app.get('/api/db/health', (req, res) => {
@@ -7863,6 +8081,16 @@ app.listen(PORT, async () => {
 
   console.log('[server] Performance tracker: starts in 5min, runs every 30min');
   console.log('[server] WIN criteria: +20% at 6h or 12h | LOSS: -30% at 6h or 12h');
+
+  // ── BOOT CLEANUP: purge void calls/archive/candidates from data-void era ──
+  try {
+    const r1 = dbInstance.prepare(`DELETE FROM calls WHERE token IS NULL AND market_cap_at_call IS NULL AND price_at_call IS NULL`).run();
+    const r2 = dbInstance.prepare(`DELETE FROM audit_archive WHERE (token IS NULL OR token='') AND market_cap IS NULL AND final_decision='AUTO_POST'`).run();
+    const r3 = dbInstance.prepare(`UPDATE candidates SET posted=0, final_decision='IGNORE' WHERE (token IS NULL OR token='') AND market_cap IS NULL AND final_decision='AUTO_POST' AND posted=1`).run();
+    if (r1.changes || r2.changes || r3.changes) {
+      console.log(`[boot-cleanup] Removed ${r1.changes} void calls + ${r2.changes} void archive + ${r3.changes} void candidates fixed`);
+    }
+  } catch (err) { console.warn('[boot-cleanup]', err.message); }
 
   setTimeout(async () => {
     try { await uploadBannerToTelegram(); }

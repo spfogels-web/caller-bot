@@ -214,6 +214,21 @@ body::before {
 .chip-cyan  { border-color: rgba(24,255,255,0.3); color: var(--cyan);  background: rgba(24,255,255,0.08); }
 .chip-orange{ border-color: rgba(255,109,0,0.3);  color: var(--orange);background: rgba(255,109,0,0.08); }
 .chip-dim   { border-color: rgba(255,255,255,0.08); color: var(--text3); background: transparent; }
+.bot-toggle { display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none; }
+.bot-toggle-label { font-family:var(--mono);font-size:8px;letter-spacing:1.5px;font-weight:700; }
+.bot-toggle-label.on  { color:var(--green); }
+.bot-toggle-label.off { color:#ff1744; }
+.bot-toggle-track {
+  position:relative;width:36px;height:18px;border-radius:9px;
+  background:rgba(255,23,68,0.25);border:1px solid rgba(255,23,68,0.4);
+  transition:all .3s ease;
+}
+.bot-toggle-track.on { background:rgba(0,230,118,0.25);border-color:rgba(0,230,118,0.4); }
+.bot-toggle-thumb {
+  position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+  background:#ff1744;box-shadow:0 0 6px #ff1744;transition:all .3s ease;
+}
+.bot-toggle-track.on .bot-toggle-thumb { left:20px;background:var(--green);box-shadow:0 0 6px var(--green); }
 .pulse { width:6px;height:6px;border-radius:50%;animation:pulse 1.2s ease-in-out infinite; }
 .pulse-g { background:var(--green); box-shadow:0 0 6px var(--green); }
 .pulse-c { background:var(--cyan);  box-shadow:0 0 6px var(--cyan); }
@@ -3027,6 +3042,10 @@ body::before {
 
   <!-- Right section: status + AI button + hamburger -->
   <div class="header-right">
+    <div class="bot-toggle" id="botToggle" onclick="toggleBot()">
+      <span class="bot-toggle-label on" id="botToggleLabel">ON</span>
+      <div class="bot-toggle-track on" id="botToggleTrack"><div class="bot-toggle-thumb"></div></div>
+    </div>
     <div class="status-chip chip-green" id="onlineChip"><div class="pulse pulse-g"></div>ONLINE</div>
     <div class="status-chip chip-cyan" id="heliusChip" style="display:none"><div class="pulse pulse-c"></div>HELIUS ⚡</div>
     <div class="status-chip chip-dim" id="modeChip">NEW_COINS</div>
@@ -6324,6 +6343,32 @@ async function applyAIConfig(){
 async function resetAIConfig(){await fetch(location.origin+'/api/ai/config',{method:'DELETE'});const st=document.getElementById('cfgStatus');if(st)st.textContent='✓ Reset to defaults';setTimeout(()=>loadAI(),2000);}
 async function pausePosting(pause){await fetch(location.origin+'/api/ai/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'pausePosting',value:pause,reason:'dashboard'})});const st=document.getElementById('cfgStatus');if(st)st.textContent=pause?'⏸ Posting PAUSED':'▶ Posting RESUMED';}
 
+// ── Bot ON/OFF master toggle ──────────────────────────────────────────
+let _botOn = true;
+async function toggleBot() {
+  _botOn = !_botOn;
+  const label = document.getElementById('botToggleLabel');
+  const track = document.getElementById('botToggleTrack');
+  const chip  = document.getElementById('onlineChip');
+  if (label) { label.textContent = _botOn ? 'ON' : 'OFF'; label.className = 'bot-toggle-label ' + (_botOn ? 'on' : 'off'); }
+  if (track) { track.className = 'bot-toggle-track' + (_botOn ? ' on' : ''); }
+  if (chip)  { chip.className = 'status-chip ' + (_botOn ? 'chip-green' : 'chip-orange'); chip.innerHTML = _botOn ? '<div class="pulse pulse-g"></div>ONLINE' : '<div class="pulse pulse-o"></div>PAUSED'; }
+  await pausePosting(!_botOn);
+}
+async function syncBotToggle() {
+  try {
+    const r = await fetch('/api/ai/config'); const d = await r.json();
+    const paused = d?.overrides?.pausePosting === true;
+    _botOn = !paused;
+    const label = document.getElementById('botToggleLabel');
+    const track = document.getElementById('botToggleTrack');
+    const chip  = document.getElementById('onlineChip');
+    if (label) { label.textContent = _botOn ? 'ON' : 'OFF'; label.className = 'bot-toggle-label ' + (_botOn ? 'on' : 'off'); }
+    if (track) { track.className = 'bot-toggle-track' + (_botOn ? ' on' : ''); }
+    if (chip)  { chip.className = 'status-chip ' + (_botOn ? 'chip-green' : 'chip-orange'); chip.innerHTML = _botOn ? '<div class="pulse pulse-g"></div>ONLINE' : '<div class="pulse pulse-o"></div>PAUSED'; }
+  } catch {}
+}
+
 async function generateThesis(){
   const input=document.getElementById('thesisTokenInput');
   const query=(input?.value||'').trim();if(!query)return;
@@ -6558,6 +6603,7 @@ function startAutoRefresh(){
 // ── BOOT ──────────────────────────────────────────────────
 loadOverview();
 loadPromotedSidebar();
+syncBotToggle();
 // Pre-load wallet tiles in the background so they're ready the moment
 // the user opens the Smart Money tab — no waiting, no empty grid.
 setTimeout(() => { if (typeof loadWalletTiles === 'function') loadWalletTiles(); }, 2000);

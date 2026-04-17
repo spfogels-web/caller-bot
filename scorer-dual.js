@@ -227,6 +227,15 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null) {
   else                                                           { p = 0; }
   parts.momentumAccel = p;
 
+  // 9. Late-pump penalty — if the token already ran 300%+ we're chasing, not discovering
+  const p1h  = m.priceChange1h;
+  const p24h = m.priceChange24h;
+  let latePumpPenalty = 0;
+  if (p1h != null && p1h > 500)       { latePumpPenalty = 40; risks.push(`Already pumped +${p1h.toFixed(0)}% in 1h — missed the entry`); }
+  else if (p1h != null && p1h > 300)  { latePumpPenalty = 25; risks.push(`Up +${p1h.toFixed(0)}% in 1h — late entry risk`); }
+  else if (p24h != null && p24h > 500) { latePumpPenalty = 20; risks.push(`Up +${p24h.toFixed(0)}% in 24h — extended`); }
+  parts.latePumpPenalty = -latePumpPenalty;
+
   const total = Object.values(parts).reduce((a, b) => a + b, 0);
   return { score: clamp(total), parts, reasons, risks, model: 'discovery' };
 }
@@ -322,6 +331,15 @@ export function scoreRunnerCoin(candidate, metricsIn = null) {
   else if (socials === 1) p = 1;
   if (p > 0) reasons.push(`${socials} social channel(s) active`);
   parts.attentionSignal = p;
+
+  // 9. Late-pump penalty — runners that already extended 300%+ are chasing
+  const rp1h  = m.priceChange1h;
+  const rp24h = m.priceChange24h;
+  let runnerLatePenalty = 0;
+  if (rp1h != null && rp1h > 500)       { runnerLatePenalty = 40; risks.push(`Already +${rp1h.toFixed(0)}% in 1h — parabolic top risk`); }
+  else if (rp1h != null && rp1h > 300)  { runnerLatePenalty = 25; risks.push(`Up +${rp1h.toFixed(0)}% in 1h — extended runner`); }
+  else if (rp24h != null && rp24h > 500) { runnerLatePenalty = 20; risks.push(`Up +${rp24h.toFixed(0)}% in 24h — late continuation`); }
+  parts.latePumpPenalty = -runnerLatePenalty;
 
   const total = Object.values(parts).reduce((a, b) => a + b, 0);
   return { score: clamp(total), parts, reasons, risks, model: 'runner' };
