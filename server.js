@@ -377,6 +377,20 @@ try {
     CREATE INDEX IF NOT EXISTS idx_tw_source   ON tracked_wallets(source);
     CREATE INDEX IF NOT EXISTS idx_tw_score    ON tracked_wallets(score DESC);
   `);
+
+  // ── Bot Knowledge / Persistent Memory ──────────────────────────────────────
+  // Stores everything the operator teaches the bot — strategies, patterns,
+  // chart analysis, document insights. Loaded into every AI prompt.
+  dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS bot_knowledge (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      category   TEXT    DEFAULT 'general',
+      title      TEXT,
+      content    TEXT    NOT NULL,
+      source     TEXT    DEFAULT 'operator',
+      created_at TEXT    DEFAULT (datetime('now'))
+    );
+  `);
   console.log('[db] ✓ tracked_wallets table ready');
 
 // ─── Audit Archive (500 most recent promoted/scanned tokens) ──────────────────
@@ -926,6 +940,20 @@ function buildBotMemory() {
         `BOT MEMORY SUMMARY: ${summary.total} total calls | ${summary.wins}W / ${summary.losses}L / ${summary.pending} pending | Overall win rate: ${summary.winRate}\n`
       );
     }
+
+    // ── Operator-taught knowledge (uploaded docs, images, strategies) ────────
+    try {
+      const knowledge = dbInstance.prepare(
+        `SELECT title, content, category, created_at FROM bot_knowledge ORDER BY created_at DESC LIMIT 50`
+      ).all();
+      if (knowledge.length) {
+        out.push('\nOPERATOR KNOWLEDGE BASE (' + knowledge.length + ' entries — treat as gospel):');
+        for (const k of knowledge) {
+          const label = k.title ? `[${k.category}] ${k.title}` : `[${k.category}]`;
+          out.push(`  ${label}: ${k.content.slice(0, 300)}`);
+        }
+      }
+    } catch {}
 
     return out.length > 1 ? out.join('\n') : 'Insufficient call history for pattern analysis yet.';
   } catch (err) {
@@ -3839,15 +3867,25 @@ If Claude's proposal is vague or unprovable, REJECT it and demand specifics.`;
   }
 });
 
-app.post('/api/agent', async (req, res) => {
+app.post('/api/agent', express.json({ limit: '10mb' }), async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) {
     return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured on server' });
   }
 
   try {
-    const { messages, system, context, walletContext } = req.body ?? {};
+    const { messages, system, context, walletContext, saveToMemory } = req.body ?? {};
     if (!messages?.length) return res.status(400).json({ ok: false, error: 'messages required' });
+
+    // If the user asked the bot to remember something, save it
+    if (saveToMemory) {
+      try {
+        dbInstance.prepare(
+          `INSERT INTO bot_knowledge (title, content, category) VALUES (?,?,?)`
+        ).run(saveToMemory.title || null, saveToMemory.content, saveToMemory.category || 'general');
+        invalidateMemoryCache();
+      } catch {}
+    }
 
     // Optional wallet-context block — used by the Smart Money tab chat so the
     // agent can answer questions about specific wallets, the database, etc.
@@ -4000,7 +4038,11 @@ BOT PARAMETERS (v7.0):
 - Stop Loss: -25% | TP1: 2× | TP2: 5× | TP3: 10×
 - AI evaluates EVERY token scanned with in-context learning
 
-PERSONALITY: Direct, data-driven, decisive. You give clear actionable answers. Reference real numbers when available. Flag when data is missing.`;
+PERSONALITY: Direct, data-driven, decisive. You give clear actionable answers. Reference real numbers when available. Flag when data is missing.
+
+IMAGE/DOCUMENT ANALYSIS: When the operator sends images (charts, screenshots, documents), analyze them thoroughly — identify patterns, tokens, wallet behaviors, entry/exit signals. Extract every actionable insight.
+
+MEMORY: When the operator teaches you something important (strategy, pattern, rule, insight), end your reply with a line starting with "💾 SAVED:" followed by a one-line summary of what you learned. The system will persist this to your knowledge base automatically.`;
 
     const claudeRes = await fetch(CLAUDE_API_URL, {
       method: 'POST',
@@ -4025,11 +4067,59 @@ PERSONALITY: Direct, data-driven, decisive. You give clear actionable answers. R
 
     const data  = await claudeRes.json();
     const reply = (data.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
-    res.json({ ok: true, reply, model: CLAUDE_MODEL });
+
+    // Auto-save if the AI flagged something to remember
+    const savedMatch = reply.match(/💾 SAVED:\s*(.+)/);
+    let memorySaved = null;
+    if (savedMatch) {
+      try {
+        const content = savedMatch[1].trim();
+        const id = dbInstance.prepare(
+          `INSERT INTO bot_knowledge (title, content, category, source) VALUES (?,?,?,?)`
+        ).run('AI-extracted', content, 'learned', 'ai_auto').lastInsertRowid;
+        invalidateMemoryCache();
+        memorySaved = { id, content };
+        console.log(`[memory] AI auto-saved: "${content.slice(0, 60)}"`);
+      } catch {}
+    }
+
+    res.json({ ok: true, reply, model: CLAUDE_MODEL, memorySaved });
   } catch (err) {
     console.error('[api/agent]', err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
+app.get('/api/agent/memory', (req, res) => {
+  setCors(res);
+  try {
+    const rows = dbInstance.prepare(`SELECT * FROM bot_knowledge ORDER BY created_at DESC LIMIT 200`).all();
+    res.json({ ok: true, memories: rows, total: rows.length });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.post('/api/agent/memory', express.json({ limit: '1mb' }), (req, res) => {
+  setCors(res);
+  try {
+    const { title, content, category } = req.body ?? {};
+    if (!content) return res.status(400).json({ ok: false, error: 'content required' });
+    const id = dbInstance.prepare(
+      `INSERT INTO bot_knowledge (title, content, category) VALUES (?,?,?)`
+    ).run(title || null, content, category || 'general').lastInsertRowid;
+    invalidateMemoryCache();
+    console.log(`[memory] Saved: "${(title || content).slice(0, 60)}" (id=${id})`);
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.delete('/api/agent/memory/:id', (req, res) => {
+  setCors(res);
+  try {
+    dbInstance.prepare(`DELETE FROM bot_knowledge WHERE id=?`).run(req.params.id);
+    invalidateMemoryCache();
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // ── AUTONOMOUS AGENT: Multi-agent optimization session ────────────────────────

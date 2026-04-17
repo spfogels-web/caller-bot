@@ -3728,9 +3728,19 @@ body::before {
               </div>
             </div>
           </div>
+          <!-- Upload preview -->
+          <div id="agentUploadPreview" style="display:none;padding:6px 14px;border-top:1px solid var(--border);background:rgba(0,0,0,0.2)">
+            <div style="display:flex;align-items:center;gap:8px">
+              <img id="agentUploadThumb" style="max-height:48px;max-width:80px;border-radius:4px;border:1px solid var(--border2)" />
+              <span id="agentUploadName" style="font-family:var(--mono);font-size:9px;color:var(--text3);flex:1"></span>
+              <button onclick="clearAgentUpload()" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px">✕</button>
+            </div>
+          </div>
           <!-- Input -->
-          <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:8px">
-            <input id="agentInput" placeholder="Ask the agent anything about performance, wallets, optimizations..." style="flex:1;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:6px;padding:10px 14px;color:var(--text1);font-family:var(--mono);font-size:11px;outline:none" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}">
+          <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
+            <input type="file" id="agentFileInput" accept="image/*,.pdf,.txt,.md,.csv" style="display:none" onchange="handleAgentUpload(this)">
+            <button onclick="document.getElementById('agentFileInput').click()" title="Upload image or document" style="background:rgba(156,39,176,0.15);border:1px solid rgba(156,39,176,0.3);color:#ce93d8;border-radius:6px;padding:10px 12px;font-size:14px;cursor:pointer;flex-shrink:0">📎</button>
+            <input id="agentInput" placeholder="Ask the agent anything, or upload images/docs to teach it..." style="flex:1;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:6px;padding:10px 14px;color:var(--text1);font-family:var(--mono);font-size:11px;outline:none" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}">
             <button onclick="sendAgentMessage()" style="background:linear-gradient(135deg,rgba(68,138,255,0.2),rgba(156,39,176,0.15));border:1px solid var(--blue);color:var(--blue);border-radius:6px;padding:10px 20px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:1px;white-space:nowrap" id="agentSendBtn">SEND ↵</button>
           </div>
         </div>
@@ -6820,17 +6830,76 @@ function removeAgentTyping() {
   if (el) el.remove();
 }
 
+// ── Agent file upload handling ──────────────────────────────────────
+let _agentUploadData = null; // { base64, mediaType, fileName, isImage }
+
+function handleAgentUpload(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  const isImage = file.type.startsWith('image/');
+
+  reader.onload = function(e) {
+    if (isImage) {
+      const base64 = e.target.result.split(',')[1];
+      _agentUploadData = { base64, mediaType: file.type, fileName: file.name, isImage: true };
+      const preview = document.getElementById('agentUploadPreview');
+      const thumb = document.getElementById('agentUploadThumb');
+      const name = document.getElementById('agentUploadName');
+      if (thumb) { thumb.src = e.target.result; thumb.style.display = ''; }
+      if (name) name.textContent = file.name + ' (' + (file.size / 1024).toFixed(0) + 'KB)';
+      if (preview) preview.style.display = '';
+    } else {
+      _agentUploadData = { text: e.target.result, fileName: file.name, isImage: false };
+      const preview = document.getElementById('agentUploadPreview');
+      const thumb = document.getElementById('agentUploadThumb');
+      const name = document.getElementById('agentUploadName');
+      if (thumb) thumb.style.display = 'none';
+      if (name) name.textContent = '📄 ' + file.name + ' (' + (file.size / 1024).toFixed(0) + 'KB)';
+      if (preview) preview.style.display = '';
+    }
+  };
+  if (isImage) reader.readAsDataURL(file);
+  else reader.readAsText(file);
+  input.value = '';
+}
+
+function clearAgentUpload() {
+  _agentUploadData = null;
+  const preview = document.getElementById('agentUploadPreview');
+  if (preview) preview.style.display = 'none';
+}
+
 async function sendAgentMessage() {
   const input = document.getElementById('agentInput');
   const btn   = document.getElementById('agentSendBtn');
   const text  = input?.value?.trim();
-  if (!text) return;
+  if (!text && !_agentUploadData) return;
   input.value = '';
   input.disabled = true;
   if (btn) btn.disabled = true;
 
-  appendAgentMessage('user', text);
-  _agentMsgs.push({ role: 'user', content: text });
+  // Build message content (text + optional image/doc)
+  let displayText = text || '';
+  let msgContent;
+
+  if (_agentUploadData?.isImage) {
+    displayText = (text || '') + '\n📎 [Image: ' + _agentUploadData.fileName + ']';
+    msgContent = [
+      { type: 'image', source: { type: 'base64', media_type: _agentUploadData.mediaType, data: _agentUploadData.base64 } },
+      { type: 'text', text: text || 'Analyze this image. Extract any patterns, strategies, or insights.' },
+    ];
+  } else if (_agentUploadData && !_agentUploadData.isImage) {
+    const docText = _agentUploadData.text;
+    displayText = (text || '') + '\n📄 [Document: ' + _agentUploadData.fileName + ' — ' + docText.length + ' chars]';
+    msgContent = (text || '') + '\n\n--- UPLOADED DOCUMENT: ' + _agentUploadData.fileName + ' ---\n' + docText.slice(0, 8000);
+  } else {
+    msgContent = text;
+  }
+
+  clearAgentUpload();
+  appendAgentMessage('user', displayText);
+  _agentMsgs.push({ role: 'user', content: msgContent });
 
   showAgentTyping();
   try {
@@ -6845,6 +6914,9 @@ async function sendAgentMessage() {
     const reply = data.reply || data.error || 'No response';
     _agentMsgs.push({ role: 'assistant', content: reply });
     appendAgentMessage('bot', reply);
+    if (data.memorySaved) {
+      appendAgentMessage('bot', '💾 Saved to permanent memory: "' + data.memorySaved.content.slice(0, 100) + '"');
+    }
   } catch (e) {
     removeAgentTyping();
     appendAgentMessage('bot', '⚠ Error: ' + e.message + '. Check bot is running.');
