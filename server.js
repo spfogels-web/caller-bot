@@ -2184,6 +2184,16 @@ async function processCandidate(candidate, isRescan = false) {
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
 
+    // ── DATA QUALITY GATE: reject tokens with zero enrichment data ────────
+    // If Birdeye AND Helius both failed AND we have no market cap, this token
+    // has no real data — scoring is meaningless. Don't waste Claude/OpenAI
+    // credits evaluating air.
+    if (!enrichedCandidate.birdeyeOk && !enrichedCandidate.heliusOk && enrichedCandidate.marketCap == null) {
+      console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
+      logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
+      return;
+    }
+
     // ── MCap tier bonuses ─────────────────────────────────────────────────
     // Sweet spot $13K-$40K: +8 points (historical data shows best ROI here)
     // Secondary $40K-$80K: +3 points (100% WR 2/2 historically, still viable)
@@ -2365,10 +2375,16 @@ async function processCandidate(candidate, isRescan = false) {
             console.log(`[ai-os] ⬆️  AI upgraded $${enrichedCandidate.token}: HOLD → AUTO_POST (gem range)`);
           }
           // AI downgrades: Claude sees red flags scorer missed → block post
-          if (aiDecision === 'IGNORE' && finalDecision === 'AUTO_POST' && (verdict.score ?? 100) < 40) {
-            finalDecision = 'WATCHLIST';
-            logEvent('INFO', 'AI_DOWNGRADE', `${enrichedCandidate.token} AUTO_POST→WATCHLIST ai=${verdict.score}`);
-            console.log(`[ai-os] ⬇️  AI downgraded $${enrichedCandidate.token}: AUTO_POST → WATCHLIST`);
+          if (aiDecision === 'IGNORE' && finalDecision === 'AUTO_POST') {
+            if ((verdict.score ?? 100) < 25 || verdict.risk === 'EXTREME') {
+              finalDecision = 'IGNORE';
+              logEvent('INFO', 'AI_HARD_BLOCK', `${enrichedCandidate.token} AUTO_POST→IGNORE ai=${verdict.score} risk=${verdict.risk}`);
+              console.log(`[ai-os] 🛑 AI HARD BLOCKED $${enrichedCandidate.token}: AUTO_POST → IGNORE (score ${verdict.score}, risk ${verdict.risk})`);
+            } else if ((verdict.score ?? 100) < 40) {
+              finalDecision = 'WATCHLIST';
+              logEvent('INFO', 'AI_DOWNGRADE', `${enrichedCandidate.token} AUTO_POST→WATCHLIST ai=${verdict.score}`);
+              console.log(`[ai-os] ⬇️  AI downgraded $${enrichedCandidate.token}: AUTO_POST → WATCHLIST`);
+            }
           }
           // AI instant blocklist override
           if (aiDecision === 'BLOCKLIST') {
@@ -2424,12 +2440,20 @@ async function processCandidate(candidate, isRescan = false) {
             console.log(`[openai-v8] $${enrichedCandidate.token} → ${aiAction} (${conviction}% conviction) | was: ${finalDecision}`);
             logEvent('INFO', 'OPENAI_DECISION', `${enrichedCandidate.token} openai=${aiAction} conviction=${conviction} prev=${finalDecision}`);
 
-            // OpenAI is the final authority — apply its decision
-            if (aiAction === 'POST')       finalDecision = 'AUTO_POST';
-            else if (aiAction === 'PROMOTE')   finalDecision = 'WATCHLIST'; // promote = watchlist internally
-            else if (aiAction === 'WATCHLIST') finalDecision = 'WATCHLIST';
-            else if (aiAction === 'RETEST')    finalDecision = 'RETEST';
-            else if (aiAction === 'IGNORE')    finalDecision = 'IGNORE';
+            // OpenAI is the final authority — UNLESS Claude hard-blocked it.
+            // Claude hard-blocks (IGNORE with score < 25 or EXTREME risk) can't
+            // be overridden — those are data-void or manipulation signals.
+            const claudeHardBlocked = verdict?.risk === 'EXTREME' && (verdict?.score ?? 100) < 25;
+            if (claudeHardBlocked && aiAction === 'POST') {
+              console.log(`[openai-v8] 🛑 OpenAI wanted POST but Claude hard-blocked (score ${verdict.score}, ${verdict.risk}) — keeping IGNORE`);
+              logEvent('INFO', 'OPENAI_OVERRIDE_BLOCKED', `${enrichedCandidate.token} OpenAI=POST blocked by Claude hard-block`);
+            } else {
+              if (aiAction === 'POST')       finalDecision = 'AUTO_POST';
+              else if (aiAction === 'PROMOTE')   finalDecision = 'WATCHLIST';
+              else if (aiAction === 'WATCHLIST') finalDecision = 'WATCHLIST';
+              else if (aiAction === 'RETEST')    finalDecision = 'RETEST';
+              else if (aiAction === 'IGNORE')    finalDecision = 'IGNORE';
+            }
 
             // For RETEST, set the timer from OpenAI's recommendation
             if (aiAction === 'RETEST' && openAIDecision.retestInMinutes) {
