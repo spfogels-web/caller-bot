@@ -8461,21 +8461,30 @@ app.listen(PORT, async () => {
   const resolved = (() => { try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL')`).get().n; } catch { return 0; } })();
   const totalCalls = (() => { try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n; } catch { return 0; } })();
 
+  // Read the real wallet count from SQL — the in-memory walletDb is the
+  // Dune cache which only fills after a batch scan, so it often reads 2
+  // even when tracked_wallets has 1200+. The real source of truth is
+  // SELECT COUNT(*) FROM tracked_wallets.
+  const trackedWalletsCount = (() => {
+    try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM tracked_wallets WHERE is_blacklist=0`).get().n; }
+    catch { return 0; }
+  })();
+
   await sendAdminAlert(
-    `🐺 <b>Alpha Lennix v8.0 — MULTI-AGENT AI SYSTEM ONLINE</b>\n\n` +
+    `⚡ <b>Pulse Caller v8 — MULTI-AGENT AI SYSTEM ONLINE</b>\n\n` +
     `<b>Detection:</b>\n` +
     `${HELIUS_API_KEY ? '✅ Helius WebSocket (~3s detection)' : '⚠️ DEXScreener polling (90s)'}\n` +
     `✅ Pump.fun pre-bonding monitor (45s)\n\n` +
     `<b>Intelligence:</b>\n` +
-    `${walletDb.size() > 0 ? `✅ Wallet DB: ${walletDb.size()} wallets loaded` : '⏳ Wallet DB: loading from Dune...'}\n` +
+    `${trackedWalletsCount > 0 ? `✅ Wallet DB: ${trackedWalletsCount.toLocaleString()} wallets tracked` : '⏳ Wallet DB: empty — run Dune scan or Brain Analyzer'}\n` +
     `✅ Claude forensic analysis (every candidate)\n` +
     `${OPENAI_API_KEY ? '✅ OpenAI GPT-4o final decisions' : '⚠️ OpenAI not configured'}\n\n` +
     `<b>Learning:</b>\n` +
-    `✅ Auto outcome tracking (every 30min)\n` +
+    `✅ Auto outcome tracking (every 3min)\n` +
     `✅ Missed winner detection (every 6h)\n` +
     `✅ In-context learning from ${totalCalls} calls · ${resolved} resolved\n\n` +
-    `<b>Mode:</b> ${activeMode.emoji} ${activeMode.name} · Score floor: 38 · Max MCap: $150K\n` +
-    `<b>Target:</b> $10K–$25K pre-bonding gems · 10x+ upside`
+    `<b>Mode:</b> ${activeMode.emoji} ${activeMode.name} · Score floor: ${SCORING_CONFIG.minScoreToPost} · Max MCap: $80K\n` +
+    `<b>Sweet spot:</b> $13K–$40K · <b>WIN bar:</b> ${SCORING_CONFIG.winPeakMultiple}x peak`
   );
 });
 
