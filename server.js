@@ -2619,8 +2619,9 @@ async function processCandidate(candidate, isRescan = false) {
       // ── CA beacon for third-party bots (Phanes, Sect, etc.) ──────────────
       // Sent as plain text, no HTML parse_mode, no preview, just the CA —
       // this is what the leaderboard bots scan the chat for.
+      // Respect pausePosting — if posting is paused, don't send the beacon either.
       const caBeacon = enrichedCandidate.contractAddress ?? '';
-      if (caBeacon && TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID) {
+      if (caBeacon && TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID && !AI_CONFIG_OVERRIDES.pausePosting) {
         try {
           const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
             method: 'POST',
