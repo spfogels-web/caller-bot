@@ -4079,7 +4079,7 @@ body::before {
             </div>
             <div class="wt-controls">
               <input id="wtSearch" oninput="renderWalletTiles()" placeholder="Search address or label..." class="wt-search">
-              <select id="wtCategoryFilter" onchange="renderWalletTiles()" class="wt-select">
+              <select id="wtCategoryFilter" onchange="loadWalletTiles(this.value)" class="wt-select">
                 <option value="">ALL CATEGORIES</option>
                 <option value="WINNER">🐋 WHALES</option>
                 <option value="SMART_MONEY">💎 SMART MONEY</option>
@@ -7728,9 +7728,19 @@ let _walletTilesAll = [];
 let _walletTilesShown = 0;
 const WALLET_TILES_PAGE = 60;
 
-async function loadWalletTiles(){
+async function loadWalletTiles(forceCategory){
   try{
-    const data = await apiFetch('/api/wallets/rankings?limit=1000');
+    // If a category is selected, fetch ONLY that category from the server so
+    // we get the complete set — not just the top 1000 by score. Without this,
+    // WINNER chips could show 55 while only 40 WINNER tiles rendered because
+    // 15 low-scored WINNERs sat at rank 1001+ and never reached the client.
+    const activeCat = forceCategory != null
+      ? forceCategory
+      : (document.getElementById('wtCategoryFilter')?.value || '');
+    const url = activeCat
+      ? `/api/wallets/rankings?limit=2000&category=${encodeURIComponent(activeCat)}`
+      : '/api/wallets/rankings?limit=1000';
+    const data = await apiFetch(url);
     _walletTilesAll = (data && data.wallets) ? data.wallets : [];
     // Server returns the REAL count (COUNT(*) from tracked_wallets) as data.total.
     // Fall back to array length when absent so older backends keep working.
@@ -7756,20 +7766,18 @@ async function loadWalletTiles(){
     setText('wsStatLast', latest > 0 ? timeAgo(new Date(latest).toISOString()) : 'never');
 
     // Category quick-counts — ALWAYS use server-side GROUP BY category so the
-    // chips match the top tiles. Counting from _walletTilesAll under-reports
-    // when the DB has more rows than the fetch limit (we only pull top 1000
-    // by score, so low-scored WINNERs beyond the slice were missing from the
-    // chip counts while the top tiles used the real SQL count of 55).
-    const allCounts = { '': total, WINNER:0, SMART_MONEY:0, MOMENTUM:0, SNIPER:0, CLUSTER:0, NEUTRAL:0 };
+    // chips match the top tiles AND always reflect the FULL DB, even when a
+    // category filter is active (which makes the server's `total` field be
+    // the filtered count, not the DB-wide count).
+    const allCounts = { '': 0, WINNER:0, SMART_MONEY:0, MOMENTUM:0, SNIPER:0, CLUSTER:0, NEUTRAL:0 };
     cats.forEach(c => { if (c.category) allCounts[c.category] = c.count; });
-    // Derive NEUTRAL if the server didn't include it (it usually does)
-    if (!allCounts.NEUTRAL) {
-      const known = (allCounts.WINNER||0) + (allCounts.SMART_MONEY||0) + (allCounts.MOMENTUM||0) + (allCounts.SNIPER||0) + (allCounts.CLUSTER||0);
-      allCounts.NEUTRAL = Math.max(0, total - known);
-    }
-    setText('wtCnt-all', total);
+    // ALL chip = sum of every category (the true DB-wide count regardless of
+    // which category the tile fetch was scoped to).
+    const allTotal = Object.keys(allCounts).filter(k => k).reduce((s, k) => s + (allCounts[k] || 0), 0);
+    allCounts[''] = allTotal;
+    setText('wtCnt-all', allTotal);
     ['WINNER','SMART_MONEY','MOMENTUM','SNIPER','CLUSTER'].forEach(k => setText('wtCnt-'+k, allCounts[k] || 0));
-    setText('wtCountBadge', total + ' wallets');
+    setText('wtCountBadge', allTotal + ' wallets');
 
     _walletTilesShown = WALLET_TILES_PAGE;
     renderWalletTiles();
@@ -7784,7 +7792,9 @@ function setWalletTileCategory(btn, cat){
   if(btn) btn.classList.add('active');
   const sel = document.getElementById('wtCategoryFilter');
   if(sel) sel.value = cat;
-  renderWalletTiles();
+  // Re-fetch scoped to the new category so we get ALL rows (not just top 1000
+  // by score across all categories). Falls back to full DB when cat is empty.
+  loadWalletTiles(cat);
 }
 
 function renderWalletTiles(){
