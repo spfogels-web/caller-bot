@@ -4930,23 +4930,54 @@ app.get('/api/external/wallet/:address', async (req, res) => {
     const { enrichWallet } = await import('./solscan-wallet-enricher.js');
     const stats = await enrichWallet(address, dbInstance);
 
+    // ── Fetch live SOL balance so auto-categorization matches Brain Analyzer ──
+    // ≥100 SOL → WINNER (🐋), ≥10 SOL → SMART_MONEY (💎), ≥1 SOL → MOMENTUM, else NEUTRAL
+    let walletSol = null;
+    if (HELIUS_API_KEY) {
+      try {
+        const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc:'2.0', id:'bal', method:'getBalance', params:[address] }),
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          walletSol = (j?.result?.value ?? 0) / 1e9;
+        }
+      } catch { /* best-effort */ }
+    }
+    const autoCategory = walletSol == null ? 'NEUTRAL'
+      : walletSol >= 100 ? 'WINNER'
+      : walletSol >= 10  ? 'SMART_MONEY'
+      : walletSol >= 1   ? 'MOMENTUM'
+      : 'NEUTRAL';
+
     // ── Guaranteed upsert: ensure the wallet lands in tracked_wallets ─────
     // Even if Solscan returned no transfers (fresh/inactive wallet), we still
     // want the row to exist so the Smart Money page lists it. Enrichment can
     // fill in the rest asynchronously via the 6h background loop.
+    let walletAdded = false;
     try {
-      dbInstance.prepare(`
-        INSERT INTO tracked_wallets (address, category, source, added_at, updated_at, last_seen)
-        VALUES (?, 'NEUTRAL', 'manual_add', datetime('now'), datetime('now'), datetime('now'))
-        ON CONFLICT(address) DO UPDATE SET last_seen = datetime('now')
-      `).run(address);
+      const info = dbInstance.prepare(`
+        INSERT INTO tracked_wallets (address, category, source, added_at, updated_at, last_seen, sol_balance, sol_scanned_at)
+        VALUES (?, ?, 'manual_add', datetime('now'), datetime('now'), datetime('now'), ?, ${walletSol != null ? "datetime('now')" : 'NULL'})
+        ON CONFLICT(address) DO UPDATE SET
+          last_seen = datetime('now'),
+          sol_balance = COALESCE(?, sol_balance),
+          sol_scanned_at = ${walletSol != null ? "datetime('now')" : 'sol_scanned_at'},
+          category = CASE
+            WHEN (tracked_wallets.category = 'NEUTRAL' OR tracked_wallets.category IS NULL) AND ? != 'NEUTRAL'
+            THEN ? ELSE tracked_wallets.category END
+      `).run(address, autoCategory, walletSol, walletSol, autoCategory, autoCategory);
+      walletAdded = info.changes > 0;
     } catch (err) {
-      // `added_at` may not exist on older schemas — retry without it
       try {
         dbInstance.prepare(`
-          INSERT OR IGNORE INTO tracked_wallets (address, category, source, updated_at, last_seen)
-          VALUES (?, 'NEUTRAL', 'manual_add', datetime('now'), datetime('now'))
-        `).run(address);
+          INSERT OR IGNORE INTO tracked_wallets (address, category, source, updated_at, last_seen, sol_balance)
+          VALUES (?, ?, 'manual_add', datetime('now'), datetime('now'), ?)
+        `).run(address, autoCategory, walletSol);
+        walletAdded = true;
       } catch (err2) {
         console.warn('[external-wallet] stub insert failed:', err2.message);
       }
@@ -5121,6 +5152,11 @@ app.get('/api/external/wallet/:address', async (req, res) => {
       appearances,
       recentTokens,
       source: heliusData ? 'helius+solscan' : (stats ? 'solscan' : 'db-only'),
+      added: {
+        solBalance: walletSol,
+        autoCategory,
+        rowCreatedOrUpdated: walletAdded,
+      },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });

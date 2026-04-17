@@ -7681,9 +7681,13 @@ async function scanArbitraryWallet(){
     const data = await res.json();
     if (data?.ok) {
       const s = data.stats || {};
-      const msg = s.decided
-        ? `✓ ${addr.slice(0,6)}…${addr.slice(-4)} · ${s.decided} resolved overlap · win rate ${Math.round((s.winRate||0)*100)}% · avg peak ${(s.avgPeak||0).toFixed(2)}×`
-        : `✓ Wallet scanned — no overlap with our winning calls yet (${s.transferCount || 0} transfers seen)`;
+      const a = data.added || {};
+      const solTxt = a.solBalance != null ? `${a.solBalance.toFixed(2)} SOL` : 'unknown SOL';
+      const catEmoji = a.autoCategory === 'WINNER' ? '🐋' : a.autoCategory === 'SMART_MONEY' ? '💎' : a.autoCategory === 'MOMENTUM' ? '🚀' : '◎';
+      const overlapPart = s.decided
+        ? ` · ${s.decided} resolved overlap · win rate ${Math.round((s.winRate||0)*100)}%`
+        : ` · no overlap with our wins yet`;
+      const msg = `✓ ADDED ${addr.slice(0,6)}…${addr.slice(-4)} → ${catEmoji} ${a.autoCategory || 'NEUTRAL'} · ${solTxt}${overlapPart}`;
       _setWalletScannerStatus('COMPLETE', 'done', msg);
       // Refresh the tile grid so this wallet appears
       if (typeof loadWalletTiles === 'function') await loadWalletTiles();
