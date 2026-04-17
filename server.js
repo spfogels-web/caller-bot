@@ -2600,6 +2600,45 @@ async function processCandidate(candidate, isRescan = false) {
       }
     }
 
+    // ── MOMENTUM GATE: never buy a coin that's currently bleeding ───────────
+    // User's rule: "we want to be buying on the way up not hoping that after
+    // it rugs momentum will pick back up." A coin dumping 15%+ in the last
+    // 5min or 30%+ in the last hour is a slow rug in progress. Walking away
+    // is the right move, NOT catching the falling knife.
+    //
+    // Tiers:
+    //   5m ≤ -15%  OR  1h ≤ -30%  →  WATCHLIST (demoted, not blacklisted)
+    //   5m ≤ -30%  OR  1h ≤ -60%  →  BLOCKLIST (slow rug — never call)
+    //   1h ≤ -40% AND 5m ≤ -10%   →  BLOCKLIST (accelerating dump)
+    //
+    // Cluster smart-money alerts bypass (3+ winners buying a dip is alpha,
+    // not a slow rug). Single-winner alerts do NOT bypass — gotta be careful.
+    {
+      const p5  = enrichedCandidate.priceChange5m  ?? null;
+      const p1h = enrichedCandidate.priceChange1h  ?? null;
+      const isCluster = enrichedCandidate._smartMoney?.kind === 'cluster';
+      if (!isCluster && finalDecision === 'AUTO_POST') {
+        let momentumBlock = null;
+        if ((p5  != null && p5  <= -30) || (p1h != null && p1h <= -60)) {
+          momentumBlock = `SEVERE_DUMP 5m=${p5}% 1h=${p1h}%`;
+        } else if (p1h != null && p1h <= -40 && p5 != null && p5 <= -10) {
+          momentumBlock = `ACCELERATING_DUMP 5m=${p5}% 1h=${p1h}%`;
+        } else if ((p5 != null && p5 <= -15) || (p1h != null && p1h <= -30)) {
+          momentumBlock = `DUMPING 5m=${p5 ?? '?'}% 1h=${p1h ?? '?'}%`;
+        }
+        if (momentumBlock) {
+          const severe = momentumBlock.startsWith('SEVERE') || momentumBlock.startsWith('ACCELERATING');
+          finalDecision = severe ? 'BLOCKLIST' : 'WATCHLIST';
+          const tag = severe ? '🚫' : '📉';
+          logEvent('WARN', 'MOMENTUM_GATE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${momentumBlock} → ${finalDecision}`);
+          console.log(`[auto-caller] ${tag} Momentum gate — $${enrichedCandidate.token ?? ca.slice(0,6)} ${momentumBlock} → ${finalDecision}`);
+          if (severe) {
+            try { addToBlocklist(ca, `Momentum gate: ${momentumBlock}`); } catch {}
+          }
+        }
+      }
+    }
+
     // ── RUG GUARD: $13K-$17.5K sub-band requires higher score ───────────────
     // This low-end sliver of the sweet spot is the highest-risk micro-range:
     // fresh launches and rugs cluster here. Require score >= 60 to post,
