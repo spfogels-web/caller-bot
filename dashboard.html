@@ -3865,12 +3865,20 @@ body::before {
                 <div class="ws-stat"><div class="ws-stat-label">ENRICHED 24H</div><div class="ws-stat-val" style="color:var(--green)" id="wsStat24h">—</div></div>
                 <div class="ws-stat"><div class="ws-stat-label">LAST SCAN</div><div class="ws-stat-val" style="font-size:11px" id="wsStatLast">—</div></div>
               </div>
-              <!-- Scan ANY wallet address (not just ones in our DB) -->
-              <div class="ws-scan-any">
-                <input id="wsScanAnyInput" class="ws-scan-any-input"
-                       placeholder="🔍 Paste ANY wallet address — harvests PnL live via Solscan..."
-                       onkeydown="if(event.key==='Enter')scanArbitraryWallet()">
-                <button class="ws-btn ws-btn-primary" onclick="scanArbitraryWallet()">🔬 SCAN WALLET</button>
+              <!-- Add any wallet to the Wallet Database — paste address, click ADD -->
+              <div class="ws-scan-any" style="display:flex;flex-direction:column;gap:4px">
+                <div style="font-family:var(--mono);font-size:9px;color:var(--green);letter-spacing:1px;font-weight:700">
+                  ➕ ADD WALLET TO DATABASE
+                </div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <input id="wsScanAnyInput" class="ws-scan-any-input" style="flex:1"
+                         placeholder="Paste any Solana wallet address — lands in DB with SOL balance + auto-category"
+                         onkeydown="if(event.key==='Enter')scanArbitraryWallet()">
+                  <button class="ws-btn ws-btn-primary" onclick="scanArbitraryWallet()" style="white-space:nowrap">➕ ADD & SCAN</button>
+                </div>
+                <div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:0.5px;line-height:1.4">
+                  Auto-categorizes by SOL: ≥100 → 🐋 WINNER · ≥10 → 💎 SMART_MONEY · ≥1 → 🚀 MOMENTUM · Top 200 get their buys watched every 90s.
+                </div>
               </div>
               <div class="ws-actions">
                 <button class="ws-btn ws-btn-secondary" id="wsScanBtn" onclick="triggerDuneScan()">⚡ DUNE BATCH</button>
