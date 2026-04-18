@@ -2119,7 +2119,7 @@ async function handleAnalyzeCommand(chatId, input) {
       const intel = await runWalletIntel(candidate);
       candidate = { ...candidate, ...flattenIntel(intel) };
     }
-    const scoreResult = computeFullScore(candidate);
+    const scoreResult = computeFullScore(candidate, TUNING_CONFIG?.discovery);
     try { applyRegimeAdjustments(scoreResult.score, candidate, scoreResult); } catch {}
     scoreResult.similarity = computeSimilarityScores(scoreResult);
     const verdict = await callClaudeForAnalysis(candidate, scoreResult);
@@ -2246,7 +2246,7 @@ async function processCandidate(candidate, isRescan = false) {
       enrichedAtMs,
     };
 
-    const scoreResult = computeFullScore(enrichedCandidate);
+    const scoreResult = computeFullScore(enrichedCandidate, TUNING_CONFIG?.discovery);
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
 
@@ -3060,7 +3060,7 @@ async function processRescanQueue() {
       candidate.retestCount = entry.scanCount;
       const intel    = await runQuickWalletIntel(candidate);
       const enriched = { ...candidate, ...flattenIntel(intel) };
-      const newScore = computeFullScore(enriched);
+      const newScore = computeFullScore(enriched, TUNING_CONFIG?.discovery);
       let regimeAdj = { adjustedScore: newScore.score, thresholdAdjust: 0 };
       try {
         const ra = applyRegimeAdjustments(newScore.score, enriched, newScore);
@@ -4187,7 +4187,7 @@ try { dbInstance.exec(`
 
 // Tunable config — loaded from kv_store on boot, defaults from scorer
 const TUNING_DEFAULTS = {
-  discovery: { buyVelocity:20, uniqueBuyerGrowth:15, liquidityHealth:15, devRisk:15, holderConcentration:10, sellPressure:10, walletBehavior:10, momentumAccel:5 },
+  discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
   thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:80000, sweetSpotMin:15000, sweetSpotMax:40000 },
   penalties: { latePump1hThreshold:300, latePump1hPenalty:25, latePump1hSevereThreshold:500, latePump1hSeverePenalty:40, latePump24hThreshold:500, latePump24hPenalty:20, winThresholdPct:20, lossThresholdPct:-30 },
 };
@@ -4335,9 +4335,8 @@ Respond ONLY with valid JSON array:
       autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
       averageThreshold: [45, 75], mixedThreshold: [55, 85],
       mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
-      buyVelocity: [3, 25], uniqueBuyerGrowth: [3, 25], liquidityHealth: [3, 25],
-      devRisk: [3, 25], holderConcentration: [3, 25], sellPressure: [3, 25],
-      walletBehavior: [3, 25], momentumAccel: [3, 25],
+      volumeVelocity: [15, 50], buyPressure: [10, 40], walletQuality: [8, 30],
+      holderDistribution: [5, 20], liquidityHealth: [3, 15],
       latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],
       latePump24hPenalty: [5, 40], winThresholdPct: [10, 50], lossThresholdPct: [-60, -10],
     };
@@ -4469,7 +4468,7 @@ SAFETY BOUNDS (you MUST stay within these):
 - mcapHardCap: 50000-200000
 - sweetSpotMin: 5000-25000
 - sweetSpotMax: 20000-80000
-- discovery weights: each 3-25 (total should be ~100)
+- discovery weights: volumeVelocity 15-50, buyPressure 10-40, walletQuality 8-30, holderDistribution 5-20, liquidityHealth 3-15 (total should be ~100)
 - penalties: reasonable ranges, don't zero them out
 
 CURRENT SCORING CONFIG:
@@ -4496,7 +4495,7 @@ For each change, provide a DETAILED explanation of WHY and what improvement you 
 
 You can change:
 - scoring.*: minScoreToPost, sweetSpotBonus, secondaryBonus, preLaunchBonus, crossChainBonus, devFingerprintCap, noSignalCap, rugGuardMinScore, consensusOverrideScore, winPeakMultiple, neutralDrawdownPct
-- tuning.discovery.*: buyVelocity, uniqueBuyerGrowth, liquidityHealth, devRisk, holderConcentration, sellPressure, walletBehavior, momentumAccel
+- tuning.discovery.*: volumeVelocity, buyPressure, walletQuality, holderDistribution, liquidityHealth
 - tuning.thresholds.*: autoPostScore, eliteThreshold, cleanThreshold, averageThreshold, mixedThreshold, mcapHardCap, sweetSpotMin, sweetSpotMax
 - tuning.penalties.*: latePump1hThreshold, latePump1hPenalty, latePump1hSevereThreshold, latePump1hSeverePenalty, latePump24hThreshold, latePump24hPenalty, winThresholdPct, lossThresholdPct
 - overrides.*: gemTargetMin, gemTargetMax, sweetSpotMin, sweetSpotMax, maxMarketCapOverride, minScoreOverride, walletIntelWeight, aggressiveMode, etc.
@@ -4549,9 +4548,8 @@ Respond ONLY with valid JSON:
       autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
       averageThreshold: [45, 75], mixedThreshold: [55, 85],
       mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
-      buyVelocity: [3, 25], uniqueBuyerGrowth: [3, 25], liquidityHealth: [3, 25],
-      devRisk: [3, 25], holderConcentration: [3, 25], sellPressure: [3, 25],
-      walletBehavior: [3, 25], momentumAccel: [3, 25],
+      volumeVelocity: [15, 50], buyPressure: [10, 40], walletQuality: [8, 30],
+      holderDistribution: [5, 20], liquidityHealth: [3, 15],
       latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],
       latePump24hPenalty: [5, 40], winThresholdPct: [10, 50], lossThresholdPct: [-60, -10],
       gemTargetMin: [3000, 20000], gemTargetMax: [25000, 100000],
@@ -7390,7 +7388,7 @@ app.get('/api/candidates/:id', (req, res) => {
           twitter:                 row.twitter,
           telegram:                row.telegram,
         };
-        const result = computeFullScore(c);
+        const result = computeFullScore(c, TUNING_CONFIG?.discovery);
         if (result?.subScores) {
           candidate.subScores = result.subScores;
           if (!candidate.signals)   candidate.signals   = result.signals;

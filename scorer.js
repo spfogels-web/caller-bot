@@ -727,7 +727,7 @@ export function getDynamicThreshold(structureGrade, stage, candidate) {
 // ─── Composite Scorer ─────────────────────────────────────────────────────────
 // v5: Integrates trap confidence penalty and stealth accumulation.
 
-export function computeFullScore(candidate) {
+export function computeFullScore(candidate, discoveryWeights = null) {
   const stage = getStage(candidate.pairAgeHours);
 
   const launchResult = scoreLaunchQuality(candidate);
@@ -777,7 +777,7 @@ export function computeFullScore(candidate) {
   // the existing sub-scores / signals / penalties / structureGrade / etc.
   // stay intact so every downstream consumer (UI, Claude prompts, DB) keeps
   // working unchanged. `composite` remains exposed as `legacyScore`.
-  const dual = runDualModel(candidate);
+  const dual = runDualModel(candidate, discoveryWeights);
   const legacyScore = composite;
   const finalScore  = dual.finalScore ?? composite;
 
