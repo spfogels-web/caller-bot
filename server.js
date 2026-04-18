@@ -7601,12 +7601,12 @@ app.post('/api/calls/reset-scoreboard', express.json(), (req, res) => {
     const archived = dbInstance.prepare(`INSERT INTO calls_archive SELECT * FROM calls WHERE 1=1${keepClause}`).run(...keepUpper);
     const deleted = dbInstance.prepare(`DELETE FROM calls WHERE 1=1${keepClause}`).run(...keepUpper);
 
-    // Also clear audit_archive outcomes for old calls
+    // Also remove old calls from audit_archive (they show in the Calls tab)
     try {
       if (keepUpper.length > 0) {
-        dbInstance.prepare(`UPDATE audit_archive SET outcome = NULL, peak_multiple = NULL, peak_mcap = NULL WHERE UPPER(token) NOT IN (${keepUpper.map(() => '?').join(',')})`).run(...keepUpper);
+        dbInstance.prepare(`DELETE FROM audit_archive WHERE UPPER(token) NOT IN (${keepUpper.map(() => '?').join(',')}) AND final_decision = 'AUTO_POST'`).run(...keepUpper);
       } else {
-        dbInstance.prepare(`UPDATE audit_archive SET outcome = NULL, peak_multiple = NULL, peak_mcap = NULL`).run();
+        dbInstance.prepare(`DELETE FROM audit_archive WHERE final_decision = 'AUTO_POST'`).run();
       }
     } catch {}
 
