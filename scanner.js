@@ -25,7 +25,7 @@ const MAX_PROMOTED_CANDIDATES = Number(process.env.MAX_CANDIDATES      ?? 30);
 const MAX_TOKENS_TO_FETCH     = Number(process.env.MAX_TOKENS_TO_FETCH ?? 200);
 const DEX_BATCH_SIZE          = Number(process.env.DEX_BATCH_SIZE      ?? 30);
 
-const RESCAN_SCHEDULE_MINUTES = [2, 5, 10, 20];
+const RESCAN_SCHEDULE_MINUTES = [1, 3, 7, 15];
 const MAX_RESCANS             = RESCAN_SCHEDULE_MINUTES.length;
 
 // CHANGED: Lowered all thresholds to get more coins promoted and called
