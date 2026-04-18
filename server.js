@@ -4202,8 +4202,19 @@ try {
   const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='tuning_config'`).get();
   if (row?.value) {
     const saved = JSON.parse(row.value);
-    TUNING_CONFIG = { ...TUNING_CONFIG, ...saved, discovery: { ...TUNING_CONFIG.discovery, ...saved.discovery }, thresholds: { ...TUNING_CONFIG.thresholds, ...saved.thresholds }, penalties: { ...TUNING_CONFIG.penalties, ...saved.penalties } };
-    console.log('[tuning] Restored tuning config from DB');
+    // Only restore keys that exist in TUNING_DEFAULTS — prevents stale old keys from polluting config
+    for (const section of ['discovery', 'thresholds', 'penalties']) {
+      if (saved[section] && TUNING_DEFAULTS[section]) {
+        for (const key of Object.keys(TUNING_DEFAULTS[section])) {
+          if (saved[section][key] !== undefined) {
+            TUNING_CONFIG[section][key] = saved[section][key];
+          }
+        }
+      }
+    }
+    // Persist cleaned config back so old keys don't linger
+    saveTuningConfig();
+    console.log('[tuning] Restored tuning config from DB (cleaned stale keys)');
   }
 } catch {}
 
