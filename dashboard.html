@@ -6554,7 +6554,8 @@ async function loadAnalytics(){
     renderCalibration(analytics.winRateByScore||[]);
     renderWinRateGrid('winBySetup', analytics.winRateBySetup||[], 'setup_type');
     renderWinRateGrid('winByMcap', analytics.winRateByMcap||[], 'band');
-    renderMissedWinners(analytics.missedWinners||[]);
+    renderLossAutopsyDetail(analytics.recentLosses||[]);
+    renderMissedWinnersDetailed(analytics.missedWinners||[]);
     renderLossAutopsy(analytics);
   }
   if(learning)renderLearningStats(learning);
@@ -6644,7 +6645,7 @@ function renderWinRateGrid(id, data, labelKey) {
   '</div>';
 }
 
-function renderMissedWinners(data){
+function renderMissedWinnersDetailed(data){
   const el=document.getElementById('missedWinnersList');if(!el)return;
   if(!data?.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">😢</div><div>No missed winners</div><div class="empty-hint">Learning loop checks every 6h</div></div>';return;}
   el.innerHTML=data.slice(0,12).map(m=>{
@@ -6654,29 +6655,101 @@ function renderMissedWinners(data){
     const tok=m.token||(ca?ca.slice(0,6)+'…':'?');
     const mcap=m.market_cap?(m.market_cap>=1000?'$'+(m.market_cap/1000).toFixed(1)+'K':'$'+Math.round(m.market_cap)):'';
     const peakMc=m.peak_mcap?(m.peak_mcap>=1000?'$'+(m.peak_mcap/1000).toFixed(1)+'K':'$'+Math.round(m.peak_mcap)):'';
-    const risk=m.claude_risk?`<span style="padding:1px 5px;border-radius:3px;background:rgba(255,23,68,0.12);color:var(--red);margin-left:4px">${esc(m.claude_risk)}</span>`:'';
-    const tip=m.claude_verdict?` title="${esc(m.claude_verdict.slice(0,200))}"`:'';
-    return`<div${tip} onclick="openFullCandidateDetail('${esc(ca)}')" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s" onmouseenter="this.style.background='rgba(255,255,255,0.03)'" onmouseleave="this.style.background='transparent'">
-      <div style="flex:1;min-width:0">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--text1);font-weight:700">$${esc(tok)}${risk}</div>
-        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">Was: <b style="color:var(--red)">${esc(m.final_decision||'?')}</b> · Score: <b>${m.composite_score||m.claude_score||'?'}</b>${mcap?` · MCap at call: <b style="color:var(--cyan)">${mcap}</b>`:''}${peakMc?` → Peak: <b style="color:${mc}">${peakMc}</b>`:''}</div>
-      </div>
-      <div style="text-align:right;flex-shrink:0">
-        <div style="font-family:'Orbitron',var(--mono);font-size:18px;font-weight:900;color:${mc}">${mult?mult.toFixed(1)+'×':'—'}</div>
-        <div style="display:flex;gap:4px;margin-top:4px" onclick="event.stopPropagation()">
-          ${ca?`<a href="https://dexscreener.com/solana/${esc(ca)}" target="_blank" style="font-family:var(--mono);font-size:7px;color:var(--green);text-decoration:none;padding:2px 5px;background:rgba(0,230,118,0.1);border-radius:3px">DSC↗</a><a href="https://pump.fun/${esc(ca)}" target="_blank" style="font-family:var(--mono);font-size:7px;color:var(--orange);text-decoration:none;padding:2px 5px;background:rgba(255,109,0,0.1);border-radius:3px">PUMP↗</a>`:''}
+    const risk=m.claude_risk?`<span style="padding:2px 6px;border-radius:3px;background:${m.claude_risk==='HIGH'||m.claude_risk==='EXTREME'?'rgba(255,23,68,0.12)':'rgba(255,215,64,0.12)'};color:${m.claude_risk==='HIGH'||m.claude_risk==='EXTREME'?'var(--red)':'var(--gold)'}">${esc(m.claude_risk)}</span>`:'';
+    const score = m.composite_score||m.claude_score||'?';
+    const verdict = m.claude_verdict ? m.claude_verdict.slice(0,180) : '';
+
+    // Build "why we missed it" reason
+    var whyMissed = [];
+    if (m.final_decision === 'IGNORE') whyMissed.push('Scored too low or failed threshold');
+    if (m.claude_risk === 'HIGH' || m.claude_risk === 'EXTREME') whyMissed.push('Claude flagged ' + m.claude_risk + ' risk');
+    if (score !== '?' && Number(score) < 40) whyMissed.push('Score ' + score + ' below posting threshold');
+    if (m.market_cap && m.market_cap < 8000) whyMissed.push('MCap $' + (m.market_cap/1000).toFixed(1) + 'K below $8K floor');
+    if (m.market_cap && m.market_cap > 85000) whyMissed.push('MCap $' + (m.market_cap/1000).toFixed(0) + 'K above $85K cap');
+    if (!whyMissed.length) whyMissed.push('Passed over — may need threshold adjustment');
+
+    return`<div onclick="showCoinByCA('${esc(ca)}')" style="padding:12px 14px;border-bottom:1px solid rgba(255,215,64,0.1);cursor:pointer;transition:background 0.15s" onmouseenter="this.style.background='rgba(255,215,64,0.04)'" onmouseleave="this.style.background='transparent'">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <div style="position:relative;width:32px;height:32px;flex-shrink:0">
+          <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${esc(ca)}.png" onerror="this.style.display='none'" style="width:32px;height:32px;border-radius:50%;border:2px solid ${mc};object-fit:cover;box-shadow:0 0 8px ${mc}44">
         </div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text1)">$${esc(tok)}</span>
+            ${risk}
+            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">${(m.setup_type||'').replace(/_/g,' ')}</span>
+          </div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">Was: <b style="color:var(--red)">${esc(m.final_decision||'?')}</b> · Score: <b>${score}</b>${mcap?' · Entry: <b style="color:var(--cyan)">'+mcap+'</b>':''}${peakMc?' → Peak: <b style="color:'+mc+'">'+peakMc+'</b>':''}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-family:Orbitron,var(--mono);font-size:20px;font-weight:900;color:${mc};text-shadow:0 0 10px ${mc}44">${mult?mult.toFixed(1)+'×':'—'}</div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3)">peak</div>
+        </div>
+      </div>
+      <div style="padding-left:42px">
+        <div style="font-family:var(--mono);font-size:9px;color:var(--gold);line-height:1.5"><b>Why missed:</b> ${whyMissed.join(' · ')}</div>
+        ${verdict?'<div style="font-family:var(--mono);font-size:8px;color:var(--text3);line-height:1.4;margin-top:3px;font-style:italic">"'+esc(verdict)+'"</div>':''}
+      </div>
+      <div style="display:flex;gap:4px;padding-left:42px;margin-top:6px" onclick="event.stopPropagation()">
+        ${ca?`<a href="https://dexscreener.com/solana/${esc(ca)}" target="_blank" style="font-family:var(--mono);font-size:7px;color:var(--green);text-decoration:none;padding:2px 6px;background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.2);border-radius:3px">DSC↗</a><a href="https://pump.fun/${esc(ca)}" target="_blank" style="font-family:var(--mono);font-size:7px;color:var(--orange);text-decoration:none;padding:2px 6px;background:rgba(255,109,0,0.1);border:1px solid rgba(255,109,0,0.2);border-radius:3px">PUMP↗</a>`:''}
+      </div>
       </div>
     </div>`;
   }).join('');
 }
 
-function renderLossAutopsy(analytics){
-  const el=document.getElementById('lossAutopsy');if(!el)return;
-  const ls=(analytics?.winRateBySetup||[]).filter(s=>(s.winRate||0)<40&&(s.total||0)>0);
-  if(!ls.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">🔬</div><div>Needs LOSS outcomes</div></div>';return;}
-  const max=Math.max(...ls.map(s=>s.total||0),1);
-  el.innerHTML=ls.map(s=>{const pct=Math.round(((s.total||0)/max)*100);return`<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border)"><div style="font-family:var(--mono);font-size:9px;color:var(--orange);width:160px;overflow:hidden;text-overflow:ellipsis">${(s.setupType||s.type||'?').replace(/_/g,' ')}</div><div style="flex:1"><div class="prog-track"><div class="prog-fill" style="width:${pct}%;background:rgba(255,23,68,0.5)"></div></div></div><div style="font-family:var(--mono);font-size:8px;color:var(--text3);white-space:nowrap">${s.winRate||0}% win · ${s.total||0}</div></div>`;}).join('');
+function renderLossAutopsyDetail(losses) {
+  var el = document.getElementById('lossAutopsy');
+  if (!el) return;
+  if (!losses || !losses.length) {
+    el.innerHTML = '<div class="empty-state"><div class="empty-icon">🔬</div><div>No losses yet — keep it that way</div></div>';
+    return;
+  }
+  el.innerHTML = losses.map(function(l) {
+    var ca = l.contract_address || '';
+    var tok = l.token || (ca ? '$' + ca.slice(0,6) + '…' : '$?');
+    var peakX = l.peak_multiple != null ? l.peak_multiple.toFixed(2) + 'x' : '—';
+    var peakCol = (l.peak_multiple||0) >= 0.9 ? 'var(--gold)' : 'var(--red)';
+    var mc = l.market_cap_at_call ? '$' + (l.market_cap_at_call >= 1000 ? (l.market_cap_at_call/1000).toFixed(1) + 'K' : l.market_cap_at_call) : '—';
+    var riskCol = l.risk_at_call === 'HIGH' || l.risk_at_call === 'EXTREME' ? 'var(--red)' : l.risk_at_call === 'MEDIUM' ? 'var(--gold)' : 'var(--text3)';
+
+    // Build reason why it lost
+    var reasons = [];
+    if (l.dev_wallet_pct != null && l.dev_wallet_pct > 10) reasons.push('Dev ' + l.dev_wallet_pct.toFixed(1) + '% — too high');
+    if (l.bundle_risk === 'HIGH' || l.bundle_risk === 'SEVERE') reasons.push('Bundle ' + l.bundle_risk);
+    if (l.sniper_wallet_count > 15) reasons.push(l.sniper_wallet_count + ' snipers');
+    if (l.top10_holder_pct != null && l.top10_holder_pct > 60) reasons.push('Top10 ' + l.top10_holder_pct.toFixed(0) + '% — whale dominated');
+    if (l.volume_velocity != null && l.volume_velocity < 0.1) reasons.push('Low velocity ' + l.volume_velocity.toFixed(2));
+    if (l.buy_sell_ratio_1h != null && l.buy_sell_ratio_1h < 0.45) reasons.push('Sell pressure ' + (l.buy_sell_ratio_1h*100).toFixed(0) + '% buys');
+    if ((l.peak_multiple||0) < 0.5) reasons.push('Dumped hard — peak only ' + peakX);
+    if (!reasons.length) reasons.push('Score ' + (l.score_at_call||'?') + ' — may have been borderline');
+
+    var verdictText = l.claude_verdict ? l.claude_verdict.slice(0, 150) : '';
+
+    return '<div onclick="showCoinByCA(\'' + ca + '\')" style="padding:12px 14px;border-bottom:1px solid rgba(255,23,68,0.1);cursor:pointer;transition:background 0.15s" onmouseenter="this.style.background=\'rgba(255,23,68,0.04)\'" onmouseleave="this.style.background=\'transparent\'">' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+        '<div style="position:relative;width:28px;height:28px;flex-shrink:0">' +
+          '<img src="https://dd.dexscreener.com/ds-data/tokens/solana/' + ca + '.png" onerror="this.style.display=\'none\'" style="width:28px;height:28px;border-radius:50%;border:2px solid rgba(255,23,68,0.3);object-fit:cover">' +
+        '</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:6px">' +
+            '<span style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text1)">' + esc(tok) + '</span>' +
+            '<span style="font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(255,23,68,0.1);color:var(--red);border:1px solid rgba(255,23,68,0.3)">LOSS</span>' +
+            '<span style="font-family:var(--mono);font-size:8px;color:' + riskCol + '">' + (l.risk_at_call||'?') + ' RISK</span>' +
+          '</div>' +
+          '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">Score: ' + (l.score_at_call||'?') + ' · MCap: ' + mc + ' · ' + (l.setup_type_at_call||'?').replace(/_/g,' ') + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;flex-shrink:0">' +
+          '<div style="font-family:Orbitron,var(--mono);font-size:16px;font-weight:900;color:' + peakCol + '">' + peakX + '</div>' +
+          '<div style="font-family:var(--mono);font-size:7px;color:var(--text3)">peak</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="font-family:var(--mono);font-size:9px;color:var(--red);line-height:1.5;padding-left:38px">' +
+        '<b>Why it lost:</b> ' + reasons.join(' · ') +
+      '</div>' +
+      (verdictText ? '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);line-height:1.4;padding-left:38px;margin-top:3px;font-style:italic">"' + esc(verdictText) + '"</div>' : '') +
+    '</div>';
+  }).join('');
 }
 
 function renderLearningStats(data){

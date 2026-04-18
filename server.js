@@ -8085,12 +8085,26 @@ app.get('/api/log', (req, res) => {
 app.get('/api/analytics', (req, res) => {
   setCors(res);
   try {
+    // Recent losses with full detail for autopsy
+    const recentLosses = (() => { try { return dbInstance.prepare(`
+      SELECT c.token, c.contract_address, c.score_at_call, c.market_cap_at_call,
+             c.risk_at_call, c.setup_type_at_call, c.peak_multiple, c.outcome,
+             c.called_at, c.pct_change_1h,
+             ca.claude_verdict, ca.claude_risk, ca.dev_wallet_pct, ca.top10_holder_pct,
+             ca.bundle_risk, ca.sniper_wallet_count, ca.volume_velocity, ca.buy_sell_ratio_1h,
+             ca.structure_grade, ca.holders
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='LOSS'
+      ORDER BY c.posted_at DESC LIMIT 20
+    `).all(); } catch { return []; } })();
+
     res.json({
       ok:                  true,
       winRateByScore:      getWinRateByScoreBand(),
       winRateBySetup:      getWinRateBySetupType(),
       winRateByMcap:       getWinRateByMcapBand(),
       missedWinners:       getMissedWinners(),
+      recentLosses,
       deployerLeaderboard: getDeployerLeaderboard(),
       winnerProfiles:      getWinnerProfiles(),
       watchlist:           getWatchlistContents(),
