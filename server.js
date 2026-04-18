@@ -4987,6 +4987,131 @@ app.post('/api/agent/daily-review', async (req, res) => {
   });
 });
 
+// ── AUTO SELF-IMPROVEMENT LOOP — runs every 6 hours automatically ────────────
+// Claude analyzes performance, applies changes, logs everything to audit.
+// No human intervention needed. Runs: analyze → optimize → control-station sweep.
+
+let _selfImproveRunning = false;
+
+async function runSelfImproveLoop() {
+  if (_selfImproveRunning) { console.log('[self-improve] Already running, skipping'); return; }
+  if (!CLAUDE_API_KEY) { console.log('[self-improve] No CLAUDE_API_KEY, skipping'); return; }
+  _selfImproveRunning = true;
+  const startedAt = new Date().toISOString();
+  console.log(`[self-improve] ═══ Starting autonomous improvement cycle at ${startedAt} ═══`);
+  logEvent('INFO', 'SELF_IMPROVE_START', `Autonomous improvement cycle started at ${startedAt}`);
+
+  const PORT = process.env.PORT || 3000;
+  const base = `http://localhost:${PORT}`;
+  const results = { modes: [], controlStation: null, errors: [] };
+
+  try {
+    // Step 1: Run all agent modes with autoApply ON
+    for (const mode of ['analyze', 'optimize', 'wallets', 'survivors']) {
+      try {
+        console.log(`[self-improve] Running agent mode: ${mode}...`);
+        const res = await fetch(`${base}/api/agent/autonomous`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode, autoApply: true, sessionId: 'auto_' + Date.now() }),
+          signal: AbortSignal.timeout(90_000),
+        });
+        const data = await res.json();
+        const applied = data.executed_changes?.length || 0;
+        const proposed = data.proposed_changes?.length || 0;
+        results.modes.push({ mode, applied, proposed, ok: data.ok });
+        console.log(`[self-improve] ${mode}: ${applied} applied, ${proposed} proposed`);
+        await new Promise(r => setTimeout(r, 3000)); // breathing room between API calls
+      } catch (e) {
+        console.error(`[self-improve] ${mode} failed:`, e.message);
+        results.errors.push({ mode, error: e.message });
+      }
+    }
+
+    // Step 2: Run Control Station full-config auto-optimize
+    try {
+      console.log('[self-improve] Running Control Station auto-optimize...');
+      const res = await fetch(`${base}/api/control-station/auto-optimize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(90_000),
+      });
+      const data = await res.json();
+      results.controlStation = {
+        ok: data.ok,
+        applied: data.applied?.length || 0,
+        analysis: data.analysis,
+        summary: data.summary,
+      };
+      console.log(`[self-improve] Control Station: ${results.controlStation.applied} changes applied`);
+      if (data.analysis) console.log(`[self-improve] Analysis: ${data.analysis}`);
+    } catch (e) {
+      console.error('[self-improve] Control Station failed:', e.message);
+      results.errors.push({ mode: 'control-station', error: e.message });
+    }
+
+    // Step 3: Log summary to audit
+    const totalApplied = results.modes.reduce((a, m) => a + m.applied, 0) + (results.controlStation?.applied || 0);
+    const summary = `Autonomous cycle complete. Agent modes: ${results.modes.map(m => m.mode + '=' + m.applied + ' applied').join(', ')}. Control Station: ${results.controlStation?.applied || 0} applied. Total: ${totalApplied} changes.`;
+
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      '[SELF-IMPROVE]', startedAt, new Date().toISOString(),
+      summary + (results.controlStation?.analysis ? ' | Analysis: ' + results.controlStation.analysis : ''),
+      'AUTO_APPLIED'
+    );
+
+    console.log(`[self-improve] ═══ ${summary} ═══`);
+    logEvent('INFO', 'SELF_IMPROVE_COMPLETE', summary);
+
+    // Send Telegram notification
+    sendAdminAlert(
+      `🤖 <b>Self-Improvement Cycle Complete</b>\n` +
+      `${totalApplied} changes auto-applied\n` +
+      results.modes.map(m => `• ${m.mode}: ${m.applied} applied`).join('\n') +
+      `\n• control-station: ${results.controlStation?.applied || 0} applied` +
+      (results.controlStation?.analysis ? `\n\n📊 <i>${results.controlStation.analysis}</i>` : '') +
+      (results.errors.length ? `\n\n⚠️ Errors: ${results.errors.map(e => e.mode + ': ' + e.error).join(', ')}` : '')
+    ).catch(() => {});
+
+  } catch (e) {
+    console.error('[self-improve] Fatal error:', e.message);
+    logEvent('ERROR', 'SELF_IMPROVE_FAILED', e.message);
+  } finally {
+    _selfImproveRunning = false;
+  }
+}
+
+// Run every 6 hours
+const SELF_IMPROVE_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+setInterval(runSelfImproveLoop, SELF_IMPROVE_INTERVAL_MS);
+
+// Also run 2 minutes after boot to do an initial optimization
+setTimeout(runSelfImproveLoop, 2 * 60 * 1000);
+console.log('[self-improve] Scheduled: every 6h + initial run in 2min');
+
+// Manual trigger endpoint
+app.post('/api/self-improve/run', async (req, res) => {
+  setCors(res);
+  if (_selfImproveRunning) return res.json({ ok: false, error: 'Already running' });
+  res.json({ ok: true, message: 'Self-improvement cycle started. Check audit log for results.' });
+  setImmediate(runSelfImproveLoop);
+});
+
+app.get('/api/self-improve/status', (req, res) => {
+  setCors(res);
+  const lastRun = (() => { try { return dbInstance.prepare(`SELECT created_at FROM tuning_audit WHERE param='[SELF-IMPROVE]' ORDER BY created_at DESC LIMIT 1`).get()?.created_at; } catch { return null; } })();
+  const recentChanges = (() => { try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM tuning_audit WHERE status='AUTO_APPLIED' AND created_at > datetime('now','-24 hours')`).get().n; } catch { return 0; } })();
+  res.json({
+    ok: true,
+    running: _selfImproveRunning,
+    lastRun,
+    intervalHours: 6,
+    changesLast24h: recentChanges,
+    nextRunApprox: lastRun ? new Date(new Date(lastRun).getTime() + SELF_IMPROVE_INTERVAL_MS).toISOString() : 'within 2 minutes',
+  });
+});
+
 app.post('/api/agent/recommendations', (req, res) => {
   setCors(res);
   try {
