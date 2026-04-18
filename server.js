@@ -8334,6 +8334,174 @@ app.get('/api/narrative-momentum', (req, res) => {
 
 // ── Telegram Webhook ──────────────────────────────────────────────────────────
 
+// ── Free-text Telegram chat — talk back to the bot ──────────────────────────
+async function handleFreeChatTelegram(chatId, text) {
+  if (!CLAUDE_API_KEY) { await sendTelegramMessage(chatId, '⚠️ Claude API key not configured'); return; }
+  try {
+    // Build context for Claude
+    const stats = (() => { try {
+      const total = dbInstance.prepare('SELECT COUNT(*) as n FROM calls').get().n;
+      const wins = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'").get().n;
+      const losses = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'").get().n;
+      const recent = dbInstance.prepare("SELECT token, outcome, peak_multiple, score_at_call FROM calls ORDER BY id DESC LIMIT 5").all();
+      return { total, wins, losses, winRate: (wins+losses)>0 ? Math.round(wins/(wins+losses)*100)+'%' : '—', recent };
+    } catch { return {}; } })();
+
+    const configSummary = `Scoring: minScoreToPost=${SCORING_CONFIG.minScoreToPost}, sweetSpotBonus=${SCORING_CONFIG.sweetSpotBonus}. Discovery weights: ${JSON.stringify(TUNING_CONFIG.discovery)}. Sweet spot: $${(AI_CONFIG_OVERRIDES.sweetSpotMin||15000)/1000}K-$${(AI_CONFIG_OVERRIDES.sweetSpotMax||40000)/1000}K.`;
+
+    const systemPrompt = `You are Pulse Caller's AI assistant, responding via Telegram. Keep replies concise (under 300 words) and use plain text (no markdown, no HTML tags except <b> and <i>).
+
+BOT STATUS:
+- Total calls: ${stats.total || 0}, Wins: ${stats.wins || 0}, Losses: ${stats.losses || 0}, Win rate: ${stats.winRate || '—'}
+- Recent calls: ${JSON.stringify(stats.recent || [])}
+- Config: ${configSummary}
+
+You can help with:
+- Answering questions about bot performance, scores, tokens
+- Explaining why a call was made or missed
+- Suggesting config changes (user must apply via dashboard)
+- Discussing strategy and scoring logic
+
+Be direct, data-driven, and helpful.`;
+
+    const res = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 800, system: systemPrompt, messages: [{ role: 'user', content: text }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      await sendTelegramMessage(chatId, `⚠️ Claude API error: ${res.status}`);
+      return;
+    }
+
+    const data = await res.json();
+    const reply = (data.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+    if (reply) {
+      // Split long messages (Telegram 4096 char limit)
+      const chunks = [];
+      for (let i = 0; i < reply.length; i += 4000) chunks.push(reply.slice(i, i + 4000));
+      for (const chunk of chunks) await sendTelegramMessage(chatId, chunk);
+    } else {
+      await sendTelegramMessage(chatId, '🤖 No response generated.');
+    }
+  } catch (err) {
+    console.error('[telegram-chat]', err.message);
+    await sendTelegramMessage(chatId, `⚠️ Error: ${err.message}`);
+  }
+}
+
+// ── API Health Monitor — alerts when services go down ───────────────────────
+let _apiHealthState = { helius: true, birdeye: true, claude: true, openai: true, dexscreener: true };
+
+async function runApiHealthCheck() {
+  const alerts = [];
+  const checks = {};
+
+  // Helius
+  try {
+    const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth' }),
+      signal: AbortSignal.timeout(8000),
+    });
+    checks.helius = r.ok;
+    if (!r.ok && _apiHealthState.helius) alerts.push(`❌ <b>Helius RPC DOWN</b> — HTTP ${r.status}. Token detection + on-chain data affected.`);
+    if (r.ok && !_apiHealthState.helius) alerts.push(`✅ <b>Helius RPC RECOVERED</b>`);
+    _apiHealthState.helius = r.ok;
+  } catch (e) {
+    if (_apiHealthState.helius) alerts.push(`❌ <b>Helius RPC DOWN</b> — ${e.message}. Token detection offline.`);
+    _apiHealthState.helius = false; checks.helius = false;
+  }
+
+  // Birdeye
+  try {
+    const key = process.env.BIRDEYE_API_KEY || process.env.BIRDEYE_API_KEY_1;
+    if (key) {
+      const r = await fetch('https://public-api.birdeye.so/defi/token_overview?address=So11111111111111111111111111111111111111112', {
+        headers: { 'X-API-KEY': key }, signal: AbortSignal.timeout(8000),
+      });
+      checks.birdeye = r.ok;
+      if (!r.ok && _apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — HTTP ${r.status}. Market data + enrichment affected.`);
+      if (r.ok && !_apiHealthState.birdeye) alerts.push(`✅ <b>Birdeye API RECOVERED</b>`);
+      _apiHealthState.birdeye = r.ok;
+    }
+  } catch (e) {
+    if (_apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — ${e.message}. No market data.`);
+    _apiHealthState.birdeye = false; checks.birdeye = false;
+  }
+
+  // DexScreener
+  try {
+    const r = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
+      signal: AbortSignal.timeout(8000),
+    });
+    checks.dexscreener = r.ok;
+    if (!r.ok && _apiHealthState.dexscreener) alerts.push(`❌ <b>DexScreener DOWN</b> — HTTP ${r.status}. Scanner can't find new tokens.`);
+    if (r.ok && !_apiHealthState.dexscreener) alerts.push(`✅ <b>DexScreener RECOVERED</b>`);
+    _apiHealthState.dexscreener = r.ok;
+  } catch (e) {
+    if (_apiHealthState.dexscreener) alerts.push(`❌ <b>DexScreener DOWN</b> — ${e.message}. Scanner offline.`);
+    _apiHealthState.dexscreener = false; checks.dexscreener = false;
+  }
+
+  // Claude
+  if (CLAUDE_API_KEY) {
+    try {
+      const r = await fetch(CLAUDE_API_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 10, messages: [{ role: 'user', content: 'ping' }] }),
+        signal: AbortSignal.timeout(10000),
+      });
+      checks.claude = r.ok;
+      if (!r.ok && _apiHealthState.claude) alerts.push(`❌ <b>Claude API DOWN</b> — HTTP ${r.status}. AI scoring offline — bot can only use Foundation Signals.`);
+      if (r.ok && !_apiHealthState.claude) alerts.push(`✅ <b>Claude API RECOVERED</b>`);
+      _apiHealthState.claude = r.ok;
+    } catch (e) {
+      if (_apiHealthState.claude) alerts.push(`❌ <b>Claude API DOWN</b> — ${e.message}. No AI evaluation.`);
+      _apiHealthState.claude = false; checks.claude = false;
+    }
+  }
+
+  // OpenAI
+  if (OPENAI_API_KEY) {
+    try {
+      const r = await fetch('https://api.openai.com/v1/models', {
+        headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      checks.openai = r.ok;
+      if (!r.ok && _apiHealthState.openai) alerts.push(`❌ <b>OpenAI API DOWN</b> — HTTP ${r.status}. Secondary AI offline.`);
+      if (r.ok && !_apiHealthState.openai) alerts.push(`✅ <b>OpenAI API RECOVERED</b>`);
+      _apiHealthState.openai = r.ok;
+    } catch (e) {
+      if (_apiHealthState.openai) alerts.push(`❌ <b>OpenAI API DOWN</b> — ${e.message}`);
+      _apiHealthState.openai = false; checks.openai = false;
+    }
+  }
+
+  // Send alerts only when state CHANGES (down→up or up→down)
+  if (alerts.length > 0) {
+    const msg = `🚨 <b>API HEALTH ALERT</b>\n\n${alerts.join('\n\n')}\n\n<i>Status: Helius=${checks.helius?'✅':'❌'} Birdeye=${checks.birdeye?'✅':'❌'} DexScreener=${checks.dexscreener?'✅':'❌'} Claude=${checks.claude?'✅':'❌'} OpenAI=${checks.openai?'✅':'❌'}</i>`;
+    sendAdminAlert(msg).catch(() => {});
+    console.log(`[health] Alert sent: ${alerts.length} state changes`);
+    logEvent('WARN', 'API_HEALTH_ALERT', alerts.join(' | '));
+  }
+}
+
+// Run health check every 5 minutes
+setInterval(runApiHealthCheck, 5 * 60 * 1000);
+// Initial check 30s after boot
+setTimeout(runApiHealthCheck, 30_000);
+console.log('[health] API health monitor scheduled: every 5min');
+
+// Health check endpoint for dashboard
+app.get('/api/health', async (req, res) => {
+  setCors(res);
+  res.json({ ok: true, apis: _apiHealthState });
+});
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   const message = req.body?.message;
@@ -8356,7 +8524,12 @@ app.post('/webhook', async (req, res) => {
       case '/why':       await handleWhyCommand(chatId, args);          break;
       case '/top':       await handleTopCommand(chatId);                break;
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
-      default: break;
+      default:
+        // Free-text chat — reply with Claude if it's from admin
+        if (String(fromId) === String(ADMIN_TELEGRAM_ID) && message.text && !message.text.startsWith('/')) {
+          await handleFreeChatTelegram(chatId, message.text);
+        }
+        break;
     }
   } catch (err) { console.error('[webhook]', err.message); }
 });
