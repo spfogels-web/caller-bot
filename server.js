@@ -4344,6 +4344,204 @@ Respond ONLY with valid JSON array:
   }
 });
 
+// ── Tuning Reset ─────────────────────────────────────────────────────────────
+app.post('/api/tuning/reset', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const prev = JSON.parse(JSON.stringify(TUNING_CONFIG));
+    TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
+    saveTuningConfig();
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      'ALL', JSON.stringify(prev), JSON.stringify(TUNING_DEFAULTS), 'Full reset to defaults', 'APPROVED'
+    );
+    console.log('[tuning] Reset all values to defaults');
+    res.json({ ok: true, config: TUNING_CONFIG });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── CONTROL STATION — Unified config endpoint ───────────────────────────────
+app.get('/api/control-station', (req, res) => {
+  setCors(res);
+  try {
+    const audit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 100`).all();
+    const agentActions = (() => { try { return dbInstance.prepare(`SELECT * FROM agent_actions WHERE approved=1 ORDER BY created_at DESC LIMIT 50`).all(); } catch { return []; } })();
+    res.json({
+      ok: true,
+      scoring: SCORING_CONFIG,
+      scoringDefaults: SCORING_CONFIG_DEFAULTS,
+      tuning: TUNING_CONFIG,
+      tuningDefaults: TUNING_DEFAULTS,
+      overrides: AI_CONFIG_OVERRIDES,
+      overrideKeys: [
+        'gemTargetMin', 'gemTargetMax', 'sweetSpotMin', 'sweetSpotMax',
+        'maxMarketCapOverride', 'minMarketCapOverride',
+        'postThresholdOverride', 'minScoreOverride', 'scoreFloorOverride',
+        'bundleRiskBlock', 'sniperCountBlock', 'devWalletPctBlock',
+        'top10HolderBlock', 'trapSeverityBlock',
+        'maxPairAgeHoursOverride', 'minPairAgeMinutesOverride',
+        'upgradeEnabled', 'aggressiveMode',
+        'walletIntelWeight', 'earlyWalletTracking', 'survivorTracking',
+        'agentAutoApply', 'agentConvictionThreshold',
+      ],
+      audit,
+      agentActions,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST — Claude auto-optimizes freely, applies changes, logs detailed reasoning
+app.post('/api/control-station/auto-optimize', express.json(), async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
+  try {
+    // Gather comprehensive performance data
+    const wins = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 40
+    `).all();
+    const losses = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 40
+    `).all();
+    const recentAudit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 20`).all();
+
+    const prompt = `You are the CONTROL STATION OPTIMIZER for Pulse Caller — a Solana micro-cap token sniper bot.
+
+You have FULL AUTHORITY to change ANY parameter below. No human approval needed. Make changes that will improve win rate.
+
+CURRENT SCORING CONFIG:
+${JSON.stringify(SCORING_CONFIG, null, 2)}
+
+CURRENT TUNING CONFIG (discovery weights, thresholds, penalties):
+${JSON.stringify(TUNING_CONFIG, null, 2)}
+
+CURRENT AI CONFIG OVERRIDES:
+${JSON.stringify(AI_CONFIG_OVERRIDES, null, 2)}
+
+WIN DATA (${wins.length} resolved wins):
+${JSON.stringify(wins.slice(0, 20), null, 1)}
+
+LOSS DATA (${losses.length} resolved losses):
+${JSON.stringify(losses.slice(0, 20), null, 1)}
+
+RECENT CHANGES (last 20 audit entries):
+${JSON.stringify(recentAudit.slice(0, 10), null, 1)}
+
+TASK: Analyze all data. Find what separates winners from losers. Apply 3-8 specific changes across ANY config system.
+For each change, provide a DETAILED explanation of WHY and what improvement you expect.
+
+You can change:
+- scoring.*: minScoreToPost, sweetSpotBonus, secondaryBonus, preLaunchBonus, crossChainBonus, devFingerprintCap, noSignalCap, rugGuardMinScore, consensusOverrideScore, winPeakMultiple, neutralDrawdownPct
+- tuning.discovery.*: buyVelocity, uniqueBuyerGrowth, liquidityHealth, devRisk, holderConcentration, sellPressure, walletBehavior, momentumAccel
+- tuning.thresholds.*: autoPostScore, eliteThreshold, cleanThreshold, averageThreshold, mixedThreshold, mcapHardCap, sweetSpotMin, sweetSpotMax
+- tuning.penalties.*: latePump1hThreshold, latePump1hPenalty, latePump1hSevereThreshold, latePump1hSeverePenalty, latePump24hThreshold, latePump24hPenalty, winThresholdPct, lossThresholdPct
+- overrides.*: gemTargetMin, gemTargetMax, sweetSpotMin, sweetSpotMax, maxMarketCapOverride, minScoreOverride, walletIntelWeight, aggressiveMode, etc.
+
+Respond ONLY with valid JSON:
+{
+  "analysis": "2-3 sentence summary of what you found",
+  "changes": [
+    {
+      "system": "scoring|tuning|overrides",
+      "section": "discovery|thresholds|penalties|null",
+      "param": "exact_param_name",
+      "current": current_value,
+      "new_value": new_value,
+      "reason": "Detailed 2-3 sentence explanation of WHY this change improves results. Reference specific data.",
+      "expected_improvement": "What this should do to win rate / quality",
+      "confidence": 0-100,
+      "risk": "LOW|MEDIUM|HIGH"
+    }
+  ],
+  "summary": "One paragraph summary of all changes and expected combined effect"
+}`;
+
+    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 3000, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (!claudeRes.ok) {
+      const errText = await claudeRes.text();
+      return res.status(502).json({ ok: false, error: 'Claude API: ' + errText.slice(0, 200) });
+    }
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const jsonMatch = reply.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return res.json({ ok: true, applied: [], raw: reply });
+
+    const result = JSON.parse(jsonMatch[0]);
+    const applied = [];
+
+    // AUTO-APPLY every change Claude recommends — no approval needed
+    for (const change of (result.changes || [])) {
+      try {
+        let oldVal = null;
+        if (change.system === 'scoring' && change.param in SCORING_CONFIG) {
+          oldVal = SCORING_CONFIG[change.param];
+          SCORING_CONFIG[change.param] = typeof oldVal === 'number' ? Number(change.new_value) : change.new_value;
+          persistScoringConfig();
+        } else if (change.system === 'tuning' && change.section && TUNING_CONFIG[change.section]?.[change.param] !== undefined) {
+          oldVal = TUNING_CONFIG[change.section][change.param];
+          TUNING_CONFIG[change.section][change.param] = Number(change.new_value);
+          saveTuningConfig();
+          // Sync to AI_CONFIG_OVERRIDES for live params
+          if (change.param === 'mcapHardCap') AI_CONFIG_OVERRIDES.maxMarketCapOverride = Number(change.new_value);
+          if (change.param === 'autoPostScore') AI_CONFIG_OVERRIDES.minScoreOverride = Number(change.new_value);
+          if (change.param === 'sweetSpotMin') AI_CONFIG_OVERRIDES.sweetSpotMin = Number(change.new_value);
+          if (change.param === 'sweetSpotMax') AI_CONFIG_OVERRIDES.sweetSpotMax = Number(change.new_value);
+          persistAIConfig();
+        } else if (change.system === 'overrides') {
+          oldVal = AI_CONFIG_OVERRIDES[change.param];
+          AI_CONFIG_OVERRIDES[change.param] = change.new_value;
+          if (change.param === 'maxMarketCapOverride' && typeof change.new_value === 'number') activeMode.maxMarketCap = change.new_value;
+          if (change.param === 'minScoreOverride' && typeof change.new_value === 'number') activeMode.minScore = change.new_value;
+          persistAIConfig();
+        } else {
+          continue;
+        }
+
+        // Audit log with detailed reasoning
+        dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+          `[${change.system}] ${change.param}`,
+          String(oldVal ?? ''),
+          String(change.new_value),
+          `[AUTO-PILOT] ${change.reason} | Expected: ${change.expected_improvement || 'improved accuracy'} | Confidence: ${change.confidence || '?'}%`,
+          'AUTO_APPLIED'
+        );
+        applied.push({ ...change, old_value: oldVal });
+        console.log(`[control-station] AUTO-APPLIED: ${change.system}.${change.param} ${oldVal} → ${change.new_value} | ${change.reason?.slice(0,80)}`);
+      } catch (e) { console.warn('[control-station] Failed to apply:', change.param, e.message); }
+    }
+
+    logEvent('INFO', 'CONTROL_STATION_AUTO_OPTIMIZE', `Applied ${applied.length} changes. Analysis: ${result.analysis?.slice(0,200)}`);
+
+    res.json({
+      ok: true,
+      analysis: result.analysis,
+      summary: result.summary,
+      applied,
+      total_changes: applied.length,
+      winsAnalyzed: wins.length,
+      lossesAnalyzed: losses.length,
+    });
+  } catch (err) {
+    console.error('[control-station/auto-optimize]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
 app.get('/api/agent/memory', (req, res) => {
   setCors(res);
