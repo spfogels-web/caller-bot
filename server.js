@@ -36,7 +36,7 @@ import {
   insertScannerFeed, getScannerFeed,
   upsertDeployerReputation, getDeployerReputation,
   rebuildWinnerProfiles, computeSimilarityScores,
-  getWinRateByScoreBand, getWinRateBySetupType,
+  getWinRateByScoreBand, getWinRateBySetupType, getWinRateByMcapBand,
   getMissedWinners, getDeployerLeaderboard, getWinnerProfiles,
   updateCallPerformance, updateDeployerOutcome, db as dbInstance,
 } from './db.js';
@@ -8065,6 +8065,7 @@ app.get('/api/analytics', (req, res) => {
       ok:                  true,
       winRateByScore:      getWinRateByScoreBand(),
       winRateBySetup:      getWinRateBySetupType(),
+      winRateByMcap:       getWinRateByMcapBand(),
       missedWinners:       getMissedWinners(),
       deployerLeaderboard: getDeployerLeaderboard(),
       winnerProfiles:      getWinnerProfiles(),

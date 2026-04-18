@@ -3618,7 +3618,15 @@ body::before {
       <div class="card" style="margin-bottom:12px">
         <div class="card-header">🏆 WIN RATE BY SETUP TYPE</div>
         <div class="card-body" id="winBySetup">
-          <div class="spinner"><div class="spin-dot" style="background:var(--gold)"></div><div class="spin-dot" style="background:var(--green)"></div></div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Needs resolved WIN/LOSS calls with setup types to populate</div>
+        </div>
+      </div>
+
+      <!-- Win rate by MCap band -->
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-header">💰 WIN RATE BY MCAP BAND — Where are the best entries?</div>
+        <div class="card-body" id="winByMcap">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Needs resolved calls to populate</div>
         </div>
       </div>
 
@@ -6522,7 +6530,8 @@ async function loadAnalytics(){
   ]);
   if(analytics){
     renderCalibration(analytics.winRateByScore||[]);
-    renderWinRateList('winBySetup',analytics.winRateBySetup||[]);
+    renderWinRateGrid('winBySetup', analytics.winRateBySetup||[], 'setup_type');
+    renderWinRateGrid('winByMcap', analytics.winRateByMcap||[], 'band');
     renderMissedWinners(analytics.missedWinners||[]);
     renderLossAutopsy(analytics);
   }
@@ -6565,17 +6574,52 @@ function renderCalibration(data){
   '</div>';
 }
 
-function renderWinRateList(id,data){
-  const el=document.getElementById(id);if(!el)return;
-  if(!data.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">📊</div><div>Mark calls WIN/LOSS</div></div>';return;}
-  const tot=data.reduce((a,i)=>a+(i.wins||0)+(i.losses||0),0);
-  if(tot===0){el.innerHTML='<div style="padding:8px 12px;font-family:var(--mono);font-size:9px;color:var(--gold)">⚠ '+data.reduce((a,i)=>a+(i.total||0),0)+' calls — mark outcomes to see win rates</div>'+data.slice(0,6).map(item=>`<div class="win-rate-row"><div class="wr-label">${(item.setupType||item.type||'?').replace(/_/g,' ')}</div><div class="wr-bar-wrap"><div class="wr-track"><div class="wr-fill" style="width:${Math.min((item.total||0)*5,100)}%;background:rgba(136,153,187,0.3)"></div></div></div><div class="wr-stat">${item.total||0} calls</div></div>`).join('');return;}
-  const sorted=[...data].filter(i=>{const l=(i.setupType||i.type||'').toString();return l&&l!=='?';}).sort((a,b)=>(b.winRate||0)-(a.winRate||0));
-  el.innerHTML=sorted.slice(0,10).map(item=>{
-    const wr=item.winRate||0;const col=wr>=60?'var(--green)':wr>=40?'var(--gold)':'var(--red)';
-    const lbl=(item.setupType||item.type||'?').replace(/_/g,' ').slice(0,20);
-    return`<div class="win-rate-row"><div class="wr-label" title="${lbl}">${lbl}</div><div class="wr-bar-wrap"><div class="wr-track"><div class="wr-fill" style="width:${wr}%;background:${col}44"><span style="font-family:var(--mono);font-size:8px;color:${col}">${wr}%</span></div></div></div><div class="wr-stat">${item.wins||0}W/${item.losses||0}L</div></div>`;
-  }).join('');
+function renderWinRateGrid(id, data, labelKey) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  if (!data || !data.length) {
+    el.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Needs resolved WIN/LOSS calls to populate</div>';
+    return;
+  }
+  var sorted = data.filter(function(i) {
+    var l = (i[labelKey] || i.setupType || i.setup_type || i.type || i.band || '').toString();
+    return l && l !== '?';
+  }).sort(function(a, b) { return (b.win_rate || b.winRate || 0) - (a.win_rate || a.winRate || 0); });
+
+  if (!sorted.length) {
+    el.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">No data yet</div>';
+    return;
+  }
+
+  el.innerHTML = '<div style="display:grid;grid-template-columns:110px 1fr auto auto auto auto;gap:6px 12px;align-items:center;padding:4px 0">' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);font-weight:700">TYPE</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);font-weight:700">WIN RATE</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--green);font-weight:700;text-align:center">W</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--red);font-weight:700;text-align:center">L</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--cyan);font-weight:700;text-align:center">AVG X</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--gold);font-weight:700;text-align:center">BEST X</div>' +
+    sorted.slice(0, 10).map(function(item) {
+      var wr = item.win_rate || item.winRate || 0;
+      var wins = item.wins || 0;
+      var losses = item.losses || 0;
+      var avgX = item.avg_peak_x != null ? item.avg_peak_x + 'x' : '—';
+      var bestX = item.best_x != null ? item.best_x + 'x' : '—';
+      var col = wr >= 60 ? 'var(--green)' : wr >= 40 ? 'var(--gold)' : 'var(--red)';
+      var lbl = (item[labelKey] || item.setupType || item.setup_type || item.type || item.band || '?').toString().replace(/_/g, ' ').slice(0, 18);
+      return '<div style="font-family:var(--mono);font-size:10px;color:var(--text1);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + lbl + '">' + lbl + '</div>' +
+        '<div style="position:relative;height:24px;background:rgba(0,0,0,0.4);border-radius:4px;border:1px solid rgba(255,255,255,0.04);overflow:hidden">' +
+          '<div style="height:100%;width:' + wr + '%;background:linear-gradient(90deg,' + col + '11,' + col + '44);border-radius:4px"></div>' +
+          '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;padding:0 8px">' +
+            '<span style="font-family:Orbitron,var(--mono);font-size:11px;color:' + col + ';font-weight:700">' + wr + '%</span>' +
+            '<span style="font-family:var(--mono);font-size:8px;color:var(--text3)">' + (wins + losses) + ' calls</span>' +
+          '</div>' +
+        '</div>' +
+        '<div style="font-family:var(--mono);font-size:11px;color:var(--green);font-weight:700;text-align:center">' + wins + '</div>' +
+        '<div style="font-family:var(--mono);font-size:11px;color:var(--red);font-weight:700;text-align:center">' + losses + '</div>' +
+        '<div style="font-family:var(--mono);font-size:10px;color:var(--cyan);text-align:center">' + avgX + '</div>' +
+        '<div style="font-family:var(--mono);font-size:10px;color:var(--gold);font-weight:700;text-align:center">' + bestX + '</div>';
+    }).join('') +
+  '</div>';
 }
 
 function renderMissedWinners(data){

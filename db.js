@@ -1305,10 +1305,34 @@ export function getWinRateBySetupType() {
   return db.prepare(`
     SELECT setup_type_at_call as setup_type, COUNT(*) as total,
       SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+      SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+      SUM(CASE WHEN outcome = 'NEUTRAL' THEN 1 ELSE 0 END) as neutrals,
       ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate,
-      ROUND(AVG(pct_change_24h), 1) as avg_24h_change
-    FROM calls WHERE outcome != 'PENDING' AND setup_type_at_call IS NOT NULL
+      ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+      ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+    FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND setup_type_at_call IS NOT NULL
     GROUP BY setup_type_at_call ORDER BY win_rate DESC
+  `).all();
+}
+
+export function getWinRateByMcapBand() {
+  return db.prepare(`
+    SELECT
+      CASE
+        WHEN market_cap_at_call >= 40000 THEN '$40K-$85K'
+        WHEN market_cap_at_call >= 20000 THEN '$20K-$40K'
+        WHEN market_cap_at_call >= 8000  THEN '$8K-$20K'
+        ELSE 'Under $8K'
+      END as band,
+      COUNT(*) as total,
+      SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+      SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+      ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate,
+      ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+      ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+    FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND market_cap_at_call IS NOT NULL
+    GROUP BY band ORDER BY
+      CASE band WHEN '$8K-$20K' THEN 1 WHEN '$20K-$40K' THEN 2 WHEN '$40K-$85K' THEN 3 ELSE 4 END
   `).all();
 }
 
