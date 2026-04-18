@@ -588,6 +588,10 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_wact_detected_at ON wallet_activity(detected_at DESC)`,
     // Keep history bounded — 30 days is plenty for cluster analysis
     `DELETE FROM wallet_activity WHERE detected_at < datetime('now', '-30 days')`,
+    // v9: Foundation Signals scoring data
+    `ALTER TABLE candidates ADD COLUMN dual_parts TEXT`,
+    `ALTER TABLE candidates ADD COLUMN discovery_score INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN model_used TEXT`,
   ];
 
   let added = 0;

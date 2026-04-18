@@ -2744,8 +2744,12 @@ async function processCandidate(candidate, isRescan = false) {
     // so we don't have to widen the giant insertCandidate prepared stmt)
     try {
       dbInstance.prepare(
-        `UPDATE candidates SET detected_at_ms=?, enriched_at_ms=?, scored_at_ms=? WHERE id=?`
-      ).run(detectedAtMs, enrichedCandidate.enrichedAtMs, scoredAtMs, candidateId);
+        `UPDATE candidates SET detected_at_ms=?, enriched_at_ms=?, scored_at_ms=?, dual_parts=?, discovery_score=?, model_used=? WHERE id=?`
+      ).run(detectedAtMs, enrichedCandidate.enrichedAtMs, scoredAtMs,
+        JSON.stringify(scoreResult.dualParts ?? {}),
+        scoreResult.discoveryScore ?? null,
+        scoreResult.modelUsed ?? null,
+        candidateId);
     } catch {}
 
     // Write to our own sub-scores table — guaranteed schema we control
@@ -7195,6 +7199,10 @@ app.get('/api/candidates/by-ca/:ca', (req, res) => {
       });
       cand.composite_score = sub.composite_score ?? cand.composite_score;
     }
+    // Parse dual_parts JSON if stored
+    if (cand.dual_parts && typeof cand.dual_parts === 'string') {
+      try { cand.dual_parts = JSON.parse(cand.dual_parts); } catch {}
+    }
     res.json({ ok: true, candidate: cand, source: 'candidates' });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
@@ -7216,6 +7224,13 @@ app.get('/api/candidates/:id', (req, res) => {
     if (typeof candidate.score_penalties === 'string') {
       try { candidate.penalties = JSON.parse(candidate.score_penalties); } catch { candidate.penalties = {}; }
     }
+    if (typeof candidate.dual_parts === 'string') {
+      try { candidate.dualParts = JSON.parse(candidate.dual_parts); } catch { candidate.dualParts = {}; }
+    } else if (candidate.dual_parts && typeof candidate.dual_parts === 'object') {
+      candidate.dualParts = candidate.dual_parts;
+    }
+    candidate.discoveryScore = candidate.discovery_score;
+    candidate.modelUsed = candidate.model_used;
     // Parse claudeRaw to get bull_case and red_flags for signals fallback
     if (!candidate.signals && typeof candidate.claude_raw === 'string') {
       try {
