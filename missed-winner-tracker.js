@@ -410,15 +410,16 @@ export async function runOutcomeTracker(dbInstance) {
       // Respect manual overrides — never auto-flip a user-set outcome
       if (call.outcome_source === 'MANUAL') { await sleep(300); continue; }
 
-      // ── User outcome rules ────────────────────────────────────────────
-      //   WIN  — at any check after 1h, if peak ever hit ≥1.5x (even if
-      //          the coin later rugged). peak_multiple from the calls row
-      //          captures the high-water mark; we lock the WIN as soon as
-      //          we see it.
-      //   LOSS — at the 6h check, if peak still hasn't hit 1.5x, confirm
-      //          as LOSS. Between 1h and 6h the coin stays PENDING giving
-      //          it a chance to recover.
-      // Read the current rolling peak from the row (just updated above).
+      // ── OUTCOME RULES: PEAK IS FINAL ──────────────────────────────────
+      // The peak multiple IS the result. If a coin hit 4.8x at 15min then
+      // rugged to 0, the call was still a 4.8x WIN. We track the high-water
+      // mark and judge the call by its best moment, not its final price.
+      //
+      //   WIN:     peak ≥ 1.5x — lock immediately, don't wait
+      //   NEUTRAL: peak 0.9x–1.49x — resolve after 2h (give it a chance)
+      //   LOSS:    peak < 0.9x — resolve after 2h
+      //
+      // No more waiting 6h. 2h is enough — if it hasn't moved by then, it won't.
       let peakNow = result.multiple;
       try {
         const r = dbInstance.prepare(`SELECT peak_multiple FROM calls WHERE id=?`).get(call.id);
@@ -426,10 +427,11 @@ export async function runOutcomeTracker(dbInstance) {
       } catch {}
 
       const reachedWinBar = peakNow >= WIN_PEAK;
-      const finalCheckDue = minutesSince >= 360; // 6h confirmation window
+      const confirmWindow = minutesSince >= 120; // 2h confirmation (was 6h)
 
-      if (reachedWinBar && minutesSince >= 60) {
-        // Lock WIN — peak hit 1.5x, current state irrelevant
+      if (reachedWinBar) {
+        // Lock WIN IMMEDIATELY — peak hit 1.5x, no waiting required
+        // The peak is the result. Current price is irrelevant.
         dbInstance.prepare(`
           UPDATE calls SET
             outcome = 'WIN',
@@ -438,7 +440,7 @@ export async function runOutcomeTracker(dbInstance) {
             auto_resolved_at = datetime('now'),
             outcome_source = 'AUTO',
             outcome_set_at = datetime('now')
-          WHERE id = ?
+          WHERE id = ? AND (outcome IS NULL OR outcome = 'PENDING')
         `).run(result.pctChange, call.id);
         if (ca) {
           try {
@@ -449,12 +451,11 @@ export async function runOutcomeTracker(dbInstance) {
             `).run(ca);
           } catch {}
         }
-        console.log(`[outcome-tracker] ✅ Auto-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)`);
-      } else if (finalCheckDue && !reachedWinBar) {
-        // 6h passed and never hit 1.5x.
-        // Peak 0.9x–1.49x → NEUTRAL (didn't lose money, just didn't moon)
-        // Peak < 0.9x → LOSS (real drawdown, bad call)
-        // This prevents marginal plays from tanking the win rate.
+        console.log(`[outcome-tracker] ✅ Auto-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call) — LOCKED`);
+      } else if (confirmWindow && !reachedWinBar) {
+        // 2h passed and peak never hit 1.5x.
+        // Peak 0.9x–1.49x → NEUTRAL (didn't lose money)
+        // Peak < 0.9x → LOSS (real drawdown)
         const finalOutcome = peakNow >= 0.9 ? 'NEUTRAL' : 'LOSS';
         const emoji = finalOutcome === 'NEUTRAL' ? '➖' : '❌';
         dbInstance.prepare(`
@@ -526,14 +527,14 @@ async function fetchCurrentMarketCap(contractAddress) {
 export function startLearningLoop(dbInstance, claudeApiKey) {
   console.log('[learning-loop] Starting automated outcome tracking and missed winner detection...');
 
-  // Outcome tracking: every 3 minutes for fresh calls (peak capture is
-  // lossy at 15 min — coins pump-and-fade inside one cycle). The tracker
-  // queries a max of 50 unresolved calls per run so Helius load stays sane.
+  // Outcome tracking: every 90 seconds — peaks happen fast in micro-caps.
+  // A coin can 5x in 10 minutes then rug. We need to capture that peak.
+  // The tracker queries max 50 unresolved calls per run so API load stays sane.
   const outcomeInterval = setInterval(() => {
     runOutcomeTracker(dbInstance).catch(err =>
       console.warn('[learning-loop] Outcome tracker error:', err.message)
     );
-  }, 3 * 60_000);
+  }, 90_000); // 90s — was 3min, tightened to catch fast peaks
 
   // Missed winner detection + analysis: every 6 hours
   const missedWinnerInterval = setInterval(async () => {

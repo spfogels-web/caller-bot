@@ -323,6 +323,26 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   else if (p24h != null && p24h > 500) { latePumpPenalty = 20; risks.push(`Up +${p24h.toFixed(0)}% 24h — extended`); }
   parts.latePumpPenalty = -latePumpPenalty;
 
+  // ── DATA CONFIDENCE — how much of this score is based on real data ──────
+  // Counts how many key fields have real values vs null/defaults.
+  // HIGH = most fields present, score is reliable
+  // MEDIUM = some gaps, score is estimated
+  // LOW = mostly defaults, score is speculative
+  const keyFields = [
+    m.buyVelocity, m.buySellRatio1h, m.devWalletPct, m.top10HolderPct,
+    m.liqMcapRatio, m.holders, m.sniperWalletCount, m.bundleRisk,
+    m.mintAuthority, m.priceChange1h,
+  ];
+  const knownCount = keyFields.filter(v => v != null).length;
+  const dataConfidence = knownCount >= 8 ? 'HIGH' : knownCount >= 5 ? 'MEDIUM' : 'LOW';
+  const dataCompleteness = Math.round((knownCount / keyFields.length) * 100);
+
+  if (dataConfidence === 'LOW') {
+    risks.push(`Data confidence LOW (${dataCompleteness}% fields available) — score is speculative`);
+  } else if (dataConfidence === 'MEDIUM') {
+    risks.push(`Data confidence MEDIUM (${dataCompleteness}% fields) — some estimates in score`);
+  }
+
   // ── FINAL SCORE ───────────────────────────────────────────────────────────
   const foundationTotal = parts.volumeVelocity + parts.buyPressure +
                           parts.walletQuality + parts.holderDistribution +
@@ -337,6 +357,8 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
     model: 'discovery',
     foundationTotal,
     latePumpPenalty,
+    dataConfidence,
+    dataCompleteness,
   };
 }
 
@@ -511,5 +533,7 @@ export function runDualModel(candidate, discoveryWeights = null) {
     parts:           primary.parts,
     thresholds:      modelUsed === 'runner' ? RUNNER_THRESHOLDS : DISCOVERY_THRESHOLDS,
     foundationTotal: discovery.foundationTotal,
+    dataConfidence:   discovery.dataConfidence,
+    dataCompleteness: discovery.dataCompleteness,
   };
 }
