@@ -4330,8 +4330,25 @@ Respond ONLY with valid JSON array:
 
     const recommendations = JSON.parse(jsonMatch[0]);
 
+    // Safety bounds for tuning optimize
+    const TUNE_BOUNDS = {
+      autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
+      averageThreshold: [45, 75], mixedThreshold: [55, 85],
+      mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
+      buyVelocity: [3, 25], uniqueBuyerGrowth: [3, 25], liquidityHealth: [3, 25],
+      devRisk: [3, 25], holderConcentration: [3, 25], sellPressure: [3, 25],
+      walletBehavior: [3, 25], momentumAccel: [3, 25],
+      latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],
+      latePump24hPenalty: [5, 40], winThresholdPct: [10, 50], lossThresholdPct: [-60, -10],
+    };
+
     // AUTO-APPLY every recommendation — no approval needed
     for (const r of recommendations) {
+      // Clamp to safety bounds
+      if (typeof r.proposed === 'number' && TUNE_BOUNDS[r.param]) {
+        const [min, max] = TUNE_BOUNDS[r.param];
+        r.proposed = Math.max(min, Math.min(max, r.proposed));
+      }
       let applied = false;
       for (const section of ['discovery', 'thresholds', 'penalties']) {
         if (r.param in TUNING_CONFIG[section]) {
@@ -4435,7 +4452,25 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
 
     const prompt = `You are the CONTROL STATION OPTIMIZER for Pulse Caller — a Solana micro-cap token sniper bot.
 
-You have FULL AUTHORITY to change ANY parameter below. No human approval needed. Make changes that will improve win rate.
+You have FULL AUTHORITY to change ANY parameter below. No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL config systems to maximize win rate.
+
+SAFETY BOUNDS (you MUST stay within these):
+- minScoreToPost: 35-60 (NEVER below 35 — too much spam)
+- sweetSpotBonus: 1-10
+- preLaunchBonus: 2-12
+- crossChainBonus: 1-8
+- devFingerprintCap: 1-6
+- noSignalCap: 50-80
+- rugGuardMinScore: 45-75
+- consensusOverrideScore: 50-80
+- winPeakMultiple: 1.2-3.0
+- autoPostScore: 30-55
+- eliteThreshold: 35-55
+- mcapHardCap: 50000-200000
+- sweetSpotMin: 5000-25000
+- sweetSpotMax: 20000-80000
+- discovery weights: each 3-25 (total should be ~100)
+- penalties: reasonable ranges, don't zero them out
 
 CURRENT SCORING CONFIG:
 ${JSON.stringify(SCORING_CONFIG, null, 2)}
@@ -4455,7 +4490,8 @@ ${JSON.stringify(losses.slice(0, 20), null, 1)}
 RECENT CHANGES (last 20 audit entries):
 ${JSON.stringify(recentAudit.slice(0, 10), null, 1)}
 
-TASK: Analyze all data. Find what separates winners from losers. Apply 3-8 specific changes across ANY config system.
+TASK: Be COMPREHENSIVE. Make 5-10+ changes across ALL config systems — scoring, discovery weights, thresholds, penalties, AND overrides. Don't be conservative. Tune every knob that the data suggests should move. The goal is to become the best crypto caller bot in the world.
+
 For each change, provide a DETAILED explanation of WHY and what improvement you expect.
 
 You can change:
@@ -4504,9 +4540,33 @@ Respond ONLY with valid JSON:
     const result = JSON.parse(jsonMatch[0]);
     const applied = [];
 
+    // Hard safety bounds — Claude stays within these no matter what
+    const BOUNDS = {
+      minScoreToPost: [35, 60], sweetSpotBonus: [1, 10], secondaryBonus: [1, 8],
+      preLaunchBonus: [2, 12], crossChainBonus: [1, 8], devFingerprintCap: [1, 6],
+      noSignalCap: [50, 80], rugGuardMinScore: [45, 75], consensusOverrideScore: [50, 80],
+      winPeakMultiple: [1.2, 3.0], neutralDrawdownPct: [5, 25],
+      autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
+      averageThreshold: [45, 75], mixedThreshold: [55, 85],
+      mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
+      buyVelocity: [3, 25], uniqueBuyerGrowth: [3, 25], liquidityHealth: [3, 25],
+      devRisk: [3, 25], holderConcentration: [3, 25], sellPressure: [3, 25],
+      walletBehavior: [3, 25], momentumAccel: [3, 25],
+      latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],
+      latePump24hPenalty: [5, 40], winThresholdPct: [10, 50], lossThresholdPct: [-60, -10],
+      gemTargetMin: [3000, 20000], gemTargetMax: [25000, 100000],
+      maxMarketCapOverride: [50000, 500000], minScoreOverride: [28, 55],
+    };
+
     // AUTO-APPLY every change Claude recommends — no approval needed
     for (const change of (result.changes || [])) {
       try {
+        // Clamp to safety bounds
+        if (typeof change.new_value === 'number' && BOUNDS[change.param]) {
+          const [min, max] = BOUNDS[change.param];
+          change.new_value = Math.max(min, Math.min(max, change.new_value));
+        }
+
         let oldVal = null;
         if (change.system === 'scoring' && change.param in SCORING_CONFIG) {
           oldVal = SCORING_CONFIG[change.param];
