@@ -3699,6 +3699,7 @@ body::before {
             <button class="agent-tab"        id="atab-actions" onclick="switchAgentTab('actions')" >⚡ ACTIONS</button>
             <button class="agent-tab"        id="atab-rec"     onclick="switchAgentTab('rec')"     >📋 RECOMMENDED</button>
             <button class="agent-tab"        id="atab-data"    onclick="switchAgentTab('data')"    >📊 AGENT DATA</button>
+            <button class="agent-tab"        id="atab-tuning"  onclick="switchAgentTab('tuning')"  >⚙ TUNING</button>
           </div>
         </div>
 
@@ -3789,6 +3790,60 @@ body::before {
             <div id="adSystemState" style="font-family:var(--mono);font-size:10px;color:var(--text2)">Loading...</div>
           </div>
         </div>
+
+        <!-- ── TAB: TUNING ── -->
+        <div id="agent-tab-tuning" class="agent-tab-panel" style="display:none;padding:14px">
+          <!-- Header + Optimize button -->
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-family:'Orbitron',var(--mono);font-size:12px;color:var(--cyan);letter-spacing:2px;font-weight:700">SCORING ENGINE TUNING</div>
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">Claude analyzes win/loss data and proposes weight adjustments</div>
+            </div>
+            <button onclick="runTuningOptimize()" id="tuneOptBtn" style="background:linear-gradient(135deg,rgba(0,230,118,0.15),rgba(24,255,255,0.1));border:1px solid rgba(0,230,118,0.4);color:var(--green);border-radius:6px;padding:8px 18px;font-family:'Orbitron',var(--mono);font-size:9px;cursor:pointer;letter-spacing:1.5px;font-weight:700;text-shadow:0 0 8px rgba(0,230,118,0.3)">⚡ OPTIMIZE</button>
+          </div>
+
+          <!-- Live Weight Bars -->
+          <div style="background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
+            <div style="font-family:var(--mono);font-size:8px;color:var(--cyan);letter-spacing:1.5px;margin-bottom:10px">DISCOVERY MODEL WEIGHTS <span style="color:var(--text3)">(0-60min tokens)</span></div>
+            <div id="tuneDiscoveryBars" style="display:flex;flex-direction:column;gap:6px">
+              <div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Loading...</div>
+            </div>
+          </div>
+
+          <div style="background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
+            <div style="font-family:var(--mono);font-size:8px;color:var(--purple);letter-spacing:1.5px;margin-bottom:10px">THRESHOLDS & GATES</div>
+            <div id="tuneThresholdBars" style="display:flex;flex-direction:column;gap:6px">
+              <div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Loading...</div>
+            </div>
+          </div>
+
+          <div style="background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
+            <div style="font-family:var(--mono);font-size:8px;color:var(--gold);letter-spacing:1.5px;margin-bottom:10px">PENALTY & TRAP CONFIG</div>
+            <div id="tunePenaltyBars" style="display:flex;flex-direction:column;gap:6px">
+              <div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Loading...</div>
+            </div>
+          </div>
+
+          <!-- Optimization Proposals -->
+          <div style="background:rgba(0,0,0,0.4);border:1px solid rgba(0,230,118,0.2);border-radius:8px;padding:14px;margin-bottom:12px">
+            <div style="font-family:var(--mono);font-size:8px;color:var(--green);letter-spacing:1.5px;margin-bottom:10px">CLAUDE'S RECOMMENDATIONS</div>
+            <div id="tuneProposals" style="display:flex;flex-direction:column;gap:8px">
+              <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Hit ⚡ OPTIMIZE to analyze your win/loss patterns</div>
+            </div>
+          </div>
+
+          <!-- Audit Log -->
+          <div style="background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:8px;padding:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px">TUNING AUDIT LOG</div>
+              <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" id="tuneAuditCount">—</span>
+            </div>
+            <div id="tuneAuditLog" style="display:flex;flex-direction:column;gap:4px;max-height:240px;overflow-y:auto">
+              <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:10px">No changes yet</div>
+            </div>
+          </div>
+        </div>
+
       </div>
       <!-- Call Thesis Generator -->
             <!-- ═══ TOKEN ANALYZER — PATTERN LEARNING ═══ -->
@@ -6784,6 +6839,7 @@ function switchAgentTab(tab) {
   if (tab === 'actions') loadAgentHistory();
   if (tab === 'rec')     loadAgentRecs();
   if (tab === 'data')    loadAgentData();
+  if (tab === 'tuning')  loadTuningTab();
 }
 
 function toggleAgentAutoApply(cb) {
@@ -7130,6 +7186,152 @@ async function addManualRecommendation() {
   const desc     = prompt('Description (what is needed and why):') || '';
   await fetch('/api/agent/recommendations', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,priority,category,description:desc,created_by:'user'})});
   switchAgentTab('rec');
+}
+
+// ── TUNING TAB ─────────────────────────────────────────────────────────
+async function loadTuningTab() {
+  try {
+    const d = await apiFetch('/api/tuning/config');
+    if (!d?.ok) return;
+    const cfg = d.config || {};
+    const audit = d.audit || [];
+
+    // Render Discovery weight bars
+    const discEl = document.getElementById('tuneDiscoveryBars');
+    if (discEl && cfg.discovery) {
+      const maxPts = 25;
+      discEl.innerHTML = Object.entries(cfg.discovery).map(([k, v]) => {
+        const pct = Math.min(100, (v / maxPts) * 100);
+        const col = v >= 18 ? 'var(--green)' : v >= 12 ? 'var(--cyan)' : v >= 8 ? 'var(--gold)' : 'var(--text3)';
+        const label = k.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
+        return `<div style="display:flex;align-items:center;gap:8px">
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);width:120px;text-align:right;letter-spacing:0.5px">${label}</div>
+          <div style="flex:1;height:14px;background:rgba(0,0,0,0.4);border-radius:3px;border:1px solid var(--border2);overflow:hidden;position:relative">
+            <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,${col}22,${col}66);border-radius:3px;transition:width 0.5s"></div>
+            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Orbitron',var(--mono);font-size:8px;color:${col};font-weight:700;text-shadow:0 0 6px ${col}">${v}</div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    // Render threshold bars
+    const threshEl = document.getElementById('tuneThresholdBars');
+    if (threshEl && cfg.thresholds) {
+      threshEl.innerHTML = Object.entries(cfg.thresholds).map(([k, v]) => {
+        const isScore = k.includes('score') || k.includes('threshold') || k.includes('Threshold');
+        const max = k.includes('mcap') || k.includes('Mcap') ? 200000 : 100;
+        const pct = Math.min(100, (v / max) * 100);
+        const display = k.includes('mcap') || k.includes('Mcap') ? '$' + (v/1000).toFixed(0) + 'K' : v;
+        const col = 'var(--purple)';
+        const label = k.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
+        return `<div style="display:flex;align-items:center;gap:8px">
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);width:140px;text-align:right;letter-spacing:0.5px">${label}</div>
+          <div style="flex:1;height:14px;background:rgba(0,0,0,0.4);border-radius:3px;border:1px solid var(--border2);overflow:hidden;position:relative">
+            <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,${col}22,${col}66);border-radius:3px"></div>
+            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Orbitron',var(--mono);font-size:8px;color:${col};font-weight:700">${display}</div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    // Render penalty config
+    const penEl = document.getElementById('tunePenaltyBars');
+    if (penEl && cfg.penalties) {
+      penEl.innerHTML = Object.entries(cfg.penalties).map(([k, v]) => {
+        const col = 'var(--gold)';
+        const label = k.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
+        return `<div style="display:flex;align-items:center;gap:8px">
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);width:140px;text-align:right;letter-spacing:0.5px">${label}</div>
+          <div style="font-family:'Orbitron',var(--mono);font-size:10px;color:${col};font-weight:700;text-shadow:0 0 4px ${col}44">${typeof v === 'number' ? v : v}</div>
+        </div>`;
+      }).join('');
+    }
+
+    // Render audit log
+    const logEl = document.getElementById('tuneAuditLog');
+    const countEl = document.getElementById('tuneAuditCount');
+    if (countEl) countEl.textContent = audit.length + ' entries';
+    if (logEl && audit.length) {
+      logEl.innerHTML = audit.slice(0, 30).map(a => {
+        const statusCol = a.status === 'APPROVED' ? 'var(--green)' : a.status === 'REJECTED' ? 'var(--red)' : a.status === 'PENDING' ? 'var(--gold)' : 'var(--cyan)';
+        const arrow = a.old_value != null ? a.old_value + ' → ' + a.new_value : a.new_value;
+        return `<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:4px;border-left:2px solid ${statusCol}">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <span style="font-family:'Orbitron',var(--mono);font-size:8px;color:${statusCol};font-weight:700">${a.status||'APPLIED'}</span>
+              <span style="font-family:var(--mono);font-size:9px;color:var(--text1);font-weight:700">${a.param||'?'}</span>
+              <span style="font-family:var(--mono);font-size:8px;color:var(--cyan)">${arrow}</span>
+            </div>
+            <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">${a.reason||''}</div>
+          </div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);white-space:nowrap">${a.created_at ? new Date(a.created_at).toLocaleDateString() : ''}</div>
+        </div>`;
+      }).join('');
+    }
+  } catch (e) { console.warn('[tuning] load failed:', e.message); }
+}
+
+async function runTuningOptimize() {
+  const btn = document.getElementById('tuneOptBtn');
+  const proposals = document.getElementById('tuneProposals');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ ANALYZING...'; }
+  if (proposals) proposals.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:9px;color:var(--cyan)">Claude is analyzing your win/loss patterns...<br><span style="font-size:8px;color:var(--text3)">This takes 15-30 seconds</span></div>';
+  try {
+    const res = await fetch('/api/tuning/optimize', { method: 'POST', headers: {'Content-Type':'application/json'}, signal: AbortSignal.timeout(60000) });
+    const d = await res.json();
+    if (!d.ok) { if (proposals) proposals.innerHTML = '<div style="color:var(--red);font-family:var(--mono);font-size:9px;padding:10px">' + (d.error||'Failed') + '</div>'; return; }
+    const recs = d.recommendations || [];
+    if (!recs.length) {
+      if (proposals) proposals.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:9px;color:var(--green)">No changes recommended — current config looks optimal</div>';
+      return;
+    }
+    if (proposals) proposals.innerHTML = recs.map((r, i) => {
+      const riskCol = r.risk === 'LOW' ? 'var(--green)' : r.risk === 'MEDIUM' ? 'var(--gold)' : 'var(--red)';
+      const impactCol = r.impact === 'HIGH' ? 'var(--green)' : r.impact === 'MEDIUM' ? 'var(--cyan)' : 'var(--text3)';
+      return `<div style="background:rgba(0,0,0,0.3);border:1px solid rgba(0,230,118,0.15);border-left:3px solid var(--green);border-radius:6px;padding:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
+          <div style="flex:1">
+            <div style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--text1);font-weight:700">${r.param}: ${r.current} → ${r.proposed}</div>
+            <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">${r.category||'scoring'}</div>
+          </div>
+          <div style="display:flex;gap:4px">
+            <span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:${riskCol}15;color:${riskCol};border:1px solid ${riskCol}33">RISK: ${r.risk||'?'}</span>
+            <span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:${impactCol}15;color:${impactCol};border:1px solid ${impactCol}33">IMPACT: ${r.impact||'?'}</span>
+          </div>
+        </div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-bottom:6px;line-height:1.4">${r.reason||''}</div>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);font-style:italic;margin-bottom:8px">${r.evidence||''}</div>
+        <div style="display:flex;gap:6px">
+          <button onclick="approveTuning(${i})" style="background:rgba(0,230,118,0.12);border:1px solid rgba(0,230,118,0.4);color:var(--green);border-radius:4px;padding:5px 14px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px;font-weight:700">✓ APPROVE</button>
+          <button onclick="rejectTuning(${i})" style="background:rgba(255,23,68,0.08);border:1px solid rgba(255,23,68,0.3);color:var(--red);border-radius:4px;padding:5px 14px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px">✗ REJECT</button>
+        </div>
+      </div>`;
+    }).join('');
+    window._tuningRecs = recs;
+  } catch (e) {
+    if (proposals) proposals.innerHTML = '<div style="color:var(--red);font-family:var(--mono);font-size:9px;padding:10px">' + e.message + '</div>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ OPTIMIZE'; }
+  }
+}
+
+async function approveTuning(idx) {
+  const r = window._tuningRecs?.[idx];
+  if (!r) return;
+  try {
+    await fetch('/api/tuning/apply', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ param: r.param, value: r.proposed, reason: r.reason, old_value: r.current }) });
+    loadTuningTab();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function rejectTuning(idx) {
+  const r = window._tuningRecs?.[idx];
+  if (!r) return;
+  try {
+    await fetch('/api/tuning/reject', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ param: r.param, reason: 'Operator rejected' }) });
+    const el = document.getElementById('tuneProposals')?.children?.[idx];
+    if (el) { el.style.opacity = '0.3'; el.style.filter = 'grayscale(1)'; }
+  } catch {}
 }
 
 async function loadAgentData(){

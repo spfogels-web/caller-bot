@@ -4168,6 +4168,179 @@ MEMORY: When the operator teaches you something important (strategy, pattern, ru
   }
 });
 
+// ── Scoring Engine Tuning System ──────────────────────────────────────────────
+// Create tuning_audit table on first use
+try { dbInstance.exec(`
+  CREATE TABLE IF NOT EXISTS tuning_audit (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    param      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    reason     TEXT,
+    status     TEXT DEFAULT 'APPLIED',
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch {}
+
+// Tunable config — loaded from kv_store on boot, defaults from scorer
+const TUNING_DEFAULTS = {
+  discovery: { buyVelocity:20, uniqueBuyerGrowth:15, liquidityHealth:15, devRisk:15, holderConcentration:10, sellPressure:10, walletBehavior:10, momentumAccel:5 },
+  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:80000, sweetSpotMin:10000, sweetSpotMax:25000 },
+  penalties: { latePump1hThreshold:300, latePump1hPenalty:25, latePump1hSevereThreshold:500, latePump1hSeverePenalty:40, latePump24hThreshold:500, latePump24hPenalty:20, winThresholdPct:20, lossThresholdPct:-30 },
+};
+let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
+try {
+  const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='tuning_config'`).get();
+  if (row?.value) {
+    const saved = JSON.parse(row.value);
+    TUNING_CONFIG = { ...TUNING_CONFIG, ...saved, discovery: { ...TUNING_CONFIG.discovery, ...saved.discovery }, thresholds: { ...TUNING_CONFIG.thresholds, ...saved.thresholds }, penalties: { ...TUNING_CONFIG.penalties, ...saved.penalties } };
+    console.log('[tuning] Restored tuning config from DB');
+  }
+} catch {}
+
+function saveTuningConfig() {
+  try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('tuning_config', ?)`).run(JSON.stringify(TUNING_CONFIG)); } catch {}
+}
+
+// GET current config + audit log
+app.get('/api/tuning/config', (req, res) => {
+  setCors(res);
+  try {
+    const audit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 50`).all();
+    res.json({ ok: true, config: TUNING_CONFIG, defaults: TUNING_DEFAULTS, audit });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST apply a tuning change
+app.post('/api/tuning/apply', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const { param, value, reason, old_value } = req.body ?? {};
+    if (!param) return res.status(400).json({ ok: false, error: 'param required' });
+
+    // Find and update the param in the nested config
+    let applied = false;
+    for (const section of ['discovery', 'thresholds', 'penalties']) {
+      if (param in TUNING_CONFIG[section]) {
+        const prev = TUNING_CONFIG[section][param];
+        TUNING_CONFIG[section][param] = typeof prev === 'number' ? Number(value) : value;
+        applied = true;
+
+        // Apply live: update AI_CONFIG_OVERRIDES for thresholds that map to live config
+        if (param === 'mcapHardCap') AI_CONFIG_OVERRIDES.maxMarketCapOverride = Number(value);
+        if (param === 'autoPostScore') AI_CONFIG_OVERRIDES.minScoreOverride = Number(value);
+        if (param === 'sweetSpotMin') AI_CONFIG_OVERRIDES.sweetSpotMin = Number(value);
+        if (param === 'sweetSpotMax') AI_CONFIG_OVERRIDES.sweetSpotMax = Number(value);
+        persistAIConfig();
+        break;
+      }
+    }
+    if (!applied) return res.status(400).json({ ok: false, error: 'Unknown param: ' + param });
+
+    saveTuningConfig();
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      param, String(old_value ?? ''), String(value), reason || 'Operator approved', 'APPROVED'
+    );
+    console.log(`[tuning] Applied: ${param} = ${value} (was: ${old_value}). Reason: ${reason}`);
+    res.json({ ok: true, param, value });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST reject a tuning recommendation
+app.post('/api/tuning/reject', express.json(), (req, res) => {
+  setCors(res);
+  const { param, reason } = req.body ?? {};
+  try {
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      param || '?', '', '', reason || 'Operator rejected', 'REJECTED'
+    );
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST optimize — Claude analyzes win/loss data and proposes weight changes
+app.post('/api/tuning/optimize', async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
+  try {
+    // Gather win/loss analysis data
+    const wins = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.structure_grade_at_call,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 30
+    `).all();
+    const losses = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.structure_grade_at_call,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 30
+    `).all();
+
+    const prompt = `You are a quantitative trading system optimizer. Analyze the win/loss data below and recommend specific parameter changes.
+
+CURRENT SCORING CONFIG:
+${JSON.stringify(TUNING_CONFIG, null, 2)}
+
+WIN DATA (${wins.length} wins):
+${JSON.stringify(wins.slice(0, 15), null, 1)}
+
+LOSS DATA (${losses.length} losses):
+${JSON.stringify(losses.slice(0, 15), null, 1)}
+
+TASK: Compare wins vs losses. Find which metrics separate winners from losers. Propose 3-5 specific parameter changes that would improve the win rate.
+
+Respond ONLY with valid JSON array:
+[{
+  "param": "exact_param_name_from_config",
+  "category": "discovery|thresholds|penalties",
+  "current": current_value,
+  "proposed": new_value,
+  "reason": "1-2 sentence explanation with data",
+  "evidence": "specific numbers from the win/loss comparison",
+  "risk": "LOW|MEDIUM|HIGH",
+  "impact": "LOW|MEDIUM|HIGH"
+}]`;
+
+    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 2000, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    if (!claudeRes.ok) {
+      const errText = await claudeRes.text();
+      return res.status(502).json({ ok: false, error: 'Claude API: ' + errText.slice(0, 200) });
+    }
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+
+    // Parse JSON from Claude's response
+    const jsonMatch = reply.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return res.json({ ok: true, recommendations: [], raw: reply });
+
+    const recommendations = JSON.parse(jsonMatch[0]);
+
+    // Log each proposal to audit
+    for (const r of recommendations) {
+      dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+        r.param, String(r.current), String(r.proposed), r.reason, 'PENDING'
+      );
+    }
+
+    res.json({ ok: true, recommendations, winsAnalyzed: wins.length, lossesAnalyzed: losses.length });
+  } catch (err) {
+    console.error('[tuning/optimize]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
 app.get('/api/agent/memory', (req, res) => {
   setCors(res);
