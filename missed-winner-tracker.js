@@ -452,10 +452,10 @@ export async function runOutcomeTracker(dbInstance) {
         console.log(`[outcome-tracker] ✅ Auto-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)`);
       } else if (finalCheckDue && !reachedWinBar) {
         // 6h passed and never hit 1.5x.
-        // Small drawdown (within 10%) → NEUTRAL. Bigger drawdown → LOSS.
-        // A coin that's within ±10% of entry at 6h isn't a real loss,
-        // it's dead money — doesn't punish the win rate.
-        const finalOutcome = Math.abs(result.pctChange) <= NEUT_PCT ? 'NEUTRAL' : 'LOSS';
+        // Peak 0.9x–1.49x → NEUTRAL (didn't lose money, just didn't moon)
+        // Peak < 0.9x → LOSS (real drawdown, bad call)
+        // This prevents marginal plays from tanking the win rate.
+        const finalOutcome = peakNow >= 0.9 ? 'NEUTRAL' : 'LOSS';
         const emoji = finalOutcome === 'NEUTRAL' ? '➖' : '❌';
         dbInstance.prepare(`
           UPDATE calls SET
