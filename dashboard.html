@@ -5468,6 +5468,7 @@ async function loadAudit(){
   const candCAs = new Set(candRows.map(c=>c.contractAddress).filter(Boolean));
   const feedRows = (sdata?.rows||[])
     .filter(r=>!candCAs.has(r.contract_address))
+    .filter(r=>{var mc=r.market_cap||r.marketCap||0; return mc===0||mc>=7000;}) // hide sub-$7K noise
     .map(r=>normalizeCandidate({...r,
       finalDecision:(r.filter_action||r.filterAction)==='PROMOTE'?'AUTO_POST':'PENDING',
       // Don't conflate quick_score with the real composite score. quick_score
@@ -5854,22 +5855,20 @@ function renderAuditList(){
         else {
           const det = document.getElementById('auditDetailContent');
           if (det) { det.innerHTML = '<div class="spinner" style="padding:40px"><div class="spin-dot" style="background:var(--cyan)"></div></div>'; }
-          if (r.contractAddress && typeof _mobileLoadDetail !== 'function') {
-            // desktop path — try to load
-            (async function(){
-              try {
-                const data = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(r.contractAddress));
-                if (data?.candidate && det) { det.innerHTML = buildAuditDetail(normalizeCandidate(data.candidate)); }
-              } catch {}
-            })();
-          } else if (r.contractAddress) {
-            (async function(){
-              try {
-                const data = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(r.contractAddress));
-                if (data?.candidate && det) { det.innerHTML = buildAuditDetail(normalizeCandidate(data.candidate)); }
-              } catch {}
-            })();
-          }
+          (async function(){
+            let full = null;
+            if (r.contractAddress) {
+              // Try candidates DB first
+              try { const d = await apiFetch('/api/candidates/by-ca/'+encodeURIComponent(r.contractAddress)); if(d&&d.candidate) full=d.candidate; } catch{}
+              // Try external live data
+              if (!full) { try { const d = await apiFetch('/api/external/token/'+encodeURIComponent(r.contractAddress)); if(d&&d.ok&&d.candidate) full=d.candidate; } catch{} }
+            }
+            if (det) {
+              if (full) { det.innerHTML = buildAuditDetail(normalizeCandidate(full)); }
+              else { det.innerHTML = buildAuditDetail(r); }
+              det.scrollTop = 0;
+            }
+          })();
         }
       });
       el.appendChild(div);
