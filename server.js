@@ -2262,23 +2262,26 @@ async function processCandidate(candidate, isRescan = false) {
 
     // ── MCap tier bonuses ─────────────────────────────────────────────────
     // Sweet spot $13K-$40K: +8 points (historical data shows best ROI here)
-    // Secondary $40K-$80K: +3 points (100% WR 2/2 historically, still viable)
-    // Below $13K: no bonus (too pre-launch to reliably enter)
+    // Sweet spot $15K-$40K pre-bonding: +4 points (best risk/reward for early gems)
+    // Secondary $40K-$80K: +2 points (still viable for continuation plays)
+    // Below $15K: no bonus (too pre-launch to reliably enter)
     const mcap = enrichedCandidate.marketCap ?? 0;
+    const ssMin = TUNING_CONFIG?.thresholds?.sweetSpotMin ?? 15_000;
+    const ssMax = TUNING_CONFIG?.thresholds?.sweetSpotMax ?? 40_000;
     let mcapTier = null;
-    if (mcap >= 13_000 && mcap <= 40_000) {
+    if (mcap >= ssMin && mcap <= ssMax) {
       const b = SCORING_CONFIG.sweetSpotBonus;
       scoreResult.score = Math.min(100, scoreResult.score + b);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($13K-$40K)`);
+      scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($${ssMin/1000}K-$${ssMax/1000}K)`);
       mcapTier = 'SWEET_SPOT';
-    } else if (mcap > 40_000 && mcap <= 80_000) {
+    } else if (mcap > ssMax && mcap <= 80_000) {
       const b = SCORING_CONFIG.secondaryBonus;
       scoreResult.score = Math.min(100, scoreResult.score + b);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push(`+${b} secondary MCap ($40K-$80K)`);
+      scoreResult.signals.launch.push(`+${b} secondary MCap ($${ssMax/1000}K-$80K)`);
       mcapTier = 'SECONDARY';
-    } else if (mcap > 0 && mcap < 13_000) {
+    } else if (mcap > 0 && mcap < ssMin) {
       mcapTier = 'PRE_SWEETSPOT';
     }
     enrichedCandidate.mcapTier = mcapTier;
@@ -3674,7 +3677,7 @@ app.get('/api/ai/memory', (req, res) => {
       gemPatterns,
       configOverrides: overrides,
       recentContext: context,
-      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??10_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??25_000 },
+      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??15_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??40_000 },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -4085,7 +4088,7 @@ When asked about "largest wallet" or "biggest whales", use the TOP 15 BY SOL BAL
         return `BOT STATUS: Mode=${activeMode.emoji} ${activeMode.name} | Regime=${regime.market||'?'} | Evaluations=${evals} | Calls=${total} | Wins=${wins} | Losses=${losses} | WinRate=${winRate}
 ${recentHistory}
 Active overrides: ${JSON.stringify(AI_CONFIG_OVERRIDES)}
-Sweet spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||10000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||25000)/1000)}K`;
+Sweet spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||15000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||40000)/1000)}K`;
       } catch (err) {
         return `Bot data unavailable: ${err.message}`;
       }
@@ -4185,7 +4188,7 @@ try { dbInstance.exec(`
 // Tunable config — loaded from kv_store on boot, defaults from scorer
 const TUNING_DEFAULTS = {
   discovery: { buyVelocity:20, uniqueBuyerGrowth:15, liquidityHealth:15, devRisk:15, holderConcentration:10, sellPressure:10, walletBehavior:10, momentumAccel:5 },
-  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:80000, sweetSpotMin:10000, sweetSpotMax:25000 },
+  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:80000, sweetSpotMin:15000, sweetSpotMax:40000 },
   penalties: { latePump1hThreshold:300, latePump1hPenalty:25, latePump1hSevereThreshold:500, latePump1hSeverePenalty:40, latePump24hThreshold:500, latePump24hPenalty:20, winThresholdPct:20, lossThresholdPct:-30 },
 };
 let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
@@ -4790,7 +4793,7 @@ Survivor Tokens: ${survivors} (>4h >$500K)
 Early Wallet Records: ${earlyW} unique wallets tracked
 
 ACTIVE CONFIG OVERRIDES: ${Object.keys(AI_CONFIG_OVERRIDES).length > 0 ? JSON.stringify(AI_CONFIG_OVERRIDES) : 'None — using defaults'}
-Current Sweet Spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||10000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||25000)/1000)}K
+Current Sweet Spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||15000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||40000)/1000)}K
 Score Floor: ${activeMode.minScore} | Max MCap: $${Math.round(activeMode.maxMarketCap/1000)}K | Max Age: ${activeMode.maxPairAgeHours}h
 
 RECENT CALL HISTORY:
