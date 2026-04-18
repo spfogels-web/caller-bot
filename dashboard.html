@@ -3152,7 +3152,21 @@ body::before {
         </div>
       </div>
 
-      <!-- previous weeks removed -->
+      <!-- ═══ SELF-IMPROVEMENT AUDIT — what the bot is changing and why ═══ -->
+      <div class="card" style="margin-bottom:14px;border-color:rgba(255,109,0,0.3);background:linear-gradient(135deg,rgba(255,109,0,0.03),rgba(24,255,255,0.02))">
+        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(255,109,0,0.08),transparent)">
+          <div class="card-title" style="color:var(--orange)"><span class="icon">🤖</span>SELF-IMPROVEMENT AUDIT</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px" id="ovAuditStatus">—</span>
+            <button onclick="fetch('/api/self-improve/run',{method:'POST'}).then(r=>r.json()).then(d=>{alert(d.message||d.error);loadSelfImproveAudit()})" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:5px;padding:5px 12px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">⚡ RUN NOW</button>
+          </div>
+        </div>
+        <div class="card-body" style="padding:0">
+          <div id="ovAuditLog" style="max-height:350px;overflow-y:auto;padding:12px">
+            <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Loading audit trail...</div>
+          </div>
+        </div>
+      </div>
 
       <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
       <div class="card ai-learn-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(68,138,255,0.04),rgba(156,39,176,0.04));border:1px solid rgba(156,39,176,0.25)">
@@ -4917,6 +4931,9 @@ async function loadOverview(){
     }
   } catch(e) { console.warn('[weekly]', e.message); }
 
+  // Self-improvement audit log
+  try { loadSelfImproveAudit(); } catch(e) { console.warn('[audit]', e.message); }
+
   // update brain rating
   try{ const d=await apiFetch('/api/stats'); if(d) updateBrainRating({wins:d.wins||0,losses:d.losses||0,total:d.total||0}); }catch{}
   // AI learning dashboard (trend card under the stat tiles)
@@ -5031,6 +5048,59 @@ async function resetScoringConfig(btn){
 // ── OVERVIEW — Call outcome tile row ─────────────────────────────────
 // Pulls the calls list, counts outcomes (with peak-based inference like
 // the Calls tab does), and fills the 5 tiles above the AI Learning card.
+async function loadSelfImproveAudit() {
+  var el = document.getElementById('ovAuditLog');
+  var statusEl = document.getElementById('ovAuditStatus');
+  if (!el) return;
+
+  // Get status + audit data
+  var [statusData, auditData] = await Promise.all([
+    apiFetch('/api/self-improve/status'),
+    apiFetch('/api/control-station'),
+  ]);
+
+  // Status line
+  if (statusEl && statusData) {
+    var runText = statusData.running ? '🔄 RUNNING NOW' : (statusData.lastRun ? 'Last: ' + new Date(statusData.lastRun+'Z').toLocaleString() : 'Not run yet');
+    statusEl.innerHTML = runText + ' · ' + (statusData.changesLast24h || 0) + ' changes/24h · Every ' + statusData.intervalHours + 'h';
+  }
+
+  // Audit entries
+  var audit = (auditData && auditData.audit) ? auditData.audit : [];
+  if (!audit.length) {
+    el.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">No self-improvement changes yet. First cycle runs 2 minutes after deploy, then every 6 hours.</div>';
+    return;
+  }
+
+  el.innerHTML = audit.slice(0, 30).map(function(a) {
+    var isAuto = (a.status === 'AUTO_APPLIED') || (a.reason || '').includes('AUTO-PILOT') || (a.reason || '').includes('AUTO-APPLIED') || (a.param || '').includes('SELF-IMPROVE');
+    var isCycle = (a.param || '').includes('SELF-IMPROVE');
+    var statusCol = a.status === 'AUTO_APPLIED' ? 'var(--cyan)' : a.status === 'APPROVED' ? 'var(--green)' : a.status === 'REJECTED' ? 'var(--red)' : 'var(--text3)';
+    var arrow = (a.old_value && a.old_value !== '' && !isCycle) ? a.old_value + ' \u2192 ' + a.new_value : (isCycle ? '' : a.new_value);
+
+    if (isCycle) {
+      return '<div style="padding:10px 12px;background:rgba(255,109,0,0.06);border:1px solid rgba(255,109,0,0.2);border-radius:8px;margin-bottom:6px">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+          '<span style="font-family:Orbitron,var(--mono);font-size:8px;color:var(--orange);font-weight:700;padding:2px 8px;background:rgba(255,109,0,0.1);border:1px solid rgba(255,109,0,0.3);border-radius:4px">\uD83E\uDD16 IMPROVEMENT CYCLE</span>' +
+          '<span style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-left:auto">' + (a.created_at ? new Date(a.created_at+'Z').toLocaleString() : '') + '</span>' +
+        '</div>' +
+        '<div style="font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.6">' + (a.reason || '') + '</div>' +
+      '</div>';
+    }
+
+    return '<div style="padding:8px 10px;background:rgba(0,0,0,0.3);border-radius:6px;border-left:3px solid ' + statusCol + ';margin-bottom:4px">' +
+      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+        '<span style="font-family:Orbitron,var(--mono);font-size:7px;color:' + statusCol + ';font-weight:700;padding:2px 6px;background:' + statusCol + '11;border:1px solid ' + statusCol + '33;border-radius:3px">' + (a.status || 'APPLIED') + '</span>' +
+        (isAuto ? '<span style="font-family:var(--mono);font-size:6px;color:var(--cyan);padding:1px 5px;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.2);border-radius:2px">\uD83E\uDD16 AUTO</span>' : '') +
+        '<span style="font-family:Orbitron,var(--mono);font-size:9px;color:var(--text1);font-weight:700">' + (a.param || '?') + '</span>' +
+        (arrow ? '<span style="font-family:var(--mono);font-size:9px;color:var(--cyan)">' + arrow + '</span>' : '') +
+        '<span style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-left:auto;white-space:nowrap">' + (a.created_at ? new Date(a.created_at+'Z').toLocaleString() : '') + '</span>' +
+      '</div>' +
+      (a.reason ? '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:4px;line-height:1.5;padding-left:6px;border-left:2px solid rgba(255,255,255,0.05)">' + a.reason + '</div>' : '') +
+    '</div>';
+  }).join('');
+}
+
 async function updateOverviewCallSummary(){
   try {
     const data = await apiFetch('/api/calls?limit=500').catch(() => null);
