@@ -1523,6 +1523,29 @@ function gradeEmoji(grade) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function signalBar(val, max) {
+  const pct = Math.max(0, Math.min(1, (val || 0) / max));
+  const filled = Math.round(pct * 8);
+  const bar = '▓'.repeat(filled) + '░'.repeat(8 - filled);
+  return `${bar} ${val ?? 0}/${max}`;
+}
+
+function buildFoundationSignalsBlock(scoreResult) {
+  const dp = scoreResult?.dualParts ?? {};
+  if (!dp || Object.keys(dp).length === 0) return '';
+  const conf = scoreResult?.dataConfidence ?? scoreResult?.dualParts?.dataConfidence;
+  const confLabel = conf === 'HIGH' ? '🟢 HIGH' : conf === 'MEDIUM' ? '🟡 MED' : conf === 'LOW' ? '🔴 LOW' : '?';
+  return (
+    `\n<b>⚡ FOUNDATION SIGNALS</b>  <i>Data: ${confLabel}</i>\n` +
+    `📈 Volume Velocity   ${signalBar(dp.volumeVelocity, 35)}\n` +
+    `💪 Buy Pressure      ${signalBar(dp.buyPressure, 25)}\n` +
+    `👛 Wallet Quality    ${signalBar(dp.walletQuality, 20)}\n` +
+    `👥 Holder Distrib    ${signalBar(dp.holderDistribution, 12)}\n` +
+    `💧 Liquidity Health  ${signalBar(dp.liquidityHealth, 8)}\n` +
+    (dp.latePumpPenalty && dp.latePumpPenalty < 0 ? `⚠️ Late Pump Penalty  <b>${dp.latePumpPenalty}</b>\n` : '')
+  );
+}
+
 function formatCallTimestamp() {
   // Always show USA Eastern Time (ET) — handles EST/EDT automatically
   try {
@@ -1857,6 +1880,7 @@ function buildCallAlertCaption(candidate, verdict, scoreResult) {
     `Top 10: <b>${top10}</b>  |  Dev: <b>${dev}</b>  |  Holders: <b>${holders}</b>\n\n` +
     `🧠 <b>Score: ${score}/100</b>  ${scoreBar(score)}\n` +
     `Risk: ${riskEmoji(risk)} <b>${risk}</b>  |  Structure: ${gradeEmoji(grade)} <b>${grade}</b>\n` +
+    buildFoundationSignalsBlock(scoreResult) +
     buildMultiplierTargetBlock(candidate) +
     buildSLTPBlock(candidate) +
     (candidate.website || candidate.twitter || candidate.telegram
@@ -1912,11 +1936,9 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
     `<b>Score: ${score}/100</b>  ${scoreBar(score)}\n` +
     `Risk: <b>${riskEmoji(risk)} ${risk}</b>   Setup: <b>${setup_type}</b>\n` +
     `Structure: <b>${gradeEmoji(grade)} ${grade}</b>   Stage: <b>${scoreResult?.stage ?? '?'}</b>\n\n` +
-    `<b>Sub-Scores:</b>\n` +
+    buildFoundationSignalsBlock(scoreResult) + `\n` +
+    `<b>Sub-Scores (Structure):</b>\n` +
     `🚀 Launch: <b>${sub.launchQuality ?? '?'}</b>   👥 Wallet: <b>${sub.walletStructure ?? '?'}</b>   📈 Market: <b>${sub.marketBehavior ?? '?'}</b>   📣 Social: <b>${sub.socialNarrative ?? '?'}</b>\n\n` +
-    (similarity.winnerSimilarity != null
-      ? `🏆 Winner sim: <b>${similarity.winnerSimilarity}%</b>   💀 Rug sim: <b>${similarity.rugSimilarity ?? '?'}%</b>\n\n`
-      : '') +
     `<b>📊 Market:</b>\n` +
     `MCap: <b>${entryMcap}</b>   Liq: <b>${fmt(candidate.liquidity, '$')}</b>\n` +
     `Vol24h: <b>${fmt(candidate.volume24h, '$')}</b>   Age: <b>${candidate.pairAgeHours?.toFixed(1) ?? '?'}h</b>\n` +
@@ -1930,9 +1952,11 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
     (candidate.coordinationIntensity ? `Coord: <b>${candidate.coordinationIntensity}</b>\n` : '\n') +
     `Market: <b>${regime.market ?? '?'}</b>   Mode: <b>${activeMode.emoji} ${activeMode.name}</b>\n\n` +
     `<b>🔬 Launch Intel:</b>\n` +
-    `Launch Quality: <b>${candidate.launchQualityScore ?? '?'}/100</b>   Unique Buyers: <b>${candidate.launchUniqueBuyerRatio != null ? (candidate.launchUniqueBuyerRatio * 100).toFixed(0) + '%' : '?'}</b>\n` +
-    `Buy Ratio 1h: <b>${candidate.buySellRatio1h != null ? (candidate.buySellRatio1h * 100).toFixed(0) + '%' : '?'}</b>   Vol Velocity: <b>${candidate.volumeVelocity != null ? candidate.volumeVelocity.toFixed(2) : '?'}</b>\n` +
-    `Type: <b>${candidate.candidateType ?? '?'}</b>\n\n` +
+    `Quality: <b>${candidate.launchQualityScore ?? '?'}/100</b>   Unique Buyers: <b>${candidate.launchUniqueBuyerRatio != null ? (candidate.launchUniqueBuyerRatio * 100).toFixed(0) + '%' : '?'}</b>\n` +
+    `Buy Ratio: <b>${candidate.buySellRatio1h != null ? (candidate.buySellRatio1h * 100).toFixed(0) + '% buys' : '?'}</b>   Buys/Sells: <b>${candidate.buys1h ?? '?'}/${candidate.sells1h ?? '?'}</b>\n` +
+    `Vol Velocity: <b>${candidate.volumeVelocity != null ? candidate.volumeVelocity.toFixed(2) : '?'}</b>   Buy Velocity: <b>${candidate.buyVelocity != null ? candidate.buyVelocity.toFixed(2) : '?'}</b>\n` +
+    `Liq/MCap: <b>${candidate.liquidity && candidate.marketCap ? ((candidate.liquidity/candidate.marketCap)*100).toFixed(0) + '%' : '?'}</b>   Smart Money: <b>${candidate.smartMoneyScore ?? candidate.walletIntel?.smartMoneyScore ?? '—'}</b>\n` +
+    `Type: <b>${candidate.candidateType ?? '?'}</b>   Winners: <b>${candidate.knownWinnerWallets?.length ?? candidate.walletIntel?.knownWinnerWalletCount ?? 0}</b>\n\n` +
     `<b>✅ Why It Passed:</b>\n${bullLines}\n\n` +
     `<b>⚠️ Watchouts:</b>\n${watchLines}\n\n` +
     buildSLTPBlock(candidate) +
