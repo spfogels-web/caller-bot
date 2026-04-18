@@ -4874,11 +4874,13 @@ app.post('/api/agent/rollback', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// Get agent history
+// Get agent history — filter out broken/empty records
 app.get('/api/agent/history', (req, res) => {
   setCors(res);
   try {
-    const actions = dbInstance.prepare(`SELECT * FROM agent_actions ORDER BY created_at DESC LIMIT 100`).all();
+    // Clean up empty actions on first load
+    try { dbInstance.prepare(`DELETE FROM agent_actions WHERE (description IS NULL OR description='') AND (params IS NULL OR params='{}' OR params='')`).run(); } catch {}
+    const actions = dbInstance.prepare(`SELECT * FROM agent_actions WHERE description IS NOT NULL AND description != '' ORDER BY created_at DESC LIMIT 100`).all();
     const recs    = dbInstance.prepare(`SELECT * FROM agent_recommendations ORDER BY created_at DESC LIMIT 50`).all();
     res.json({ ok: true, actions, recommendations: recs });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }

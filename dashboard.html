@@ -7226,24 +7226,50 @@ async function loadAgentHistory() {
     return;
   }
 
-  el.innerHTML = data.actions.map(a => {
-    const isApplied   = a.approved && a.result === 'APPLIED';
-    const isRolledBack= a.rolled_back;
+  el.innerHTML = data.actions.filter(a => {
+    // Skip entries with no useful data
+    const desc = a.description || '';
+    let p = {};
+    try { p = JSON.parse(a.params || '{}'); } catch {}
+    const k = p.key || p.param || p.action || '';
+    return desc.length > 3 || k.length > 0;
+  }).map(a => {
+    const isApplied    = (a.approved && (a.result === 'APPLIED' || a.result === 'AUTO_APPLIED'));
+    const isAutoApplied= a.result === 'AUTO_APPLIED';
+    const isRolledBack = a.rolled_back;
     const cls = isRolledBack ? 'rolled' : isApplied ? 'applied' : 'proposed';
-    const params = (() => { try { const p = JSON.parse(a.params||'{}'); const k = p.key||p.param||''; const cur = p.current??p.old_value??''; const prop = p.proposed??p.new_value??p.value??''; if (!k && !cur && !prop) return a.description||''; return `${k}: ${JSON.stringify(cur)} → ${JSON.stringify(prop)}${p.rationale?' — '+p.rationale:''}`; } catch { return a.description||a.params||''; } })();
+    const statusLabel  = isAutoApplied ? '⚡ AUTO-APPLIED' : isApplied ? '✅ APPLIED' : isRolledBack ? '↩ ROLLED BACK' : '⏳ PROPOSED';
+    const statusColor  = isAutoApplied ? 'var(--cyan)' : isApplied ? 'var(--green)' : isRolledBack ? 'var(--red)' : 'var(--gold)';
+
+    let p = {};
+    try { p = JSON.parse(a.params || '{}'); } catch {}
+    const paramKey   = p.key || p.param || '';
+    const paramCur   = p.current ?? p.old_value ?? '';
+    const paramProp  = p.proposed ?? p.new_value ?? p.value ?? '';
+    const rationale  = p.rationale || p.reason || p.expected_effect || '';
+    const confidence = p.confidence ? p.confidence + '% conf' : '';
+    const risk       = p.risk || '';
+
+    const changeLine = paramKey ? `<div style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--text1);font-weight:700;margin-top:6px">${esc(paramKey)}</div><div style="font-family:var(--mono);font-size:11px;margin-top:3px"><span style="color:var(--red)">${JSON.stringify(paramCur)}</span> <span style="color:var(--text3)">→</span> <span style="color:var(--green);font-weight:700">${JSON.stringify(paramProp)}</span></div>` : '';
+    const desc       = a.description ? `<div style="font-family:var(--mono);font-size:9px;color:var(--text2);margin-top:4px">${esc(a.description)}</div>` : '';
+    const reasonLine = rationale ? `<div style="font-family:var(--mono);font-size:8px;color:var(--cyan);margin-top:4px;line-height:1.5;padding-left:6px;border-left:2px solid rgba(24,255,255,0.2)"><strong>Why:</strong> ${esc(rationale)}</div>` : '';
+    const badges     = (confidence || risk) ? `<div style="display:flex;gap:4px;margin-top:4px">${risk ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:' + (risk==='LOW'?'rgba(0,230,118,0.1)':risk==='HIGH'?'rgba(255,23,68,0.1)':'rgba(255,215,64,0.1)') + ';color:' + (risk==='LOW'?'var(--green)':risk==='HIGH'?'var(--red)':'var(--gold)') + ';border:1px solid ' + (risk==='LOW'?'rgba(0,230,118,0.3)':risk==='HIGH'?'rgba(255,23,68,0.3)':'rgba(255,215,64,0.3)') + '">' + risk + ' RISK</span>' : ''}${confidence ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:rgba(24,255,255,0.06);color:var(--cyan);border:1px solid rgba(24,255,255,0.2)">' + confidence + '</span>' : ''}</div>` : '';
+
+    // Only show APPLY/ROLLBACK if there's actually a key to apply
+    const canApply = !isApplied && !isRolledBack && paramKey;
+
     return `<div class="action-card ${cls}">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:4px">
-        <div style="font-family:var(--mono);font-size:10px;color:${isApplied?'var(--green)':isRolledBack?'var(--red)':'var(--gold)'};font-weight:700">${isApplied?'✅ APPLIED':isRolledBack?'↩ ROLLED BACK':'⏳ PROPOSED'}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">
+        <div style="font-family:var(--mono);font-size:10px;color:${statusColor};font-weight:700">${statusLabel}</div>
         <div style="font-family:var(--mono);font-size:8px;color:var(--text3)">${a.created_at||'—'}</div>
       </div>
-      <div style="font-family:var(--mono);font-size:10px;margin-top:6px">${esc(a.description||'')}</div>
-      ${params ? `<div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-top:4px">${esc(params)}</div>` : ''}
-      ${!isApplied && !isRolledBack ? `<div style="display:flex;gap:6px;margin-top:8px">
-        <button onclick="applyAgentChange('${(() => { try { const p=JSON.parse(a.params||'{}'); return p.key||p.param||''; } catch { return ''; } })()}',${(() => { try { const p=JSON.parse(a.params||'{}'); return JSON.stringify(p.proposed??p.new_value??p.value??null); } catch { return 'null'; } })()},'approved from history',this)" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:3px;padding:4px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">✓ APPLY</button>
-        <button onclick="rollbackAgentChange('${a.id}',this)" style="background:rgba(255,23,68,0.08);border:1px solid rgba(255,23,68,0.2);color:var(--red);border-radius:3px;padding:4px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">↩ ROLLBACK</button>
+      ${changeLine}${desc}${reasonLine}${badges}
+      ${canApply ? `<div style="display:flex;gap:6px;margin-top:8px">
+        <button onclick="applyAgentChange('${esc(paramKey)}',${JSON.stringify(paramProp)},'approved from actions',this)" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:3px;padding:6px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700">✓ APPLY</button>
+        <button onclick="rollbackAgentChange('${a.id}',this)" style="background:rgba(255,23,68,0.08);border:1px solid rgba(255,23,68,0.2);color:var(--red);border-radius:3px;padding:6px 14px;font-family:var(--mono);font-size:9px;cursor:pointer">↩ ROLLBACK</button>
       </div>` : ''}
     </div>`;
-  }).join('');
+  }).join('') || '<div style="font-family:var(--mono);font-size:10px;color:var(--text3);text-align:center;padding:30px">No actions with valid data yet. Run an optimization to generate actions.</div>';
 }
 
 async function rollbackAgentChange(id, btn) {
