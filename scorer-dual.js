@@ -225,6 +225,17 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
     p = Math.max(0, p - Math.round(maxWQ * 0.40));
     risks.push(`Bundle ${m.bundleRisk} + weak wallets — coordinated dump risk`);
   }
+
+  // Sniper penalty — high sniper count = frontrun, dump incoming
+  const snipers = m.sniperWalletCount ?? 0;
+  if (snipers > 20)       { p = Math.max(0, p - 6); risks.push(`${snipers} sniper wallets — heavily frontrun`); }
+  else if (snipers > 10)  { p = Math.max(0, p - 3); risks.push(`${snipers} snipers detected`); }
+  else if (snipers <= 3 && snipers >= 0) { /* clean — no penalty */ }
+
+  // BubbleMap risk — clustered/coordinated wallets
+  if (m.bubbleMapRisk === 'SEVERE')      { p = Math.max(0, p - 8); risks.push('BubbleMap SEVERE — coordinated wallet cluster'); }
+  else if (m.bubbleMapRisk === 'HIGH')   { p = Math.max(0, p - 4); risks.push('BubbleMap HIGH — suspicious wallet patterns'); }
+
   parts.walletQuality = p;
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -284,6 +295,21 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
     p = Math.min(maxLH, p + Math.round(maxLH * 0.20));
     reasons.push('LP locked');
   }
+
+  // Mint authority — if still active, dev can print tokens (rug vector)
+  if (m.mintAuthority === 1) {
+    p = Math.max(0, p - 2);
+    risks.push('Mint authority ACTIVE — dev can inflate supply');
+  } else if (m.mintAuthority === 0) {
+    reasons.push('Mint revoked');
+  }
+
+  // Freeze authority — dev can freeze your tokens
+  if (m.freezeAuthority === 1) {
+    p = Math.max(0, p - 1);
+    risks.push('Freeze authority ACTIVE — tokens can be frozen');
+  }
+
   parts.liquidityHealth = p;
 
   // ═══════════════════════════════════════════════════════════════════════════
