@@ -3507,7 +3507,13 @@ body::before {
         <div class="candidates-list-col">
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
             <div style="padding:10px 12px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.15)">
-              <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);letter-spacing:1px;font-weight:700;margin-bottom:8px">🔬 ALL SCANNED TOKENS <span id="tb-candidates-badge" style="color:var(--text3)"></span></div>
+              <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);letter-spacing:1px;font-weight:700;margin-bottom:4px">🔬 ALL SCANNED TOKENS <span id="tb-candidates-badge" style="color:var(--text3)"></span></div>
+              <div style="display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">Reviewing: <span id="candReviewing" style="color:var(--cyan);font-weight:700">—</span></span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">Last 5min: <span id="candLast5min" style="color:var(--green);font-weight:700">—</span></span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">Scored: <span id="candScored" style="color:var(--gold);font-weight:700">—</span></span>
+                <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">Pending: <span id="candPending" style="color:var(--text2);font-weight:700">—</span></span>
+              </div>
               <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">
                 <button class="fchip active" onclick="auditFilter(this,'all')">ALL</button>
                 <button class="fchip" onclick="auditFilter(this,'AUTO_POST')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">PROMOTED</button>
@@ -5464,6 +5470,28 @@ async function loadAudit(){
     }));
   allCandidatesData = [...candRows, ...feedRows];
   setText('tb-audit-badge', allCandidatesData.length);
+
+  // ── Live stats for the header ──
+  var now = Date.now();
+  var scored = 0, pending = 0, last5min = 0;
+  for (var i = 0; i < allCandidatesData.length; i++) {
+    var r = allCandidatesData[i];
+    if (r.compositeScore != null && r.compositeScore > 0) scored++;
+    else pending++;
+    // Check if scanned in last 5 min
+    var ts = r.createdAt || r.created_at || r.scannedAt || r.scanned_at;
+    if (ts) {
+      try {
+        var t = new Date(ts);
+        if (now - t.getTime() < 5 * 60 * 1000) last5min++;
+      } catch(e) {}
+    }
+  }
+  setText('candReviewing', allCandidatesData.length);
+  setText('candLast5min', last5min);
+  setText('candScored', scored);
+  setText('candPending', pending);
+
   _auditPage = 0;
   renderAuditList();
 }
@@ -5556,14 +5584,14 @@ function renderAuditList(){
     var rawScore = r.compositeScore != null ? r.compositeScore : null;
     var score    = rawScore != null ? Math.round(rawScore) : null;
     var isScoring = score == null || score === 0;
-    var displayScore = isScoring ? '—' : score;
+    var displayScore = isScoring ? '⏳' : score;
     var sCol     = isScoring ? 'var(--text3)' : scoreCol(score);
     var dec      = r.finalDecision||'PENDING';
     var decCol2  = decColor(dec);
     var age      = r.pairAgeHours!=null ? (r.pairAgeHours<0.083?'<5m':r.pairAgeHours<1?(r.pairAgeHours*60).toFixed(0)+'m':r.pairAgeHours.toFixed(1)+'h') : '—';
     var mc       = fmt(r.marketCap,'$');
     var mcVal    = r.marketCap||0;
-    var gemWin   = mcVal>=5000 && mcVal<=40000;
+    var gemWin   = mcVal>=8000 && mcVal<=40000;
     var stage    = r.stage||'?';
     var isNew    = isBrandNew(r.pairAgeHours);
     var clickable = true; // Always clickable — even unscored rows open detail
