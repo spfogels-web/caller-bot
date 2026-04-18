@@ -44,8 +44,8 @@ const DEFAULT_FILTERS = {
     minVolume1h:  1_000,
     minBuys1h:    8,
     minTxns1h:    15,
-    minMarketCap: 8_000,     // was 1K — too early, no data
-    maxMarketCap: 5_000_000,
+    minMarketCap: 8_000,     // $8K min — need real data to score
+    maxMarketCap: 85_000,    // $85K cap — focus on micro-cap gems
     maxAgeHours:  0.5,
   },
   mid: {
@@ -53,8 +53,8 @@ const DEFAULT_FILTERS = {
     minVolume1h:  3_000,
     minBuys1h:    15,
     minTxns1h:    30,
-    minMarketCap: 8_000,     // was 3K — not enough signal
-    maxMarketCap: 10_000_000,
+    minMarketCap: 8_000,
+    maxMarketCap: 85_000,    // $85K cap
     maxAgeHours:  2,
   },
   late: {
@@ -63,7 +63,7 @@ const DEFAULT_FILTERS = {
     minBuys24h:   50,
     minTxns24h:   100,
     minMarketCap: 20_000,
-    maxMarketCap: 20_000_000,
+    maxMarketCap: 85_000,     // $85K cap
     maxAgeHours:  4,
   },
 };

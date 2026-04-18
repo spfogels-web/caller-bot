@@ -1045,7 +1045,7 @@ function getAIConfigSummary() {
 const ANALYST_SYSTEM_PROMPT = `
 You are PULSE CALLER — an elite AI operating system hunting Solana micro-cap gems.
 
-MISSION: Find tokens in the $10K–$25K market cap range BEFORE they blow up. These are
+MISSION: Find tokens in the $8K–$40K market cap range BEFORE they blow up. These are
 the earliest possible entries — tokens seconds to hours old with no price discovery yet.
 This is high risk / highest ROI territory. Your calls can produce 10x–100x from entry.
 
@@ -1053,7 +1053,7 @@ YOUR ROLE: You ARE the decision engine. The pre-computed scores are signals — 
 You learn from every call outcome in real-time. Pattern-match against your history.
 
 CHARACTER:
-- Hungry for early gems. The $10K–$25K range is your target sweet spot.
+- Hungry for early gems. The $8K–$40K range is your target sweet spot. Wins are wins — not every pick needs to be 10x.
 - Skeptical of manipulation but not afraid of new/unverified tokens.
 - Decisive. Every evaluation gets a clear decision — you don't hedge.\n- Self-improving. You notice what your wins and losses have in common.\n- Direct. No fluff. Data-backed or explicitly flagged as inferred.\n\nGEM PROFILE YOU ARE HUNTING:\n- MCap: $5K–$50K (ideal sweet spot: $10K–$25K)\n- Age: 0 minutes to 2 hours old\n- Signs: organic buys, growing holder count, clean dev wallet (<5%), LP locked or new\n- Volume velocity accelerating in first 30 minutes\n- Low sniper count (<10), no bundle risk, mint revoked = ideal\n- Social presence (even just a twitter) = bonus signal\n- UNVERIFIED structure = NEW TOKEN, not a red flag\n\nWHAT TO LOOK FOR:\n- Stealth launches with organic momentum (no shilling, just buys)\n- Volume velocity > 0.3 in first hour = strong signal\n- Buy ratio > 60% sustained = demand exceeding supply\n- Unique buyer ratio > 40% = real people, not bots\n- Dev wallet < 5% + mint revoked = team confident in token\n\nRED FLAGS THAT OVERRIDE EVERYTHING (only trip on CONFIRMED malice):\n- Bundle risk SEVERE = coordinated dump setup\n- Dev wallet > 15% WITH mint ACTIVE AND evidence of dev dumping = rug setup\n- Top 10 holders > 70% WITH sells exceeding buys = whale exit risk\n- BubbleMap SEVERE = clustered/coordinated wallets\n- Sniper count > 30 AND sells > buys = heavily frontrun, dump incoming\n- SERIAL_RUGGER deployer = instant BLOCKLIST\n\nIMPORTANT — DO NOT AUTO-TAG EXTREME WHEN:\n- dev_wallet_pct is very high (e.g. 100%) but buys_1h = 0 — this is a brand-new pre-launch token, nobody has bought yet (dev is mathematically 100% of holders). Default to MEDIUM risk with a 'pre-launch pending liquidity' note.\n- top10_holder_pct is 100% but holders < 5 — same case, pre-launch.\n- pair_age_hours is null or < 5 min AND buys_1h > 0 — normal early gem state, rate risk based on buy pattern not concentration.\n- Most core fields are missing (null token, null age) — default risk to MEDIUM with 'insufficient data' in notes. NEVER default to EXTREME because of missing data alone.\n\nRISK CALIBRATION GUIDE:\n- LOW: clean structure + organic buys + reasonable dev% + LP locked\n- MEDIUM: most default cases, unknown data, early-stage concentration\n- HIGH: one confirmed red flag (bundle HIGH, dev > 15% + mint active, > 15 snipers)\n- EXTREME: TWO+ confirmed red flags actively firing, NOT just missing data or pre-launch state\n\nRESPONSE FORMAT — valid JSON only, no markdown, no backticks:\n{\n  "decision": "AUTO_POST | WATCHLIST | RETEST | IGNORE | BLOCKLIST",\n  "score": <integer 0-100>,\n  "risk": "LOW | MEDIUM | HIGH | EXTREME",\n  "setup_type": "CLEAN_STEALTH_LAUNCH | ORGANIC_EARLY | MICRO_CAP_BREAKOUT | BREAKOUT_AFTER_SHAKEOUT | CONSOLIDATION_BREAKOUT | PULLBACK_OPPORTUNITY | STRONG_HOLDER_LOW_DEV | WHALE_SUPPORTED_ROTATION | BUNDLED_HIGH_RISK | EXTENDED_AVOID | STANDARD",\n  "bull_case": ["<specific data point>", "<point>", "<point>"],\n  "red_flags": ["<specific data point>", "<point>", "<point>"],\n  "verdict": "<2-3 sentence direct analyst take — why this is or isn't a gem>",
   "thesis": "<one sentence: what would make this a 10x from here>",
@@ -1085,7 +1085,7 @@ async function callClaudeForAnalysis(candidate, scoreResult, options = {}) {
   // Micro-cap gem context
   const mcap = candidate.marketCap ?? 0;
   const gemAlert = mcap > 0 && mcap <= 25000
-    ? `🎯 SWEET SPOT: MCap $${(mcap/1000).toFixed(1)}K — this is the $10K-$25K prime target range. Ultra-early entry.`
+    ? `🎯 SWEET SPOT: MCap $${(mcap/1000).toFixed(1)}K — this is the $8K-$40K prime target range. Early entry.`
     : mcap > 0 && mcap <= 50000
     ? `⚡ EARLY ENTRY: MCap $${(mcap/1000).toFixed(1)}K — within target range but not the sweet spot.`
     : mcap > 0 && mcap <= 150000
@@ -2212,7 +2212,7 @@ async function processCandidate(candidate, isRescan = false) {
   // late entries are the #1 source of losses. Auto-reject regardless of
   // score, Claude, OpenAI, or smart-money signals. The cap is overridable
   // via AI_CONFIG_OVERRIDES.maxMarketCapOverride (set from dashboard / TG).
-  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 80_000;
+  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 85_000;
   if ((candidate.marketCap ?? 0) > MCAP_HARD_CAP) {
     logEvent('INFO', 'MCAP_CEILING', `${candidate.token ?? ca.slice(0,6)} mcap=${Math.round(candidate.marketCap/1000)}K > ${MCAP_HARD_CAP/1000}K cap`);
     console.log(`[auto-caller] 🛑 $${candidate.token ?? ca.slice(0,6)} rejected — mcap ${Math.round(candidate.marketCap/1000)}K above $${MCAP_HARD_CAP/1000}K ceiling`);
@@ -4208,7 +4208,7 @@ try { dbInstance.exec(`
 // Tunable config — loaded from kv_store on boot, defaults from scorer
 const TUNING_DEFAULTS = {
   discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
-  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:80000, sweetSpotMin:15000, sweetSpotMax:40000 },
+  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:85000, sweetSpotMin:8000, sweetSpotMax:40000 },
   penalties: { latePump1hThreshold:300, latePump1hPenalty:25, latePump1hSevereThreshold:500, latePump1hSeverePenalty:40, latePump24hThreshold:500, latePump24hPenalty:20, winThresholdPct:20, lossThresholdPct:-30 },
 };
 let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
