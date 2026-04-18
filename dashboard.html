@@ -3152,25 +3152,7 @@ body::before {
         </div>
       </div>
 
-      <!-- ═══ PREVIOUS WEEKS — historical performance ═══ -->
-      <div class="card" style="margin-bottom:14px;border-color:rgba(136,153,187,0.2)">
-        <div class="card-hdr" style="background:rgba(0,0,0,0.2);cursor:pointer" onclick="var b=document.getElementById('ovHistoryBody');b.style.display=b.style.display==='none'?'block':'none';var a=document.getElementById('ovHistoryArrow');a.textContent=b.style.display==='none'?'▶':'▼'">
-          <div class="card-title" style="color:var(--text3)"><span class="icon">📊</span>PREVIOUS WEEKS <span id="ovHistoryArrow" style="font-size:10px;margin-left:6px">▼</span></div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">ALL-TIME SINCE RESET</span>
-            <span style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--text2);font-weight:700" id="ovAllTimeWR">—</span>
-          </div>
-        </div>
-        <div class="card-body" id="ovHistoryBody">
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px">
-            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">ALL-TIME W/L</div><div class="tile-value" style="color:var(--text2)" id="ovWeekWL">—</div><div class="tile-sub" id="ovWeekWLSub">—</div></div>
-            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">AVG PEAK X</div><div class="tile-value" style="color:var(--text2)" id="ovWeekAvgX">—</div><div class="tile-sub">all-time avg</div></div>
-            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">BEST X</div><div class="tile-value" style="color:var(--text2)" id="ovWeekBestX">—</div><div class="tile-sub">all-time best</div></div>
-            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">TOTAL CALLS</div><div class="tile-value" style="color:var(--text2)" id="ovAllTimeSub2">—</div><div class="tile-sub">since reset</div></div>
-          </div>
-          <div id="ovWeeklyTable" style="font-family:var(--mono);font-size:9px;color:var(--text3)">Loading weekly data...</div>
-        </div>
-      </div>
+      <!-- previous weeks removed -->
 
       <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
       <div class="card ai-learn-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(68,138,255,0.04),rgba(156,39,176,0.04));border:1px solid rgba(156,39,176,0.25)">
