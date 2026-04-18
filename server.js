@@ -7338,6 +7338,17 @@ app.get('/api/candidates/by-ca/:ca', (req, res) => {
     if (cand.dual_parts && typeof cand.dual_parts === 'string') {
       try { cand.dual_parts = JSON.parse(cand.dual_parts); } catch {}
     }
+    // Look up outcome from calls table
+    try {
+      const call = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM calls WHERE candidate_id=? OR contract_address=? ORDER BY id DESC LIMIT 1`).get(cand.id, ca);
+      if (call) { cand.outcome = call.outcome; cand.peak_multiple = call.peak_multiple; cand.peak_mcap = call.peak_mcap; }
+    } catch {}
+    if (!cand.outcome) {
+      try {
+        const arch = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM audit_archive WHERE contract_address=? AND outcome IS NOT NULL ORDER BY id DESC LIMIT 1`).get(ca);
+        if (arch) { cand.outcome = arch.outcome; cand.peak_multiple = arch.peak_multiple; cand.peak_mcap = arch.peak_mcap; }
+      } catch {}
+    }
     res.json({ ok: true, candidate: cand, source: 'candidates' });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
@@ -7366,6 +7377,26 @@ app.get('/api/candidates/:id', (req, res) => {
     }
     candidate.discoveryScore = candidate.discovery_score;
     candidate.modelUsed = candidate.model_used;
+    // Look up outcome from calls table (outcomes live there, not on candidates)
+    try {
+      const call = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM calls WHERE candidate_id=? OR contract_address=? ORDER BY id DESC LIMIT 1`).get(candidate.id, candidate.contract_address);
+      if (call) {
+        candidate.outcome = call.outcome;
+        candidate.peak_multiple = call.peak_multiple;
+        candidate.peak_mcap = call.peak_mcap;
+      }
+    } catch {}
+    // Also check audit_archive
+    if (!candidate.outcome) {
+      try {
+        const arch = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM audit_archive WHERE contract_address=? AND outcome IS NOT NULL ORDER BY id DESC LIMIT 1`).get(candidate.contract_address);
+        if (arch) {
+          candidate.outcome = arch.outcome;
+          candidate.peak_multiple = arch.peak_multiple;
+          candidate.peak_mcap = arch.peak_mcap;
+        }
+      } catch {}
+    }
     // Parse claudeRaw to get bull_case and red_flags for signals fallback
     if (!candidate.signals && typeof candidate.claude_raw === 'string') {
       try {
