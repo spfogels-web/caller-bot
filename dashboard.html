@@ -3674,7 +3674,7 @@ body::before {
       </div>
 
       <!-- ═══ AUTONOMOUS AGENT PANEL ═══ -->
-      <div class="card" style="border-color:rgba(68,138,255,0.4);margin-bottom:14px;overflow:hidden">
+      <div class="card" style="border-color:rgba(68,138,255,0.4);margin-bottom:14px">
         <!-- Header with tabs -->
         <div style="background:linear-gradient(135deg,rgba(68,138,255,0.08),rgba(156,39,176,0.06));padding:14px 18px;border-bottom:1px solid rgba(68,138,255,0.2)">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
@@ -3694,7 +3694,7 @@ body::before {
             </div>
           </div>
           <!-- Tab bar -->
-          <div style="display:flex;gap:4px;flex-wrap:wrap">
+          <div style="display:flex;gap:4px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px">
             <button class="agent-tab active" id="atab-chat"    onclick="switchAgentTab('chat')"   >💬 CHAT</button>
             <button class="agent-tab"        id="atab-actions" onclick="switchAgentTab('actions')" >⚡ ACTIONS</button>
             <button class="agent-tab"        id="atab-rec"     onclick="switchAgentTab('rec')"     >📋 RECOMMENDED</button>
