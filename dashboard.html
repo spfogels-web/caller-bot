@@ -3131,21 +3131,42 @@ body::before {
         <div class="stat-tile" style="--tile-color:var(--text3);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">⏳ PENDING</div><div class="tile-value" id="ovCallsPending">—</div><div class="tile-sub">unresolved</div></div>
       </div>
 
-      <!-- ═══ WEEKLY PERFORMANCE — new scoring engine stats ═══ -->
-      <div class="card" style="margin-bottom:14px;border-color:rgba(0,230,118,0.25)">
-        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(0,230,118,0.06),transparent)">
-          <div class="card-title" style="color:var(--green)"><span class="icon">📈</span>WEEKLY PERFORMANCE</div>
+      <!-- ═══ CURRENT WEEK — live scoreboard (post-reset) ═══ -->
+      <div class="card" style="margin-bottom:14px;border-color:rgba(24,255,255,0.35);background:linear-gradient(135deg,rgba(24,255,255,0.03),rgba(0,230,118,0.02))">
+        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(24,255,255,0.08),rgba(0,230,118,0.04),transparent)">
+          <div class="card-title" style="color:var(--cyan)"><span class="icon">🎯</span>CURRENT WEEK — LIVE SCOREBOARD</div>
           <div style="display:flex;gap:8px;align-items:center">
-            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">NEW SCORING ENGINE v3</span>
-            <span style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--green);font-weight:700" id="ovWeeklyWinRate">—</span>
+            <span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px">FOUNDATION SIGNALS v3</span>
+            <span style="font-family:'Orbitron',var(--mono);font-size:12px;color:var(--green);font-weight:700;text-shadow:0 0 10px rgba(0,230,118,0.3)" id="ovCurrentWR">—</span>
           </div>
         </div>
         <div class="card-body">
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px">
+            <div class="stat-tile" style="--tile-color:var(--cyan)"><div class="tile-label">CALLS</div><div class="tile-value" style="color:var(--cyan)" id="ovCurCalls">0</div><div class="tile-sub">this week</div></div>
+            <div class="stat-tile" style="--tile-color:var(--green)"><div class="tile-label" style="color:var(--green)">WINS</div><div class="tile-value" style="color:var(--green)" id="ovCurWins">0</div><div class="tile-sub" id="ovCurWinSub">—</div></div>
+            <div class="stat-tile" style="--tile-color:var(--red)"><div class="tile-label" style="color:var(--red)">LOSSES</div><div class="tile-value" style="color:var(--red)" id="ovCurLosses">0</div><div class="tile-sub" id="ovCurLossSub">—</div></div>
+            <div class="stat-tile" style="--tile-color:var(--gold)"><div class="tile-label" style="color:var(--gold)">AVG X</div><div class="tile-value" style="color:var(--gold)" id="ovCurAvgX">—</div><div class="tile-sub">peak multiple</div></div>
+            <div class="stat-tile" style="--tile-color:var(--purple)"><div class="tile-label" style="color:var(--purple)">BEST X</div><div class="tile-value" style="color:var(--purple)" id="ovCurBestX">—</div><div class="tile-sub">top performer</div></div>
+          </div>
+          <div id="ovCurrentCallsList" style="font-family:var(--mono);font-size:9px;color:var(--text3)">No calls yet this week</div>
+        </div>
+      </div>
+
+      <!-- ═══ PREVIOUS WEEKS — historical performance ═══ -->
+      <div class="card" style="margin-bottom:14px;border-color:rgba(136,153,187,0.2)">
+        <div class="card-hdr" style="background:rgba(0,0,0,0.2);cursor:pointer" onclick="var b=document.getElementById('ovHistoryBody');b.style.display=b.style.display==='none'?'block':'none';var a=document.getElementById('ovHistoryArrow');a.textContent=b.style.display==='none'?'▶':'▼'">
+          <div class="card-title" style="color:var(--text3)"><span class="icon">📊</span>PREVIOUS WEEKS <span id="ovHistoryArrow" style="font-size:10px;margin-left:6px">▼</span></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">ALL-TIME SINCE RESET</span>
+            <span style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--text2);font-weight:700" id="ovAllTimeWR">—</span>
+          </div>
+        </div>
+        <div class="card-body" id="ovHistoryBody">
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px">
-            <div class="stat-tile" style="--tile-color:var(--green)"><div class="tile-label" style="color:var(--green)">THIS WEEK W/L</div><div class="tile-value" style="color:var(--green)" id="ovWeekWL">—</div><div class="tile-sub" id="ovWeekWLSub">—</div></div>
-            <div class="stat-tile" style="--tile-color:var(--cyan)"><div class="tile-label" style="color:var(--cyan)">AVG PEAK X</div><div class="tile-value" style="color:var(--cyan)" id="ovWeekAvgX">—</div><div class="tile-sub">avg multiple</div></div>
-            <div class="stat-tile" style="--tile-color:var(--gold)"><div class="tile-label" style="color:var(--gold)">BEST X</div><div class="tile-value" style="color:var(--gold)" id="ovWeekBestX">—</div><div class="tile-sub">top performer</div></div>
-            <div class="stat-tile" style="--tile-color:var(--purple)"><div class="tile-label" style="color:var(--purple)">ALL-TIME</div><div class="tile-value" style="color:var(--purple)" id="ovAllTimeWR">—</div><div class="tile-sub" id="ovAllTimeSub">—</div></div>
+            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">ALL-TIME W/L</div><div class="tile-value" style="color:var(--text2)" id="ovWeekWL">—</div><div class="tile-sub" id="ovWeekWLSub">—</div></div>
+            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">AVG PEAK X</div><div class="tile-value" style="color:var(--text2)" id="ovWeekAvgX">—</div><div class="tile-sub">all-time avg</div></div>
+            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">BEST X</div><div class="tile-value" style="color:var(--text2)" id="ovWeekBestX">—</div><div class="tile-sub">all-time best</div></div>
+            <div class="stat-tile" style="--tile-color:var(--text3)"><div class="tile-label">TOTAL CALLS</div><div class="tile-value" style="color:var(--text2)" id="ovAllTimeSub2">—</div><div class="tile-sub">since reset</div></div>
           </div>
           <div id="ovWeeklyTable" style="font-family:var(--mono);font-size:9px;color:var(--text3)">Loading weekly data...</div>
         </div>
@@ -4843,13 +4864,47 @@ async function loadOverview(){
       var at = weekly.allTime || {};
       var cwResolved = (cw.wins||0) + (cw.losses||0);
       var cwWR = cwResolved > 0 ? Math.round(cw.wins / cwResolved * 100) + '%' : '—';
-      setText('ovWeeklyWinRate', cwWR + ' WIN RATE');
-      setText('ovWeekWL', (cw.wins||0) + 'W / ' + (cw.losses||0) + 'L');
-      setText('ovWeekWLSub', (cw.total_calls||0) + ' calls, ' + (cw.pending||0) + ' pending');
-      setText('ovWeekAvgX', cw.avg_peak_x != null ? cw.avg_peak_x + 'x' : '—');
-      setText('ovWeekBestX', cw.best_x != null ? cw.best_x + 'x' : '—');
+
+      // ── Current Week Live Scoreboard ──
+      setText('ovCurrentWR', cwWR === '—' ? 'NEW' : cwWR + ' WIN RATE');
+      setText('ovCurCalls', cw.total_calls || 0);
+      setText('ovCurWins', cw.wins || 0);
+      setText('ovCurWinSub', cwResolved > 0 ? Math.round((cw.wins||0)/cwResolved*100) + '% win rate' : 'no outcomes yet');
+      setText('ovCurLosses', cw.losses || 0);
+      setText('ovCurLossSub', cwResolved > 0 ? Math.round((cw.losses||0)/cwResolved*100) + '% loss rate' : '—');
+      setText('ovCurAvgX', cw.avg_peak_x != null ? cw.avg_peak_x + 'x' : '—');
+      setText('ovCurBestX', cw.best_x != null ? cw.best_x + 'x' : '—');
+
+      // Current week calls list
+      var curCallsEl = document.getElementById('ovCurrentCallsList');
+      var curCalls = weekly.currentCalls || [];
+      if (curCallsEl && curCalls.length) {
+        curCallsEl.innerHTML = '<div style="display:grid;grid-template-columns:auto 1fr auto auto auto;gap:4px 10px;align-items:center">' +
+          curCalls.map(function(c) {
+            var oCol = c.outcome === 'WIN' ? 'var(--green)' : c.outcome === 'LOSS' ? 'var(--red)' : c.outcome === 'NEUTRAL' ? 'var(--cyan)' : 'var(--text3)';
+            var oLabel = c.outcome || 'PENDING';
+            var peakStr = c.peak_multiple != null ? c.peak_multiple.toFixed(2) + 'x' : '—';
+            var mcStr = c.market_cap_at_call ? '$' + (c.market_cap_at_call >= 1000 ? (c.market_cap_at_call/1000).toFixed(1) + 'K' : c.market_cap_at_call) : '—';
+            var timeStr = '';
+            try { var d = new Date(c.call_time); timeStr = d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true}); } catch(e){}
+            return '<span style="font-weight:700;color:' + oCol + ';font-size:8px;padding:2px 6px;background:' + oCol + '11;border:1px solid ' + oCol + '33;border-radius:3px;text-align:center">' + oLabel + '</span>' +
+              '<span style="color:var(--text1);font-weight:700;font-size:10px">$' + (c.token||'?') + '</span>' +
+              '<span style="color:var(--cyan);font-size:9px">' + mcStr + '</span>' +
+              '<span style="color:' + (c.peak_multiple >= 2 ? 'var(--green)' : c.peak_multiple >= 1 ? 'var(--gold)' : 'var(--red)') + ';font-weight:700;font-size:10px">' + peakStr + '</span>' +
+              '<span style="color:var(--text3);font-size:7px">' + timeStr + '</span>';
+          }).join('') +
+        '</div>';
+      } else if (curCallsEl) {
+        curCallsEl.innerHTML = '<div style="text-align:center;color:var(--text3);padding:10px">No calls yet this week — first call will appear here</div>';
+      }
+
+      // ── Previous Weeks / All-Time ──
+      setText('ovWeekWL', (at.wins||0) + 'W / ' + (at.losses||0) + 'L');
+      setText('ovWeekWLSub', (at.total_calls||0) + ' total calls');
+      setText('ovWeekAvgX', at.avg_peak_x != null ? at.avg_peak_x + 'x' : '—');
+      setText('ovWeekBestX', at.best_x != null ? at.best_x + 'x' : '—');
       setText('ovAllTimeWR', at.winRate || '—');
-      setText('ovAllTimeSub', (at.wins||0) + 'W / ' + (at.losses||0) + 'L of ' + (at.total_calls||0));
+      setText('ovAllTimeSub2', (at.total_calls||0) + ' calls');
 
       // Weekly history table
       var wks = weekly.weeks || [];

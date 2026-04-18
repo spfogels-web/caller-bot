@@ -7582,6 +7582,9 @@ app.post('/api/calls/reset-scoreboard', express.json(), (req, res) => {
     const { keepTokens = [] } = req.body ?? {};
     const keepUpper = keepTokens.map(t => t.toUpperCase().replace(/^\$/, ''));
 
+    // Store the reset timestamp so we know when "current period" starts
+    try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoreboard_reset_at', ?)`).run(new Date().toISOString()); } catch {}
+
     // Count what we're archiving
     const totalCalls = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n;
 
@@ -7673,9 +7676,24 @@ app.get('/api/stats/weekly', (req, res) => {
     `).get();
 
     const resolved = (allTime.wins || 0) + (allTime.losses || 0);
+
+    // Current week individual calls for the live scoreboard
+    const currentCalls = dbInstance.prepare(`
+      SELECT token, contract_address, outcome, peak_multiple, score_at_call,
+             market_cap_at_call, COALESCE(called_at, posted_at) as call_time
+      FROM calls
+      WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+      ORDER BY id DESC LIMIT 20
+    `).all();
+
+    // Reset timestamp
+    const resetAt = (() => { try { return dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scoreboard_reset_at'`).get()?.value; } catch { return null; } })();
+
     res.json({
       ok: true,
       currentWeek: current,
+      currentCalls,
+      resetAt,
       allTime: {
         ...allTime,
         winRate: resolved > 0 ? Math.round(allTime.wins / resolved * 100) + '%' : '—',
