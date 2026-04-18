@@ -2682,6 +2682,12 @@ async function processCandidate(candidate, isRescan = false) {
     // Attach scoreResult breakdown directly to enrichedCandidate
     // so db.js insertCandidate picks them up if columns exist
     enrichedCandidate.subScores       = scoreResult.subScores;
+    enrichedCandidate.dualParts       = scoreResult.dualParts;
+    enrichedCandidate.dualReasons     = scoreResult.reasons;
+    enrichedCandidate.dualRisks       = scoreResult.risks;
+    enrichedCandidate.modelUsed       = scoreResult.modelUsed;
+    enrichedCandidate.discoveryScore  = scoreResult.discoveryScore;
+    enrichedCandidate.foundationTotal = scoreResult.dualParts ? Object.entries(scoreResult.dualParts).filter(([k]) => !k.startsWith('_') && k !== 'latePumpPenalty').reduce((a,[,v]) => a + v, 0) : null;
     enrichedCandidate.scoreSignals    = JSON.stringify(scoreResult.signals   ?? {});
     enrichedCandidate.scorePenalties  = JSON.stringify(scoreResult.penalties ?? {});
     enrichedCandidate.stealthDetected = scoreResult.stealthDetected ? 1 : 0;
