@@ -172,7 +172,10 @@ async function enrichWithBirdeye(ca) {
     result.priceChange6h   = d.priceChange6hPercent  ?? d.priceChange6h  ?? null;
     result.priceChange5m   = d.priceChange5mPercent  ?? d.priceChange5m  ?? null;
 
-    console.log(`[enricher:birdeye] ✓ holders:${result.holders} mcap:${result.marketCap?.toFixed?.(0) ?? '?'}`);
+    // Pull token name/symbol from Birdeye if not already set
+    if (d.symbol)  result.token     = result.token || d.symbol;
+    if (d.name)    result.tokenName = result.tokenName || d.name;
+    console.log(`[enricher:birdeye] ✓ holders:${result.holders} mcap:${result.marketCap?.toFixed?.(0) ?? '?'} symbol:${result.token ?? '?'}`);
   } else {
     console.warn('[enricher:birdeye] ✗ no overview (token may be too new for Birdeye index)');
   }
