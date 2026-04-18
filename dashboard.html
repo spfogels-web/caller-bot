@@ -7230,7 +7230,7 @@ async function loadAgentHistory() {
     const isApplied   = a.approved && a.result === 'APPLIED';
     const isRolledBack= a.rolled_back;
     const cls = isRolledBack ? 'rolled' : isApplied ? 'applied' : 'proposed';
-    const params = (() => { try { const p = JSON.parse(a.params||'{}'); return `${p.key||''}: ${JSON.stringify(p.current)} → ${JSON.stringify(p.proposed)}`; } catch { return a.params||''; } })();
+    const params = (() => { try { const p = JSON.parse(a.params||'{}'); const k = p.key||p.param||''; const cur = p.current??p.old_value??''; const prop = p.proposed??p.new_value??p.value??''; if (!k && !cur && !prop) return a.description||''; return `${k}: ${JSON.stringify(cur)} → ${JSON.stringify(prop)}${p.rationale?' — '+p.rationale:''}`; } catch { return a.description||a.params||''; } })();
     return `<div class="action-card ${cls}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:4px">
         <div style="font-family:var(--mono);font-size:10px;color:${isApplied?'var(--green)':isRolledBack?'var(--red)':'var(--gold)'};font-weight:700">${isApplied?'✅ APPLIED':isRolledBack?'↩ ROLLED BACK':'⏳ PROPOSED'}</div>
@@ -7239,7 +7239,7 @@ async function loadAgentHistory() {
       <div style="font-family:var(--mono);font-size:10px;margin-top:6px">${esc(a.description||'')}</div>
       ${params ? `<div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-top:4px">${esc(params)}</div>` : ''}
       ${!isApplied && !isRolledBack ? `<div style="display:flex;gap:6px;margin-top:8px">
-        <button onclick="applyAgentChange('${(() => { try { return JSON.parse(a.params||'{}').key; } catch { return ''; } })()}',${(() => { try { return JSON.stringify(JSON.parse(a.params||'{}').proposed); } catch { return 'null'; } })()},'approved from history',this)" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:3px;padding:4px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">✓ APPLY</button>
+        <button onclick="applyAgentChange('${(() => { try { const p=JSON.parse(a.params||'{}'); return p.key||p.param||''; } catch { return ''; } })()}',${(() => { try { const p=JSON.parse(a.params||'{}'); return JSON.stringify(p.proposed??p.new_value??p.value??null); } catch { return 'null'; } })()},'approved from history',this)" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:3px;padding:4px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">✓ APPLY</button>
         <button onclick="rollbackAgentChange('${a.id}',this)" style="background:rgba(255,23,68,0.08);border:1px solid rgba(255,23,68,0.2);color:var(--red);border-radius:3px;padding:4px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">↩ ROLLBACK</button>
       </div>` : ''}
     </div>`;
@@ -7503,7 +7503,7 @@ async function csAutoOptimize() {
   if (btn) { btn.disabled = true; btn.innerHTML = '⏳ CLAUDE ANALYZING & APPLYING...'; btn.style.opacity = '0.6'; }
   if (results) results.innerHTML = '<div style="text-align:center;padding:30px"><div class="spinner"><div class="spin-dot" style="background:var(--green)"></div><div class="spin-dot" style="background:var(--cyan)"></div><div class="spin-dot" style="background:var(--purple)"></div></div><div style="font-family:var(--mono);font-size:10px;color:var(--cyan);margin-top:12px">Claude is analyzing win/loss data and applying optimal changes...</div><div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:4px">This takes 20-40 seconds</div></div>';
   try {
-    const res = await fetch('/api/control-station/auto-optimize', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}), signal: AbortSignal.timeout(90000) });
+    const res = await fetch(API+'/api/control-station/auto-optimize', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
     const d = await res.json();
     if (!d.ok) { if (results) results.innerHTML = '<div style="color:var(--red);font-family:var(--mono);font-size:10px;padding:14px">' + (d.error||'Failed') + '</div>'; return; }
     const applied = d.applied || [];
@@ -7653,7 +7653,7 @@ async function runTuningOptimize() {
   if (btn) { btn.disabled = true; btn.textContent = '⏳ ANALYZING...'; }
   if (proposals) proposals.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:9px;color:var(--cyan)">Claude is analyzing your win/loss patterns...<br><span style="font-size:8px;color:var(--text3)">This takes 15-30 seconds</span></div>';
   try {
-    const res = await fetch('/api/tuning/optimize', { method: 'POST', headers: {'Content-Type':'application/json'}, signal: AbortSignal.timeout(60000) });
+    const res = await fetch(API+'/api/tuning/optimize', { method: 'POST', headers: {'Content-Type':'application/json'} });
     const d = await res.json();
     if (!d.ok) { if (proposals) proposals.innerHTML = '<div style="color:var(--red);font-family:var(--mono);font-size:9px;padding:10px">' + (d.error||'Failed') + '</div>'; return; }
     const recs = d.recommendations || [];
@@ -7661,26 +7661,22 @@ async function runTuningOptimize() {
       if (proposals) proposals.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--mono);font-size:9px;color:var(--green)">No changes recommended — current config looks optimal</div>';
       return;
     }
-    if (proposals) proposals.innerHTML = recs.map((r, i) => {
+    if (proposals) proposals.innerHTML = '<div style="font-family:\'Orbitron\',var(--mono);font-size:9px;color:var(--green);letter-spacing:1.5px;margin-bottom:8px;text-shadow:0 0 6px rgba(0,230,118,0.3)">⚡ ' + recs.length + ' CHANGES AUTO-APPLIED</div>' + recs.map((r, i) => {
       const riskCol = r.risk === 'LOW' ? 'var(--green)' : r.risk === 'MEDIUM' ? 'var(--gold)' : 'var(--red)';
       const impactCol = r.impact === 'HIGH' ? 'var(--green)' : r.impact === 'MEDIUM' ? 'var(--cyan)' : 'var(--text3)';
-      return `<div style="background:rgba(0,0,0,0.3);border:1px solid rgba(0,230,118,0.15);border-left:3px solid var(--green);border-radius:6px;padding:12px">
+      return `<div style="background:rgba(0,230,118,0.04);border:1px solid rgba(0,230,118,0.15);border-left:3px solid var(--green);border-radius:6px;padding:12px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
           <div style="flex:1">
-            <div style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--text1);font-weight:700">${r.param}: ${r.current} → ${r.proposed}</div>
-            <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">${r.category||'scoring'}</div>
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-family:var(--mono);font-size:7px;color:var(--green);padding:2px 6px;background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);border-radius:3px;font-weight:700">AUTO-APPLIED</span><span style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--text1);font-weight:700">${r.param}</span></div>
+            <div style="font-family:var(--mono);font-size:11px;margin-top:4px"><span style="color:var(--red)">${r.current}</span> <span style="color:var(--text3)">→</span> <span style="color:var(--green);font-weight:700">${r.proposed}</span></div>
           </div>
           <div style="display:flex;gap:4px">
             <span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:${riskCol}15;color:${riskCol};border:1px solid ${riskCol}33">RISK: ${r.risk||'?'}</span>
             <span style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:${impactCol}15;color:${impactCol};border:1px solid ${impactCol}33">IMPACT: ${r.impact||'?'}</span>
           </div>
         </div>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-bottom:6px;line-height:1.4">${r.reason||''}</div>
-        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);font-style:italic;margin-bottom:8px">${r.evidence||''}</div>
-        <div style="display:flex;gap:6px">
-          <button onclick="approveTuning(${i})" style="background:rgba(0,230,118,0.12);border:1px solid rgba(0,230,118,0.4);color:var(--green);border-radius:4px;padding:5px 14px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px;font-weight:700">✓ APPROVE</button>
-          <button onclick="rejectTuning(${i})" style="background:rgba(255,23,68,0.08);border:1px solid rgba(255,23,68,0.3);color:var(--red);border-radius:4px;padding:5px 14px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px">✗ REJECT</button>
-        </div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-bottom:4px;line-height:1.5"><strong style="color:var(--green)">Why:</strong> ${r.reason||''}</div>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);font-style:italic">${r.evidence||''}</div>
       </div>`;
     }).join('');
     window._tuningRecs = recs;
