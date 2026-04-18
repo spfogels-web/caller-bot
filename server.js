@@ -5051,9 +5051,144 @@ async function runSelfImproveLoop() {
       results.errors.push({ mode: 'control-station', error: e.message });
     }
 
-    // Step 3: Log summary to audit
+    // Step 3: OpenAI Learning — feed outcome data + get independent analysis
+    results.openai = { learned: 0, insights: null };
+    if (OPENAI_API_KEY) {
+      try {
+        console.log('[self-improve] Running OpenAI outcome learning...');
+
+        // Gather resolved calls for OpenAI to learn from
+        const resolvedCalls = dbInstance.prepare(`
+          SELECT c.token, c.score_at_call, c.market_cap_at_call, c.risk_at_call,
+                 c.setup_type_at_call, c.outcome, c.peak_multiple, c.pct_change_1h, c.pct_change_24h,
+                 ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct,
+                 ca.holders, ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours,
+                 ca.launch_unique_buyer_ratio, ca.buy_velocity,
+                 c.openai_decision AS openai_called, c.openai_conviction AS openai_confidence
+          FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+          WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+          ORDER BY c.posted_at DESC LIMIT 50
+        `).all();
+
+        // Current config for context
+        const currentConfig = {
+          scoring: SCORING_CONFIG,
+          tuning: TUNING_CONFIG,
+          overrides: AI_CONFIG_OVERRIDES,
+        };
+
+        const openaiPrompt = `You are an AI performance analyst for a Solana micro-cap token calling bot.
+
+MISSION: Learn from outcome data. Identify what the bot is doing RIGHT and WRONG. Propose specific improvements.
+
+RESOLVED CALLS (${resolvedCalls.length} total):
+${JSON.stringify(resolvedCalls.slice(0, 30), null, 1)}
+
+CURRENT BOT CONFIG:
+${JSON.stringify(currentConfig, null, 2)}
+
+TASKS:
+1. LEARN: For each WIN, identify what signals were strong. For each LOSS, identify what should have been caught.
+2. PATTERNS: What separates winners from losers in this data? Be specific with numbers.
+3. ACCURACY: How accurate were YOUR previous calls (openai_called field)? Where did you agree/disagree with the final outcome?
+4. RECOMMENDATIONS: Propose 3-5 specific config changes that would improve win rate. Reference data.
+5. BLIND SPOTS: What types of tokens is the bot missing? What red flags is it ignoring?
+
+Respond with valid JSON:
+{
+  "lessons_learned": ["specific lesson from the data"],
+  "win_pattern": "what winning calls have in common — specific metrics",
+  "loss_pattern": "what losing calls have in common — specific metrics",
+  "self_accuracy": "how accurate were your own previous predictions",
+  "recommendations": [
+    {
+      "param": "exact_config_param_name",
+      "current": current_value,
+      "suggested": new_value,
+      "reason": "data-backed reason",
+      "confidence": 0-100
+    }
+  ],
+  "blind_spots": ["things the bot should watch for"],
+  "summary": "one paragraph overall assessment"
+}`;
+
+        const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+          body: JSON.stringify({
+            model: 'gpt-4o',
+            messages: [{ role: 'user', content: openaiPrompt }],
+            max_tokens: 2500,
+            temperature: 0.3,
+          }),
+          signal: AbortSignal.timeout(60_000),
+        });
+
+        if (openaiRes.ok) {
+          const openaiData = await openaiRes.json();
+          const reply = openaiData.choices?.[0]?.message?.content ?? '';
+          let parsed = null;
+          try {
+            const jsonMatch = reply.match(/\{[\s\S]*\}/);
+            if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+          } catch {}
+
+          if (parsed) {
+            results.openai.learned = resolvedCalls.length;
+            results.openai.insights = parsed;
+
+            // Log OpenAI's analysis to audit
+            dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+              '[OPENAI-LEARNING]',
+              resolvedCalls.length + ' calls analyzed',
+              (parsed.recommendations?.length || 0) + ' suggestions',
+              `Win pattern: ${(parsed.win_pattern || '').slice(0, 200)} | Loss pattern: ${(parsed.loss_pattern || '').slice(0, 200)} | Self-accuracy: ${(parsed.self_accuracy || '').slice(0, 100)} | Summary: ${(parsed.summary || '').slice(0, 200)}`,
+              'AUTO_APPLIED'
+            );
+
+            // Log each lesson learned
+            for (const lesson of (parsed.lessons_learned || []).slice(0, 5)) {
+              dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+                '[OPENAI-LESSON]', '', '', lesson, 'AUTO_APPLIED'
+              );
+            }
+
+            // Log blind spots
+            for (const spot of (parsed.blind_spots || []).slice(0, 3)) {
+              dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+                '[OPENAI-BLIND-SPOT]', '', '', spot, 'AUTO_APPLIED'
+              );
+            }
+
+            // Log OpenAI's config recommendations (but DON'T auto-apply — learning phase)
+            for (const rec of (parsed.recommendations || [])) {
+              dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+                `[OPENAI-SUGGESTS] ${rec.param || '?'}`,
+                String(rec.current ?? ''),
+                String(rec.suggested ?? ''),
+                `${rec.reason || ''} | Confidence: ${rec.confidence || '?'}%`,
+                'PENDING'
+              );
+            }
+
+            console.log(`[self-improve] OpenAI learned from ${resolvedCalls.length} calls. ${parsed.recommendations?.length || 0} suggestions logged.`);
+            console.log(`[self-improve] OpenAI win pattern: ${(parsed.win_pattern || '').slice(0, 100)}`);
+            console.log(`[self-improve] OpenAI loss pattern: ${(parsed.loss_pattern || '').slice(0, 100)}`);
+          }
+        } else {
+          console.warn('[self-improve] OpenAI API returned:', openaiRes.status);
+        }
+      } catch (e) {
+        console.error('[self-improve] OpenAI learning failed:', e.message);
+        results.errors.push({ mode: 'openai-learning', error: e.message });
+      }
+    }
+
+    // Step 4: Log summary to audit
     const totalApplied = results.modes.reduce((a, m) => a + m.applied, 0) + (results.controlStation?.applied || 0);
-    const summary = `Autonomous cycle complete. Agent modes: ${results.modes.map(m => m.mode + '=' + m.applied + ' applied').join(', ')}. Control Station: ${results.controlStation?.applied || 0} applied. Total: ${totalApplied} changes.`;
+    const openaiNote = results.openai.learned > 0 ? ` OpenAI learned from ${results.openai.learned} calls, logged ${results.openai.insights?.recommendations?.length || 0} suggestions.` : '';
+    const summary = `Autonomous cycle complete. Agent modes: ${results.modes.map(m => m.mode + '=' + m.applied + ' applied').join(', ')}. Control Station: ${results.controlStation?.applied || 0} applied. Total: ${totalApplied} changes.${openaiNote}`;
 
     dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
       '[SELF-IMPROVE]', startedAt, new Date().toISOString(),
@@ -5070,7 +5205,9 @@ async function runSelfImproveLoop() {
       `${totalApplied} changes auto-applied\n` +
       results.modes.map(m => `• ${m.mode}: ${m.applied} applied`).join('\n') +
       `\n• control-station: ${results.controlStation?.applied || 0} applied` +
-      (results.controlStation?.analysis ? `\n\n📊 <i>${results.controlStation.analysis}</i>` : '') +
+      (results.openai.learned > 0 ? `\n• openai-learning: ${results.openai.learned} calls studied, ${results.openai.insights?.recommendations?.length || 0} suggestions` : '') +
+      (results.controlStation?.analysis ? `\n\n📊 <b>Claude:</b> <i>${results.controlStation.analysis}</i>` : '') +
+      (results.openai.insights?.summary ? `\n\n🧠 <b>OpenAI:</b> <i>${results.openai.insights.summary}</i>` : '') +
       (results.errors.length ? `\n\n⚠️ Errors: ${results.errors.map(e => e.mode + ': ' + e.error).join(', ')}` : '')
     ).catch(() => {});
 
