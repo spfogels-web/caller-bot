@@ -5285,11 +5285,11 @@ function renderAuditList(){
   else if(auditCurrentFilter==='BLOCKLIST') rows=rows.filter(function(r){return r.finalDecision==='BLOCKLIST';});
   else if(auditCurrentFilter==='PENDING') rows=rows.filter(function(r){return r.finalDecision==='PENDING';});
 
-  // Sort by REAL composite score desc — unscored rows (null) sink to bottom
+  // Sort by newest first — fresh scans always at the top
   rows.sort(function(a,b){
-    var av = a.compositeScore != null ? a.compositeScore : -1;
-    var bv = b.compositeScore != null ? b.compositeScore : -1;
-    return bv - av;
+    var aid = a.id || 0;
+    var bid = b.id || 0;
+    return bid - aid;
   });
 
   const total=rows.length;
