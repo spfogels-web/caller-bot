@@ -2246,7 +2246,17 @@ async function processCandidate(candidate, isRescan = false) {
       enrichedAtMs,
     };
 
-    const scoreResult = computeFullScore(enrichedCandidate, TUNING_CONFIG?.discovery);
+    let scoreResult;
+    try {
+      scoreResult = computeFullScore(enrichedCandidate, TUNING_CONFIG?.discovery);
+    } catch (scoreErr) {
+      console.error('[auto-caller] computeFullScore CRASHED — falling back to legacy:', scoreErr.message);
+      // Fallback: run without custom weights
+      try { scoreResult = computeFullScore(enrichedCandidate); } catch (e2) {
+        console.error('[auto-caller] Legacy scoring also failed:', e2.message);
+        return; // Can't score at all — skip this candidate
+      }
+    }
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
 
