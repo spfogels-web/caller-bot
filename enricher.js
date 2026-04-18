@@ -701,6 +701,46 @@ export async function enrichCandidate(candidate) {
     bubblemapPromise,
   ]);
 
+  // ── DexScreener fallback — fill buys/sells/mcap if scanner didn't provide them ──
+  if (candidate.buys1h == null || candidate.sells1h == null) {
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (dexRes.ok) {
+        const dexData = await dexRes.json();
+        const pair = (dexData?.pairs ?? [])
+          .filter(p => p.chainId === 'solana')
+          .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        if (pair) {
+          candidate.buys1h     = candidate.buys1h     ?? pair.txns?.h1?.buys   ?? null;
+          candidate.sells1h    = candidate.sells1h    ?? pair.txns?.h1?.sells  ?? null;
+          candidate.buys6h     = candidate.buys6h     ?? pair.txns?.h6?.buys   ?? null;
+          candidate.sells6h    = candidate.sells6h    ?? pair.txns?.h6?.sells  ?? null;
+          candidate.buys24h    = candidate.buys24h    ?? pair.txns?.h24?.buys  ?? null;
+          candidate.sells24h   = candidate.sells24h   ?? pair.txns?.h24?.sells ?? null;
+          candidate.marketCap  = candidate.marketCap  ?? pair.marketCap ?? pair.fdv ?? null;
+          candidate.liquidity  = candidate.liquidity  ?? pair.liquidity?.usd ?? null;
+          candidate.volume1h   = candidate.volume1h   ?? pair.volume?.h1  ?? null;
+          candidate.volume24h  = candidate.volume24h  ?? pair.volume?.h24 ?? null;
+          candidate.token      = candidate.token      ?? pair.baseToken?.symbol ?? null;
+          candidate.tokenName  = candidate.tokenName  ?? pair.baseToken?.name ?? null;
+          candidate.priceChange5m  = candidate.priceChange5m  ?? pair.priceChange?.m5  ?? null;
+          candidate.priceChange1h  = candidate.priceChange1h  ?? pair.priceChange?.h1  ?? null;
+          candidate.priceChange6h  = candidate.priceChange6h  ?? pair.priceChange?.h6  ?? null;
+          candidate.priceChange24h = candidate.priceChange24h ?? pair.priceChange?.h24 ?? null;
+          if (pair.pairCreatedAt && candidate.pairAgeHours == null) {
+            candidate.pairAgeHours = (Date.now() - pair.pairCreatedAt) / 3_600_000;
+          }
+          console.log(`[enricher:dexscreener] ✓ fallback — buys1h:${candidate.buys1h} sells1h:${candidate.sells1h} mcap:${candidate.marketCap}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[enricher:dexscreener] fallback failed: ${e.message}`);
+    }
+  }
+
   const enriched = mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData);
 
   // Derived tags / flags
