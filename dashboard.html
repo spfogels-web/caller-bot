@@ -6506,11 +6506,36 @@ async function loadAnalytics(){
 function renderCalibration(data){
   const el=document.getElementById('calibrationChart');if(!el)return;
   if(!data?.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">🎯</div><div>Needs resolved WIN/LOSS calls</div></div>';return;}
-  el.innerHTML=data.map(item=>{
-    const wr=item.winRate||0;const tot=item.total||0;
-    const col=wr>=60?'var(--green)':wr>=40?'var(--gold)':'var(--red)';
-    return`<div class="cal-row"><div class="cal-band">${item.scoreBand||item.band||'?'}</div><div class="cal-wrap"><div class="cal-track"><div class="cal-fill" style="width:${wr}%;background:${col}44"><span style="font-family:var(--mono);font-size:9px;color:${col};font-weight:700">${wr}%</span></div><span class="cal-right-label">${tot} calls</span></div></div><div class="cal-verdict" style="color:${col}">${wr>=60?'✅ Strong':'⚠ Weak'}</div></div>`;
-  }).join('');
+  el.innerHTML = '<div style="display:grid;grid-template-columns:70px 1fr auto auto auto auto;gap:6px 12px;align-items:center;padding:4px 0">' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);font-weight:700">SCORE</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);font-weight:700">WIN RATE</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--green);font-weight:700;text-align:center">W</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--red);font-weight:700;text-align:center">L</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--cyan);font-weight:700;text-align:center">AVG X</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--gold);font-weight:700;text-align:center">BEST X</div>' +
+    data.map(function(item) {
+      var wr = item.win_rate || item.winRate || 0;
+      var tot = item.total || 0;
+      var wins = item.wins || 0;
+      var losses = item.losses || 0;
+      var avgX = item.avg_peak_x != null ? item.avg_peak_x + 'x' : '—';
+      var bestX = item.best_x != null ? item.best_x + 'x' : '—';
+      var col = wr >= 60 ? 'var(--green)' : wr >= 40 ? 'var(--gold)' : 'var(--red)';
+      var verdict = wr >= 60 ? '✅ Strong' : wr >= 40 ? '⚠ Mid' : '❌ Weak';
+      return '<div style="font-family:Orbitron,var(--mono);font-size:12px;color:var(--text1);font-weight:700">' + (item.scoreBand || item.band || '?') + '</div>' +
+        '<div style="position:relative;height:28px;background:rgba(0,0,0,0.4);border-radius:5px;border:1px solid rgba(255,255,255,0.04);overflow:hidden">' +
+          '<div style="height:100%;width:' + wr + '%;background:linear-gradient(90deg,' + col + '11,' + col + '44);border-radius:5px;transition:width 0.5s"></div>' +
+          '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;padding:0 10px">' +
+            '<span style="font-family:Orbitron,var(--mono);font-size:12px;color:' + col + ';font-weight:700">' + wr + '%</span>' +
+            '<span style="font-family:var(--mono);font-size:9px;color:var(--text3)">' + tot + ' calls · ' + verdict + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div style="font-family:var(--mono);font-size:12px;color:var(--green);font-weight:700;text-align:center">' + wins + '</div>' +
+        '<div style="font-family:var(--mono);font-size:12px;color:var(--red);font-weight:700;text-align:center">' + losses + '</div>' +
+        '<div style="font-family:var(--mono);font-size:11px;color:var(--cyan);text-align:center">' + avgX + '</div>' +
+        '<div style="font-family:var(--mono);font-size:11px;color:var(--gold);font-weight:700;text-align:center">' + bestX + '</div>';
+    }).join('') +
+  '</div>';
 }
 
 function renderWinRateList(id,data){

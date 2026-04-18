@@ -1284,16 +1284,20 @@ export function getWinRateByScoreBand() {
   return db.prepare(`
     SELECT
       CASE
-        WHEN score_at_call >= 80 THEN '80-100'
-        WHEN score_at_call >= 70 THEN '70-79'
-        WHEN score_at_call >= 60 THEN '60-69'
-        ELSE 'Under 60'
+        WHEN score_at_call >= 69 THEN '69+'
+        WHEN score_at_call >= 61 THEN '61-68'
+        WHEN score_at_call >= 53 THEN '53-60'
+        ELSE 'Under 52'
       END as band,
       COUNT(*) as total,
       SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
-      ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate
-    FROM calls WHERE outcome != 'PENDING'
-    GROUP BY band ORDER BY band DESC
+      SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+      ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate,
+      ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+      ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+    FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL')
+    GROUP BY band ORDER BY
+      CASE band WHEN '69+' THEN 1 WHEN '61-68' THEN 2 WHEN '53-60' THEN 3 ELSE 4 END
   `).all();
 }
 
