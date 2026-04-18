@@ -3131,6 +3131,26 @@ body::before {
         <div class="stat-tile" style="--tile-color:var(--text3);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">⏳ PENDING</div><div class="tile-value" id="ovCallsPending">—</div><div class="tile-sub">unresolved</div></div>
       </div>
 
+      <!-- ═══ WEEKLY PERFORMANCE — new scoring engine stats ═══ -->
+      <div class="card" style="margin-bottom:14px;border-color:rgba(0,230,118,0.25)">
+        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(0,230,118,0.06),transparent)">
+          <div class="card-title" style="color:var(--green)"><span class="icon">📈</span>WEEKLY PERFORMANCE</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">NEW SCORING ENGINE v3</span>
+            <span style="font-family:'Orbitron',var(--mono);font-size:10px;color:var(--green);font-weight:700" id="ovWeeklyWinRate">—</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px">
+            <div class="stat-tile" style="--tile-color:var(--green)"><div class="tile-label" style="color:var(--green)">THIS WEEK W/L</div><div class="tile-value" style="color:var(--green)" id="ovWeekWL">—</div><div class="tile-sub" id="ovWeekWLSub">—</div></div>
+            <div class="stat-tile" style="--tile-color:var(--cyan)"><div class="tile-label" style="color:var(--cyan)">AVG PEAK X</div><div class="tile-value" style="color:var(--cyan)" id="ovWeekAvgX">—</div><div class="tile-sub">avg multiple</div></div>
+            <div class="stat-tile" style="--tile-color:var(--gold)"><div class="tile-label" style="color:var(--gold)">BEST X</div><div class="tile-value" style="color:var(--gold)" id="ovWeekBestX">—</div><div class="tile-sub">top performer</div></div>
+            <div class="stat-tile" style="--tile-color:var(--purple)"><div class="tile-label" style="color:var(--purple)">ALL-TIME</div><div class="tile-value" style="color:var(--purple)" id="ovAllTimeWR">—</div><div class="tile-sub" id="ovAllTimeSub">—</div></div>
+          </div>
+          <div id="ovWeeklyTable" style="font-family:var(--mono);font-size:9px;color:var(--text3)">Loading weekly data...</div>
+        </div>
+      </div>
+
       <!-- ═══ AI LEARNING DASHBOARD — is the bot getting smarter? ═══ -->
       <div class="card ai-learn-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(68,138,255,0.04),rgba(156,39,176,0.04));border:1px solid rgba(156,39,176,0.25)">
         <div class="card-hdr" style="border-bottom:1px solid rgba(156,39,176,0.2)">
@@ -4814,6 +4834,51 @@ async function loadOverview(){
   if(v8)renderV8Row(v8);
   const calls=await apiFetch('/api/calls?limit=6');
   if(calls)renderCallCards('recentCallsCards',calls.rows||calls.calls||[],true);
+
+  // Weekly performance stats
+  try {
+    const weekly = await apiFetch('/api/stats/weekly');
+    if (weekly && weekly.ok) {
+      var cw = weekly.currentWeek || {};
+      var at = weekly.allTime || {};
+      var cwResolved = (cw.wins||0) + (cw.losses||0);
+      var cwWR = cwResolved > 0 ? Math.round(cw.wins / cwResolved * 100) + '%' : '—';
+      setText('ovWeeklyWinRate', cwWR + ' WIN RATE');
+      setText('ovWeekWL', (cw.wins||0) + 'W / ' + (cw.losses||0) + 'L');
+      setText('ovWeekWLSub', (cw.total_calls||0) + ' calls, ' + (cw.pending||0) + ' pending');
+      setText('ovWeekAvgX', cw.avg_peak_x != null ? cw.avg_peak_x + 'x' : '—');
+      setText('ovWeekBestX', cw.best_x != null ? cw.best_x + 'x' : '—');
+      setText('ovAllTimeWR', at.winRate || '—');
+      setText('ovAllTimeSub', (at.wins||0) + 'W / ' + (at.losses||0) + 'L of ' + (at.total_calls||0));
+
+      // Weekly history table
+      var wks = weekly.weeks || [];
+      var tableEl = document.getElementById('ovWeeklyTable');
+      if (tableEl && wks.length) {
+        tableEl.innerHTML = '<div style="display:grid;grid-template-columns:1fr repeat(5,auto);gap:4px 12px;align-items:center">' +
+          '<div style="color:var(--text3);font-weight:700;font-size:8px;letter-spacing:1px">WEEK</div>' +
+          '<div style="color:var(--green);font-weight:700;font-size:8px;text-align:center">W</div>' +
+          '<div style="color:var(--red);font-weight:700;font-size:8px;text-align:center">L</div>' +
+          '<div style="color:var(--cyan);font-weight:700;font-size:8px;text-align:center">WIN %</div>' +
+          '<div style="color:var(--gold);font-weight:700;font-size:8px;text-align:center">AVG X</div>' +
+          '<div style="color:var(--purple);font-weight:700;font-size:8px;text-align:center">BEST X</div>' +
+          wks.map(function(w) {
+            var r = (w.wins||0) + (w.losses||0);
+            var wr = r > 0 ? Math.round(w.wins / r * 100) + '%' : '—';
+            var wrCol = r === 0 ? 'var(--text3)' : (w.wins / r >= 0.6 ? 'var(--green)' : w.wins / r >= 0.4 ? 'var(--gold)' : 'var(--red)');
+            return '<div style="color:var(--text2);font-size:9px">' + (w.week||'—') + '</div>' +
+              '<div style="color:var(--green);text-align:center;font-weight:700">' + (w.wins||0) + '</div>' +
+              '<div style="color:var(--red);text-align:center;font-weight:700">' + (w.losses||0) + '</div>' +
+              '<div style="color:' + wrCol + ';text-align:center;font-weight:700">' + wr + '</div>' +
+              '<div style="color:var(--cyan);text-align:center">' + (w.avg_peak_x != null ? w.avg_peak_x + 'x' : '—') + '</div>' +
+              '<div style="color:var(--gold);text-align:center">' + (w.best_x != null ? w.best_x + 'x' : '—') + '</div>';
+          }).join('') +
+        '</div>';
+      } else if (tableEl) {
+        tableEl.innerHTML = '<div style="text-align:center;color:var(--text3);padding:8px">No weekly data yet — calls will populate this</div>';
+      }
+    }
+  } catch(e) { console.warn('[weekly]', e.message); }
 
   // update brain rating
   try{ const d=await apiFetch('/api/stats'); if(d) updateBrainRating({wins:d.wins||0,losses:d.losses||0,total:d.total||0}); }catch{}

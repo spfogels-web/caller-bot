@@ -7575,6 +7575,116 @@ app.post('/api/calls/refresh-all-peaks', async (_req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// ── Reset scoreboard — archive old calls, keep only specified token(s) ────────
+app.post('/api/calls/reset-scoreboard', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const { keepTokens = [] } = req.body ?? {};
+    const keepUpper = keepTokens.map(t => t.toUpperCase().replace(/^\$/, ''));
+
+    // Count what we're archiving
+    const totalCalls = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n;
+
+    // Archive old calls to a backup table before deleting
+    try {
+      dbInstance.exec(`CREATE TABLE IF NOT EXISTS calls_archive AS SELECT * FROM calls WHERE 0`);
+    } catch {} // already exists
+
+    // Move all calls except kept tokens to archive
+    let keepClause = '';
+    if (keepUpper.length > 0) {
+      keepClause = ` AND UPPER(token) NOT IN (${keepUpper.map(() => '?').join(',')})`;
+    }
+    const archived = dbInstance.prepare(`INSERT INTO calls_archive SELECT * FROM calls WHERE 1=1${keepClause}`).run(...keepUpper);
+    const deleted = dbInstance.prepare(`DELETE FROM calls WHERE 1=1${keepClause}`).run(...keepUpper);
+
+    // Also clear audit_archive outcomes for old calls
+    try {
+      if (keepUpper.length > 0) {
+        dbInstance.prepare(`UPDATE audit_archive SET outcome = NULL, peak_multiple = NULL, peak_mcap = NULL WHERE UPPER(token) NOT IN (${keepUpper.map(() => '?').join(',')})`).run(...keepUpper);
+      } else {
+        dbInstance.prepare(`UPDATE audit_archive SET outcome = NULL, peak_multiple = NULL, peak_mcap = NULL`).run();
+      }
+    } catch {}
+
+    const remaining = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n;
+    console.log(`[scoreboard] RESET: archived ${archived.changes} calls, deleted ${deleted.changes}, keeping ${remaining} (tokens: ${keepUpper.join(', ') || 'none'})`);
+    logEvent('INFO', 'SCOREBOARD_RESET', `Archived ${archived.changes} old calls. Keeping: ${keepUpper.join(', ') || 'none'}. Remaining: ${remaining}`);
+
+    res.json({
+      ok: true,
+      archived: archived.changes,
+      deleted: deleted.changes,
+      remaining,
+      keptTokens: keepUpper,
+      message: `Scoreboard reset. ${archived.changes} old calls archived. ${remaining} calls remaining.`,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── Weekly performance stats ─────────────────────────────────────────────────
+app.get('/api/stats/weekly', (req, res) => {
+  setCors(res);
+  try {
+    // Get weekly breakdown for the last 8 weeks
+    const weeks = dbInstance.prepare(`
+      SELECT
+        strftime('%Y-W%W', COALESCE(called_at, posted_at)) as week,
+        COUNT(*) as total_calls,
+        SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+        SUM(CASE WHEN outcome = 'NEUTRAL' THEN 1 ELSE 0 END) as neutrals,
+        SUM(CASE WHEN outcome IS NULL OR outcome = 'PENDING' THEN 1 ELSE 0 END) as pending,
+        ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+        ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x,
+        ROUND(AVG(CASE WHEN outcome = 'WIN' AND peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_win_x,
+        ROUND(AVG(CASE WHEN outcome = 'LOSS' AND peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_loss_x,
+        MIN(COALESCE(called_at, posted_at)) as week_start,
+        MAX(COALESCE(called_at, posted_at)) as week_end
+      FROM calls
+      GROUP BY week
+      ORDER BY week DESC
+      LIMIT 8
+    `).all();
+
+    // Current week summary
+    const current = dbInstance.prepare(`
+      SELECT
+        COUNT(*) as total_calls,
+        SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+        SUM(CASE WHEN outcome = 'NEUTRAL' THEN 1 ELSE 0 END) as neutrals,
+        SUM(CASE WHEN outcome IS NULL OR outcome = 'PENDING' THEN 1 ELSE 0 END) as pending,
+        ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+        ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+      FROM calls
+      WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+    `).get();
+
+    // All-time since reset
+    const allTime = dbInstance.prepare(`
+      SELECT
+        COUNT(*) as total_calls,
+        SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+        ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+        ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+      FROM calls
+    `).get();
+
+    const resolved = (allTime.wins || 0) + (allTime.losses || 0);
+    res.json({
+      ok: true,
+      currentWeek: current,
+      allTime: {
+        ...allTime,
+        winRate: resolved > 0 ? Math.round(allTime.wins / resolved * 100) + '%' : '—',
+      },
+      weeks,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // On-demand snapshot refresh for a single call — user clicks "refresh peak"
 // without waiting for the tracker loop. Fetches DexScreener live and rolls peaks.
 app.post('/api/calls/:id/refresh', async (req, res) => {
