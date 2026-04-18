@@ -9045,6 +9045,78 @@ app.get('/api/wallets/rankings', (req, res) => {
 // Instant SOL-balance classification for brain_scan wallets still sitting at NEUTRAL.
 // Runs in <50ms (pure SQLite, no external APIs). Call this before the Dune scan so
 // users see categories immediately instead of waiting 2 minutes.
+// ── Top 200 wallet activity feed — every move they make ─────────────────────
+app.get('/api/wallets/top-activity', (req, res) => {
+  setCors(res);
+  try {
+    const { limit = 200, hours = 72 } = req.query;
+
+    // Get top 200 wallets by score
+    const topWallets = dbInstance.prepare(`
+      SELECT address, label, category, win_rate, avg_roi, trade_count, score,
+             wins_found_in, losses_in
+      FROM tracked_wallets
+      WHERE is_blacklist=0 AND category IN ('WINNER','SMART_MONEY','ALPHA')
+      ORDER BY score DESC, win_rate DESC
+      LIMIT ?
+    `).all(parseInt(limit));
+
+    if (!topWallets.length) {
+      return res.json({ ok: true, wallets: [], activity: [], summary: { totalWallets: 0 } });
+    }
+
+    const addresses = topWallets.map(w => w.address);
+
+    // Get recent activity for these wallets
+    const placeholders = addresses.map(() => '?').join(',');
+    const activity = dbInstance.prepare(`
+      SELECT wa.wallet_address, wa.token_mint, wa.side, wa.token_amount, wa.block_time, wa.detected_at,
+             tw.label, tw.category, tw.score as wallet_score, tw.win_rate as wallet_win_rate
+      FROM wallet_activity wa
+      LEFT JOIN tracked_wallets tw ON tw.address = wa.wallet_address
+      WHERE wa.wallet_address IN (${placeholders})
+        AND wa.detected_at > datetime('now', '-' || ? || ' hours')
+      ORDER BY wa.block_time DESC, wa.id DESC
+      LIMIT 500
+    `).all(...addresses, parseInt(hours));
+
+    // Group activity by token to find convergence (multiple wallets buying same token)
+    const tokenBuyers = {};
+    for (const a of activity) {
+      if (a.side !== 'BUY') continue;
+      if (!tokenBuyers[a.token_mint]) tokenBuyers[a.token_mint] = new Set();
+      tokenBuyers[a.token_mint].add(a.wallet_address);
+    }
+    const convergence = Object.entries(tokenBuyers)
+      .filter(([, wallets]) => wallets.size >= 2)
+      .map(([token, wallets]) => ({ token, walletCount: wallets.size, wallets: [...wallets] }))
+      .sort((a, b) => b.walletCount - a.walletCount);
+
+    // Per-wallet recent trade summary
+    const walletSummaries = topWallets.map(w => {
+      const trades = activity.filter(a => a.wallet_address === w.address);
+      const buys = trades.filter(t => t.side === 'BUY').length;
+      const sells = trades.filter(t => t.side === 'SELL').length;
+      const uniqueTokens = new Set(trades.map(t => t.token_mint)).size;
+      const lastTrade = trades[0]?.detected_at || null;
+      return { ...w, recentBuys: buys, recentSells: sells, uniqueTokens, lastTrade };
+    }).filter(w => w.recentBuys > 0 || w.recentSells > 0);
+
+    res.json({
+      ok: true,
+      wallets: walletSummaries,
+      activity: activity.slice(0, 200),
+      convergence,
+      summary: {
+        totalWallets: topWallets.length,
+        activeWallets: walletSummaries.length,
+        totalTrades: activity.length,
+        convergenceAlerts: convergence.length,
+      },
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.post('/api/wallets/classify-by-sol', (req, res) => {
   setCors(res);
   try {
