@@ -38,23 +38,22 @@ const MIN_PAIR_AGE_MINUTES = 0;
 const MAX_PAIR_AGE_HOURS   = Number(process.env.MAX_PAIR_AGE_HOURS ?? 4);
 
 const DEFAULT_FILTERS = {
-  // CHANGED: Early stage filters significantly lowered to catch brand new coins
+  // v6: Raised minimums — under $8K mcap has no real data to score
   early: {
-    minLiquidity: 3_000,     // was 8_000
-    minVolume1h:  500,       // was 2_000
-    minBuys1h:    5,         // was 10
-    minTxns1h:    8,         // was 20
-    minMarketCap: 1_000,     // was 5_000
+    minLiquidity: 5_000,
+    minVolume1h:  1_000,
+    minBuys1h:    8,
+    minTxns1h:    15,
+    minMarketCap: 8_000,     // was 1K — too early, no data
     maxMarketCap: 5_000_000,
     maxAgeHours:  0.5,
   },
-  // CHANGED: Mid stage filters lowered
   mid: {
-    minLiquidity: 5_000,     // was 12_000
-    minVolume1h:  2_000,     // was 5_000
-    minBuys1h:    10,        // was 20
-    minTxns1h:    20,        // was 40
-    minMarketCap: 3_000,     // was 8_000
+    minLiquidity: 8_000,
+    minVolume1h:  3_000,
+    minBuys1h:    15,
+    minTxns1h:    30,
+    minMarketCap: 8_000,     // was 3K — not enough signal
     maxMarketCap: 10_000_000,
     maxAgeHours:  2,
   },
