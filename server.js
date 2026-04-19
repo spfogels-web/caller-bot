@@ -5102,7 +5102,7 @@ async function runSelfImproveLoop() {
                  ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct,
                  ca.holders, ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours,
                  ca.launch_unique_buyer_ratio, ca.buy_velocity,
-                 c.openai_decision AS openai_called, c.openai_conviction AS openai_confidence
+                 ca.openai_decision AS openai_called, ca.openai_conviction AS openai_confidence
           FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
           WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
           ORDER BY c.posted_at DESC LIMIT 50
@@ -8555,18 +8555,19 @@ async function runApiHealthCheck() {
     _apiHealthState.dexscreener = false; checks.dexscreener = false;
   }
 
-  // Claude
+  // Claude — use a minimal valid request to check API health
   if (CLAUDE_API_KEY) {
     try {
       const r = await fetch(CLAUDE_API_URL, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 10, messages: [{ role: 'user', content: 'ping' }] }),
-        signal: AbortSignal.timeout(10000),
+        body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 32, messages: [{ role: 'user', content: 'Say OK' }] }),
+        signal: AbortSignal.timeout(12000),
       });
-      checks.claude = r.ok;
-      if (!r.ok && _apiHealthState.claude) alerts.push(`❌ <b>Claude API DOWN</b> — HTTP ${r.status}. AI scoring offline — bot can only use Foundation Signals.`);
-      if (r.ok && !_apiHealthState.claude) alerts.push(`✅ <b>Claude API RECOVERED</b>`);
-      _apiHealthState.claude = r.ok;
+      // 200 = working. 429 = rate limited but API is alive. Both count as "up".
+      checks.claude = r.ok || r.status === 429;
+      if (!checks.claude && _apiHealthState.claude) alerts.push(`❌ <b>Claude API DOWN</b> — HTTP ${r.status}. AI scoring offline — bot can only use Foundation Signals.`);
+      if (checks.claude && !_apiHealthState.claude) alerts.push(`✅ <b>Claude API RECOVERED</b>`);
+      _apiHealthState.claude = checks.claude;
     } catch (e) {
       if (_apiHealthState.claude) alerts.push(`❌ <b>Claude API DOWN</b> — ${e.message}. No AI evaluation.`);
       _apiHealthState.claude = false; checks.claude = false;
