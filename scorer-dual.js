@@ -103,6 +103,13 @@ export function calculateBehaviorMetrics(candidate) {
     telegram:             !!c.telegram,
     deployerHistoryRisk:  c.deployerHistoryRisk ?? c.deployer_history_risk ?? null,
     liqMcapRatio:         (c.liquidity && c.marketCap) ? c.liquidity / c.marketCap : null,
+    // LunarCrush social data
+    socialScore:          safeNum(c.socialScore ?? c.galaxyScore),
+    socialVolume24h:      safeNum(c.socialVolume24h),
+    socialSentiment:      safeNum(c.socialSentiment),
+    twitterMentions:      safeNum(c.twitterMentions),
+    socialSpike:          !!(c.socialSpike),
+    lunarCrushOk:         !!(c.lunarCrushOk),
   };
 }
 
@@ -154,6 +161,15 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   if (m.buys1h >= 80 && bv != null && bv >= 0.3) {
     p = Math.min(maxVV, p + Math.round(maxVV * 0.06));
     reasons.push(`Sustained pressure: ${m.buys1h} buys in 1h`);
+  }
+
+  // Social spike bonus — Twitter buzz amplifies momentum
+  if (m.socialSpike) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.08));
+    reasons.push('Social spike detected — Twitter volume 2x+ above average');
+  } else if (m.twitterMentions > 20) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.04));
+    reasons.push(`Active Twitter presence (${m.twitterMentions} mentions)`);
   }
   parts.volumeVelocity = p;
 

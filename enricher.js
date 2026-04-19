@@ -36,8 +36,11 @@ const getHeliusRpc = () =>
 const getHeliusApi = () =>
   `https://api.helius.xyz/v0`;
 
-const getBirdeyeKey = () => process.env.BIRDEYE_API_KEY ?? '';
-const getHeliusKey  = () => process.env.HELIUS_API_KEY  ?? '';
+const getBirdeyeKey    = () => process.env.BIRDEYE_API_KEY ?? '';
+const getHeliusKey    = () => process.env.HELIUS_API_KEY  ?? '';
+const getLunarCrushKey = () => process.env.LUNARCRUSH_API_KEY ?? '';
+
+const LUNARCRUSH_BASE = 'https://lunarcrush.com/api4/public';
 
 const LP_PROGRAM_IDS = new Set([
   'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',     // Orca Whirlpool
@@ -641,12 +644,13 @@ function addPlaceholderHistoryFields(enriched) {
   if (enriched.websiteDomainAge   == null) enriched.websiteDomainAge   = null;
 }
 
-function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData) {
+function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, lunarData = {}) {
   const merged = {
     ...candidate,
     ...birdeyeData,
     ...heliusData,
     ...bubblemapData,
+    ...lunarData,
   };
 
   // FIXED: Comprehensive scanner data fallback
@@ -687,6 +691,54 @@ function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData) 
 }
 
 // ─── Main Export ──────────────────────────────────────────────────────────────
+
+// ─── LunarCrush Social Intelligence ──────────────────────────────────────────
+async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
+  const result = { lunarCrushOk: false };
+  const key = getLunarCrushKey();
+  if (!key) return result;
+
+  // Try by contract address first (most accurate), fall back to symbol
+  const queries = [];
+  if (contractAddress) queries.push(`coins/${contractAddress}/v1`);
+  if (tokenSymbol) queries.push(`coins/${tokenSymbol}/v1`);
+
+  for (const path of queries) {
+    try {
+      const res = await fetch(`${LUNARCRUSH_BASE}/${path}`, {
+        headers: { 'Authorization': `Bearer ${key}` },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const d = data?.data;
+      if (!d) continue;
+
+      result.lunarCrushOk = true;
+      result.socialScore        = d.galaxy_score ?? d.alt_rank_30d ?? null;
+      result.socialVolume       = d.social_volume ?? null;
+      result.socialVolume24h    = d.social_volume_24h ?? d.social_volume ?? null;
+      result.socialDominance    = d.social_dominance ?? null;
+      result.socialSentiment    = d.sentiment ?? null;
+      result.twitterMentions    = d.tweet_mentions ?? d.tweets ?? null;
+      result.twitterEngagement  = d.tweet_interactions ?? null;
+      result.twitterFollowers   = d.twitter_followers ?? null;
+      result.socialContributors = d.social_contributors ?? null;
+      result.galaxyScore        = d.galaxy_score ?? null;
+      result.altRank            = d.alt_rank ?? null;
+      result.newsVolume         = d.news ?? null;
+      result.socialSpike        = (d.social_volume_24h ?? 0) > (d.social_volume ?? 1) * 2;
+
+      console.log(`[enricher:lunarcrush] ✓ galaxy:${result.galaxyScore ?? '?'} sentiment:${result.socialSentiment ?? '?'} tweets:${result.twitterMentions ?? '?'} vol24h:${result.socialVolume24h ?? '?'}`);
+      return result;
+    } catch (e) {
+      // Try next query
+    }
+  }
+
+  console.log(`[enricher:lunarcrush] ✗ no data for ${tokenSymbol ?? contractAddress?.slice(0,8) ?? '?'}`);
+  return result;
+}
 
 export async function enrichCandidate(candidate) {
   const ca          = candidate.contractAddress;
@@ -732,10 +784,11 @@ export async function enrichCandidate(candidate) {
     ? Promise.resolve({ bubblemapOk: false, bubbleMapRisk: 'PENDING' })
     : enrichWithBubbleMap(ca);
 
-  const [birdeyeData, heliusData, bubblemapData] = await Promise.all([
+  const [birdeyeData, heliusData, bubblemapData, lunarData] = await Promise.all([
     enrichWithBirdeyeWithRetry(ca, candidate.pairAgeHours ?? ageHours),
     enrichWithHelius(ca, pairAddress),
     bubblemapPromise,
+    enrichWithLunarCrush(candidate.token, ca),
   ]);
 
   // ── DexScreener fallback — fill buys/sells/mcap if scanner didn't provide them ──
@@ -778,7 +831,7 @@ export async function enrichCandidate(candidate) {
     }
   }
 
-  const enriched = mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData);
+  const enriched = mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, lunarData);
 
   // Derived tags / flags
   enriched.narrativeTags = uniq([

@@ -1957,6 +1957,13 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
     `Vol Velocity: <b>${candidate.volumeVelocity != null ? candidate.volumeVelocity.toFixed(2) : '?'}</b>   Buy Velocity: <b>${candidate.buyVelocity != null ? candidate.buyVelocity.toFixed(2) : '?'}</b>\n` +
     `Liq/MCap: <b>${candidate.liquidity && candidate.marketCap ? ((candidate.liquidity/candidate.marketCap)*100).toFixed(0) + '%' : '?'}</b>   Smart Money: <b>${candidate.smartMoneyScore ?? candidate.walletIntel?.smartMoneyScore ?? '—'}</b>\n` +
     `Type: <b>${candidate.candidateType ?? '?'}</b>   Winners: <b>${candidate.knownWinnerWallets?.length ?? candidate.walletIntel?.knownWinnerWalletCount ?? 0}</b>\n\n` +
+    (candidate.lunarCrushOk ? (
+      `<b>📱 Social Intel (LunarCrush):</b>\n` +
+      `Galaxy Score: <b>${candidate.galaxyScore ?? '—'}</b>   Sentiment: <b>${candidate.socialSentiment ?? '—'}</b>\n` +
+      `Twitter Mentions: <b>${candidate.twitterMentions ?? '—'}</b>   Social Vol: <b>${candidate.socialVolume24h ?? '—'}</b>\n` +
+      (candidate.socialSpike ? `🚀 <b>SOCIAL SPIKE DETECTED</b> — volume 2x+ above average\n` : '') +
+      '\n'
+    ) : '') +
     `<b>✅ Why It Passed:</b>\n${bullLines}\n\n` +
     `<b>⚠️ Watchouts:</b>\n${watchLines}\n\n` +
     buildSLTPBlock(candidate) +
