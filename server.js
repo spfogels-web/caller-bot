@@ -8387,6 +8387,9 @@ app.get('/api/narrative-momentum', (req, res) => {
 
 // ── Telegram Webhook ──────────────────────────────────────────────────────────
 
+// ── Telegram chat toggle — "chat on" / "chat off" controls responses ────────
+let _telegramChatEnabled = true;
+
 // ── Free-text Telegram chat — talk back to the bot ──────────────────────────
 async function handleFreeChatTelegram(chatId, text) {
   if (!CLAUDE_API_KEY) { await sendTelegramMessage(chatId, '⚠️ Claude API key not configured'); return; }
@@ -8580,7 +8583,24 @@ app.post('/webhook', async (req, res) => {
       default:
         // Free-text chat — reply with Claude if it's from admin
         if (String(fromId) === String(ADMIN_TELEGRAM_ID) && message.text && !message.text.startsWith('/')) {
-          await handleFreeChatTelegram(chatId, message.text);
+          const lower = message.text.trim().toLowerCase();
+
+          // Toggle chat responses on/off — calls always post regardless
+          if (lower === 'chat on') {
+            _telegramChatEnabled = true;
+            await sendTelegramMessage(chatId, '✅ Chat responses <b>ON</b>. I\'ll respond to your messages. Call alerts are always active.');
+            break;
+          }
+          if (lower === 'chat off') {
+            _telegramChatEnabled = false;
+            await sendTelegramMessage(chatId, '🔇 Chat responses <b>OFF</b>. I\'ll only post call alerts. Send "chat on" to re-enable.');
+            break;
+          }
+
+          // Only respond if chat is enabled
+          if (_telegramChatEnabled) {
+            await handleFreeChatTelegram(chatId, message.text);
+          }
         }
         break;
     }
