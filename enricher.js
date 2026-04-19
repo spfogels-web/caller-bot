@@ -233,9 +233,14 @@ async function enrichWithHelius(ca, pairAddress = null) {
     heliusRpc('getAccountInfo', [ca, { encoding: 'jsonParsed' }], 'mintInfo'),
     heliusRpc('getTokenLargestAccounts', [ca, { commitment: 'finalized' }], 'topHolders'),
     heliusRpc('getTokenSupply', [ca], 'supply'),
-    // CRITICAL FIX: Query pair address first — that's where swap txns live
     fetchHeliusTransactions(ca, pairAddress, key),
   ]);
+
+  // Log what Helius returned so we can diagnose data gaps
+  const holdersCount = holdersData?.result?.value?.length ?? 0;
+  const supplyOk = !!supplyData?.result?.value;
+  const txCount = Array.isArray(txData) ? txData.length : 0;
+  console.log(`[enricher:helius] Raw data — holders:${holdersCount} supply:${supplyOk?'✓':'✗'} txns:${txCount} mint:${mintData?.result?.value?'✓':'✗'}`);
 
   // ── Mint / Freeze / Supply ────────────────────────────────────────────────
   const mintInfo = mintData?.result?.value?.data?.parsed?.info;
@@ -381,15 +386,20 @@ async function enrichWithHelius(ca, pairAddress = null) {
     result.launchTopBuyerShare  = totalTxs > 0 ? topBuyerTxs / totalTxs : null;
     result.launchTop3BuyerShare = totalTxs > 0 ? top3BuyerTxs / totalTxs : null;
 
-    if (totalTxs >= 5) {
+    if (totalTxs >= 3) { // lowered from 5 — even 3 txns can reveal bundling
       const bundleRatio = uniqueCount / totalTxs;
 
       if      (bundleRatio < 0.25) result.bundleRisk_helius = 'SEVERE';
       else if (bundleRatio < 0.40) result.bundleRisk_helius = 'HIGH';
       else if (bundleRatio < 0.60) result.bundleRisk_helius = 'MEDIUM';
-      else                         result.bundleRisk_helius = 'LOW';
+      else if (bundleRatio < 0.80) result.bundleRisk_helius = 'LOW';
+      else                         result.bundleRisk_helius = 'NONE';
 
       result.sniperWalletCount = Math.max(0, totalTxs - uniqueCount);
+    } else if (totalTxs > 0) {
+      // Even 1-2 txns — mark as LOW, at least it's not "?"
+      result.bundleRisk_helius = 'LOW';
+      result.sniperWalletCount = 0;
     }
 
     let launchQuality = 50;
@@ -685,19 +695,46 @@ export async function enrichCandidate(candidate) {
 
   if (!ca) return candidate;
 
-  console.log(`[enricher] ━━ Enriching $${candidate.token ?? ca} (${ca.slice(0, 8)}…) age:${ageHours != null ? ageHours.toFixed(1) + 'h' : '?'}`);
+  console.log(`[enricher] ━━ Enriching $${candidate.token ?? ca} (${ca.slice(0, 8)}…) age:${ageHours != null ? ageHours.toFixed(1) + 'h' : '?'} pair:${pairAddress ? pairAddress.slice(0,8) : 'NONE'}`);
 
-  const isVeryNew = ageHours != null && ageHours < BUBBLEMAP_MIN_AGE_HOURS;
+  // ── Pre-flight: if no pairAddress, grab it from DexScreener first ──────
+  // Helius TX fetch needs the pair address to find swap transactions.
+  // Tokens from the Helius WebSocket often have no pair address.
+  if (!pairAddress) {
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+        headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(5000),
+      });
+      if (dexRes.ok) {
+        const dexData = await dexRes.json();
+        const pair = (dexData?.pairs ?? []).filter(p => p.chainId === 'solana').sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        if (pair?.pairAddress) {
+          pairAddress = pair.pairAddress;
+          // Also fill in missing basic data
+          candidate.token      = candidate.token      ?? pair.baseToken?.symbol ?? null;
+          candidate.tokenName  = candidate.tokenName  ?? pair.baseToken?.name ?? null;
+          candidate.buys1h     = candidate.buys1h     ?? pair.txns?.h1?.buys ?? null;
+          candidate.sells1h    = candidate.sells1h    ?? pair.txns?.h1?.sells ?? null;
+          candidate.marketCap  = candidate.marketCap  ?? pair.marketCap ?? pair.fdv ?? null;
+          candidate.liquidity  = candidate.liquidity  ?? pair.liquidity?.usd ?? null;
+          if (pair.pairCreatedAt && candidate.pairAgeHours == null) {
+            candidate.pairAgeHours = (Date.now() - pair.pairCreatedAt) / 3_600_000;
+          }
+          console.log(`[enricher] Pre-flight DexScreener: got pairAddress ${pairAddress.slice(0,8)} + basic data`);
+        }
+      }
+    } catch (e) { console.warn('[enricher] Pre-flight DexScreener failed:', e.message); }
+  }
 
-  // FIXED: Skip BubbleMap for new tokens — it hasn't indexed them yet
-  // Return PENDING instead of null so scorer knows it's expected, not suspicious
+  const isVeryNew = (candidate.pairAgeHours ?? ageHours) != null && (candidate.pairAgeHours ?? ageHours) < BUBBLEMAP_MIN_AGE_HOURS;
+
   const bubblemapPromise = isVeryNew
     ? Promise.resolve({ bubblemapOk: false, bubbleMapRisk: 'PENDING' })
     : enrichWithBubbleMap(ca);
 
   const [birdeyeData, heliusData, bubblemapData] = await Promise.all([
-    enrichWithBirdeyeWithRetry(ca, ageHours),  // with retry for new tokens
-    enrichWithHelius(ca, pairAddress),          // FIXED: passes pairAddress
+    enrichWithBirdeyeWithRetry(ca, candidate.pairAgeHours ?? ageHours),
+    enrichWithHelius(ca, pairAddress),
     bubblemapPromise,
   ]);
 
