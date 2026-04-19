@@ -5273,6 +5273,99 @@ app.post('/api/self-improve/run', async (req, res) => {
   setImmediate(runSelfImproveLoop);
 });
 
+// ── Audit Chat — ask questions, teach the bot, feed it URLs/files ────────────
+app.post('/api/audit-chat', express.json({ limit: '2mb' }), async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'Claude API not configured' });
+  try {
+    const { message = '', fileContent, fileName, urls = [] } = req.body ?? {};
+
+    // Gather context
+    const stats = (() => { try {
+      const total = dbInstance.prepare('SELECT COUNT(*) as n FROM calls').get().n;
+      const wins = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'").get().n;
+      const losses = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'").get().n;
+      return { total, wins, losses };
+    } catch { return {}; } })();
+
+    const recentAudit = (() => { try {
+      return dbInstance.prepare(`SELECT param, reason FROM tuning_audit ORDER BY created_at DESC LIMIT 10`).all();
+    } catch { return []; } })();
+
+    const memories = (() => { try {
+      return dbInstance.prepare(`SELECT title, content, category FROM bot_knowledge ORDER BY created_at DESC LIMIT 20`).all();
+    } catch { return []; } })();
+
+    // Fetch URL content if provided
+    let urlContent = '';
+    let urlParsed = false;
+    for (const url of urls.slice(0, 3)) {
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'PulseCaller/1.0' } });
+        if (r.ok) {
+          const text = await r.text();
+          // Strip HTML tags for readability, limit to 3000 chars
+          const clean = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000);
+          urlContent += `\n\nURL CONTENT (${url}):\n${clean}`;
+          urlParsed = true;
+        }
+      } catch (e) { urlContent += `\n\n[Failed to fetch ${url}: ${e.message}]`; }
+    }
+
+    // Build prompt
+    const systemPrompt = `You are Pulse Caller's AI brain. You help the operator understand the bot's performance, learn from their input, and improve.
+
+BOT STATUS: ${stats.total||0} calls, ${stats.wins||0} wins, ${stats.losses||0} losses.
+SCORING: Foundation Signals v3 — Volume Velocity (35), Buy Pressure (25), Wallet Quality (20), Holder Distribution (12), Liquidity Health (8).
+CONFIG: ${JSON.stringify(SCORING_CONFIG)}
+TUNING: ${JSON.stringify(TUNING_CONFIG)}
+
+RECENT CHANGES: ${JSON.stringify(recentAudit.slice(0, 5))}
+
+BOT MEMORIES: ${memories.slice(0, 10).map(m => m.title + ': ' + (m.content||'').slice(0, 100)).join(' | ')}
+
+RULES:
+- Keep answers concise (under 200 words unless explaining something complex)
+- If the user teaches you something, say you'll remember it and suggest saving it
+- If the user shares a URL, analyze the content and extract actionable insights
+- If the user uploads a file, analyze it for patterns, strategies, or data
+- Always relate answers back to how it affects the bot's scoring and calling
+- Be direct and data-driven`;
+
+    let userContent = message;
+    if (fileContent) userContent += `\n\nUPLOADED FILE (${fileName}):\n${fileContent.slice(0, 5000)}`;
+    if (urlContent) userContent += urlContent;
+
+    const claudeRes = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 600, system: systemPrompt, messages: [{ role: 'user', content: userContent }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!claudeRes.ok) return res.status(502).json({ ok: false, error: 'Claude API: ' + claudeRes.status });
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+
+    // Auto-save to bot memory if the user is teaching something
+    let savedToMemory = false;
+    const isTeaching = /remember|learn|save|note|strategy|rule|pattern|always|never|important/i.test(message);
+    if (isTeaching && message.length > 20) {
+      try {
+        dbInstance.prepare(`INSERT INTO bot_knowledge (title, content, category) VALUES (?,?,?)`).run(
+          'Operator teaching: ' + message.slice(0, 60),
+          message + (fileContent ? '\n\n[File: ' + fileName + ']\n' + fileContent.slice(0, 500) : '') + (urlContent ? urlContent.slice(0, 500) : ''),
+          'operator_teaching'
+        );
+        savedToMemory = true;
+      } catch {}
+    }
+
+    res.json({ ok: true, reply, savedToMemory, urlParsed });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/api/self-improve/status', (req, res) => {
   setCors(res);
   const lastRun = (() => { try { return dbInstance.prepare(`SELECT created_at FROM tuning_audit WHERE param='[SELF-IMPROVE]' ORDER BY created_at DESC LIMIT 1`).get()?.created_at; } catch { return null; } })();
