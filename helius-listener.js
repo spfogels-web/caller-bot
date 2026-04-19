@@ -128,7 +128,8 @@ export class HeliusListener extends EventEmitter {
     };
 
     this.ws.onerror = (err) => {
-      console.warn('[helius] WebSocket error:', err.message || 'unknown');
+      const msg = err?.message || err?.error?.message || 'unknown';
+      console.error('[helius] WebSocket error:', msg, err?.error?.code || '');
     };
 
     this.ws.onclose = (code) => {

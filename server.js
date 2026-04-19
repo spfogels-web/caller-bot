@@ -8982,6 +8982,30 @@ app.get('/api/bot/status', (req, res) => {
 });
 
 // Health check endpoint for dashboard
+// Force reconnect Helius WebSocket
+app.post('/api/helius/reconnect', (req, res) => {
+  setCors(res);
+  try {
+    if (heliusListener) {
+      heliusListener.stop();
+      heliusListener = null;
+    }
+    if (HELIUS_API_KEY) {
+      heliusListener = startHeliusListener(HELIUS_API_KEY);
+      heliusListener.on('new_candidate', async (candidate) => {
+        if (!_botActive || !candidate?.contractAddress) return;
+        if (isRecentlySeen(candidate.contractAddress)) return;
+        if (isBlocklisted(candidate.contractAddress)) return;
+        console.log(`[helius] ⚡ Fast-track: $${candidate.token ?? '?'} (${candidate.stage})`);
+        processCandidate(candidate, false).catch(() => {});
+      });
+      res.json({ ok: true, message: 'Helius WebSocket reconnecting...' });
+    } else {
+      res.json({ ok: false, error: 'No HELIUS_API_KEY' });
+    }
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/api/health', async (req, res) => {
   setCors(res);
   res.json({ ok: true, apis: _apiHealthState });
