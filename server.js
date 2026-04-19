@@ -8390,6 +8390,59 @@ app.get('/api/narrative-momentum', (req, res) => {
 // ── Telegram chat toggle — "chat on" / "chat off" controls responses ────────
 let _telegramChatEnabled = true;
 
+// ── Group chat handler — short, funny, alpha-dropping responses ─────────────
+async function handleGroupChat(chatId, text, userName) {
+  if (!CLAUDE_API_KEY) return;
+  try {
+    // Get quick bot stats for context
+    const stats = (() => { try {
+      const total = dbInstance.prepare('SELECT COUNT(*) as n FROM calls').get().n;
+      const wins = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'").get().n;
+      const losses = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'").get().n;
+      return { total, wins, losses, wr: (wins+losses)>0 ? Math.round(wins/(wins+losses)*100) : 0 };
+    } catch { return { total: 0, wins: 0, losses: 0, wr: 0 }; } })();
+
+    const systemPrompt = `You are Pulse Caller — a witty, confident crypto call bot in a Telegram group. You scan Solana micro-caps and call gems.
+
+PERSONALITY:
+- Short responses ONLY. Max 2-3 sentences. Never write paragraphs.
+- Funny but not cringe. Quick wit. Crypto-native slang is fine.
+- Confident but not arrogant. You've got a ${stats.wr}% win rate.
+- Drop alpha casually. Share quick insights about crypto markets.
+- Greet people in creative ways. No boring "hello" responses.
+- Respectful always. Roast the market, never the person.
+- Use emojis sparingly — 1-2 max per message.
+- If someone asks about a token, give a quick take.
+- If someone says gm/gn, respond with energy.
+- If someone asks your win rate or stats: ${stats.wins}W/${stats.losses}L (${stats.wr}%).
+
+NEVER:
+- Write more than 3 sentences
+- Use HTML tags
+- Be rude to anyone
+- Give financial advice (say "not financial advice" if pressed)
+- Respond with generic AI language
+
+The user's name is ${userName}.`;
+
+    const res = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 150, system: systemPrompt, messages: [{ role: 'user', content: text }] }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!res.ok) return;
+    const data = await res.json();
+    const reply = (data.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+    if (reply && reply.length > 0 && reply.length < 500) {
+      await sendTelegramMessage(chatId, reply);
+    }
+  } catch (err) {
+    console.warn('[group-chat]', err.message);
+  }
+}
+
 // ── Free-text Telegram chat — talk back to the bot ──────────────────────────
 async function handleFreeChatTelegram(chatId, text) {
   if (!CLAUDE_API_KEY) { await sendTelegramMessage(chatId, '⚠️ Claude API key not configured'); return; }
@@ -8581,26 +8634,49 @@ app.post('/webhook', async (req, res) => {
       case '/top':       await handleTopCommand(chatId);                break;
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
       default:
-        // Free-text chat — reply with Claude if it's from admin
-        if (String(fromId) === String(ADMIN_TELEGRAM_ID) && message.text && !message.text.startsWith('/')) {
-          const lower = message.text.trim().toLowerCase();
+        if (!message.text || message.text.startsWith('/')) break;
+        const lower = message.text.trim().toLowerCase();
+        const isAdmin = String(fromId) === String(ADMIN_TELEGRAM_ID);
+        const isGroup = message.chat?.type === 'group' || message.chat?.type === 'supergroup';
+        const firstName = message.from?.first_name || 'anon';
 
-          // Toggle chat responses on/off — calls always post regardless
-          if (lower === 'chat on') {
-            _telegramChatEnabled = true;
-            await sendTelegramMessage(chatId, '✅ Chat responses <b>ON</b>. I\'ll respond to your messages. Call alerts are always active.');
-            break;
-          }
-          if (lower === 'chat off') {
-            _telegramChatEnabled = false;
-            await sendTelegramMessage(chatId, '🔇 Chat responses <b>OFF</b>. I\'ll only post call alerts. Send "chat on" to re-enable.');
-            break;
-          }
+        // Admin toggle — works everywhere
+        if (isAdmin && lower === 'chat on') {
+          _telegramChatEnabled = true;
+          await sendTelegramMessage(chatId, '✅ Chat responses <b>ON</b>. Call alerts always active.');
+          break;
+        }
+        if (isAdmin && lower === 'chat off') {
+          _telegramChatEnabled = false;
+          await sendTelegramMessage(chatId, '🔇 Chat <b>OFF</b>. Calls only. Send "chat on" to re-enable.');
+          break;
+        }
 
-          // Only respond if chat is enabled
-          if (_telegramChatEnabled) {
-            await handleFreeChatTelegram(chatId, message.text);
+        if (!_telegramChatEnabled) break;
+
+        // Admin DMs — full Claude response
+        if (isAdmin && !isGroup) {
+          await handleFreeChatTelegram(chatId, message.text);
+          break;
+        }
+
+        // Group chat — respond to anyone but keep it short, funny, crypto-native
+        // Only respond if the bot is mentioned, or randomly ~20% of the time for vibes
+        if (isGroup) {
+          const botMentioned = lower.includes('pulse') || lower.includes('bot') || lower.includes('caller');
+          const isQuestion = message.text.includes('?');
+          const isCryptoTalk = /\$[a-zA-Z]|sol|pump|rug|moon|degen|ape|gem|token|coin|mcap|chart/i.test(message.text);
+          const shouldRespond = botMentioned || (isQuestion && isCryptoTalk) || (isCryptoTalk && Math.random() < 0.15);
+
+          if (shouldRespond) {
+            await handleGroupChat(chatId, message.text, firstName);
           }
+          break;
+        }
+
+        // Private chat from non-admin — still respond if enabled
+        if (!isGroup) {
+          await handleFreeChatTelegram(chatId, message.text);
         }
         break;
     }
