@@ -2234,6 +2234,7 @@ async function handleTelegramMessageAIOS(chatId, text, fromUserId) {
 let cycleRunning = false;
 
 async function processCandidate(candidate, isRescan = false) {
+  if (!_botActive) return; // Master toggle OFF — skip everything
   const ca = candidate.contractAddress;
   if (!ca) return;
   if (isBlocklisted(ca)) { console.log(`[auto-caller] BLOCKLIST skip — ${ca.slice(0,8)}`); return; }
@@ -3151,6 +3152,7 @@ async function processRescanQueue() {
 }
 
 async function runAutoCallerCycle() {
+  if (!_botActive) return; // Master toggle OFF — don't scan
   if (cycleRunning) { console.log('[auto-caller] Previous cycle running — skipping'); return; }
 
   cycleRunning     = true;
@@ -5032,6 +5034,7 @@ app.post('/api/agent/daily-review', async (req, res) => {
 let _selfImproveRunning = false;
 
 async function runSelfImproveLoop() {
+  if (!_botActive) { console.log('[self-improve] Bot OFF — skipping'); return; }
   if (_selfImproveRunning) { console.log('[self-improve] Already running, skipping'); return; }
   if (!CLAUDE_API_KEY) { console.log('[self-improve] No CLAUDE_API_KEY, skipping'); return; }
   _selfImproveRunning = true;
@@ -8598,6 +8601,7 @@ Be direct, data-driven, and helpful.`;
 let _apiHealthState = { helius: true, birdeye: true, claude: true, openai: true, dexscreener: true };
 
 async function runApiHealthCheck() {
+  if (!_botActive) return; // Don't burn API calls when bot is off
   const alerts = [];
   const checks = {};
 
@@ -8698,6 +8702,40 @@ setInterval(runApiHealthCheck, 5 * 60 * 1000);
 // Initial check 30s after boot
 setTimeout(runApiHealthCheck, 30_000);
 console.log('[health] API health monitor scheduled: every 5min');
+
+// ── MASTER TOGGLE — kills ALL activity (scanner, enrichment, AI, health checks) ──
+let _botActive = true;
+// Restore from DB on boot
+try {
+  const saved = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='bot_active'`).get();
+  if (saved?.value === 'false') _botActive = false;
+} catch {}
+if (!_botActive) console.log('[master] ⚠ Bot is OFF (restored from DB)');
+
+app.post('/api/bot/master-toggle', express.json(), async (req, res) => {
+  setCors(res);
+  const { active } = req.body ?? {};
+  _botActive = active !== false;
+  AI_CONFIG_OVERRIDES.pausePosting = !_botActive;
+  persistAIConfig();
+  try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('bot_active', ?)`).run(String(_botActive)); } catch {}
+
+  if (!_botActive) {
+    console.log('[master] 🔴 BOT OFF — all scanning, enrichment, AI calls stopped');
+    logEvent('INFO', 'BOT_OFF', 'Master toggle OFF — all activity paused');
+    sendAdminAlert('🔴 <b>BOT OFFLINE</b>\n\nAll scanning, scoring, and API calls stopped.\nCall alerts paused. Send "chat on" or toggle ON to resume.').catch(() => {});
+  } else {
+    console.log('[master] 🟢 BOT ON — resuming all activity');
+    logEvent('INFO', 'BOT_ON', 'Master toggle ON — all activity resumed');
+    sendAdminAlert('🟢 <b>BOT ONLINE</b>\n\nScanning, scoring, and API calls resumed.\nCall alerts active.').catch(() => {});
+  }
+  res.json({ ok: true, active: _botActive });
+});
+
+app.get('/api/bot/status', (req, res) => {
+  setCors(res);
+  res.json({ ok: true, active: _botActive });
+});
 
 // Health check endpoint for dashboard
 app.get('/api/health', async (req, res) => {

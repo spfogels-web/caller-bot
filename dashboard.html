@@ -7027,12 +7027,12 @@ async function toggleBot() {
   if (label) { label.textContent = _botOn ? 'ON' : 'OFF'; label.className = 'bot-toggle-label ' + (_botOn ? 'on' : 'off'); }
   if (track) { track.className = 'bot-toggle-track' + (_botOn ? ' on' : ''); }
   if (chip)  { chip.className = 'status-chip ' + (_botOn ? 'chip-green' : 'chip-orange'); chip.innerHTML = _botOn ? '<div class="pulse pulse-g"></div>ONLINE' : '<div class="pulse pulse-o"></div>PAUSED'; }
-  await pausePosting(!_botOn);
+  await fetch('/api/bot/master-toggle', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ active: _botOn }) });
 }
 async function syncBotToggle() {
   try {
-    const r = await fetch('/api/ai/config'); const d = await r.json();
-    const paused = d?.overrides?.pausePosting === true;
+    const r = await fetch('/api/bot/status'); const d = await r.json();
+    const paused = d?.active === false;
     _botOn = !paused;
     const label = document.getElementById('botToggleLabel');
     const track = document.getElementById('botToggleTrack');
