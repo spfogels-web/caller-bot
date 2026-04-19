@@ -5369,6 +5369,250 @@ RULES:
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// ── REVIVAL TRACKER — monitor rejected tokens for 24h, re-alert on spikes ────
+async function runRevivalTracker() {
+  if (!_botActive) return;
+  try {
+    // Find tokens we passed on in the last 24h with decent scores
+    const passed = dbInstance.prepare(`
+      SELECT id, contract_address, token, composite_score, market_cap, liquidity,
+             volume_1h, final_decision, claude_risk, structure_grade
+      FROM candidates
+      WHERE final_decision IN ('IGNORE','WATCHLIST','HOLD_FOR_REVIEW')
+        AND composite_score >= 30
+        AND market_cap >= 6000 AND market_cap <= 85000
+        AND created_at > datetime('now', '-24 hours')
+      ORDER BY composite_score DESC
+      LIMIT 30
+    `).all();
+
+    if (!passed.length) return;
+
+    let revivals = 0;
+    for (const token of passed) {
+      try {
+        // Fetch current data from DexScreener
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${token.contract_address}`, {
+          signal: AbortSignal.timeout(6000),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const pair = (data?.pairs ?? []).filter(p => p.chainId === 'solana').sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        if (!pair) continue;
+
+        const currentMcap = pair.marketCap ?? pair.fdv ?? 0;
+        const currentVol = pair.volume?.h1 ?? 0;
+        const entryMcap = token.market_cap ?? 0;
+        const entryVol = token.volume_1h ?? 0;
+
+        if (entryMcap <= 0) continue;
+
+        const mcapGrowth = ((currentMcap - entryMcap) / entryMcap) * 100;
+        const volMultiple = entryVol > 0 ? currentVol / entryVol : 0;
+        const holders = pair.txns?.h1?.buys ?? 0;
+
+        // Revival thresholds: price >50%, volume >3x, or significant holder growth
+        const isRevival = mcapGrowth > 50 || volMultiple > 3 || (currentMcap > entryMcap * 1.5);
+
+        if (isRevival && currentMcap >= 8000) {
+          revivals++;
+          const tok = token.token || token.contract_address?.slice(0, 8) || '?';
+          console.log(`[revival] 🔄 $${tok} pumped +${mcapGrowth.toFixed(0)}% since we passed (${token.final_decision}). MCap: $${(entryMcap/1000).toFixed(1)}K → $${(currentMcap/1000).toFixed(1)}K`);
+
+          // Log to tuning audit for learning
+          dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+            '[REVIVAL] $' + tok,
+            '$' + (entryMcap/1000).toFixed(1) + 'K (score ' + (token.composite_score||'?') + ')',
+            '$' + (currentMcap/1000).toFixed(1) + 'K (+' + mcapGrowth.toFixed(0) + '%)',
+            `Was ${token.final_decision} with score ${token.composite_score}. Risk: ${token.claude_risk||'?'}. Structure: ${token.structure_grade||'?'}. Volume ${volMultiple.toFixed(1)}x since rejection. THIS IS A MISSED OPPORTUNITY — feed back into scoring.`,
+            'AUTO_APPLIED'
+          );
+
+          // Send Telegram alert
+          sendAdminAlert(
+            `🔄 <b>REVIVAL ALERT</b>\n\n` +
+            `<b>$${tok}</b> pumped after we passed!\n` +
+            `MCap: $${(entryMcap/1000).toFixed(1)}K → <b>$${(currentMcap/1000).toFixed(1)}K (+${mcapGrowth.toFixed(0)}%)</b>\n` +
+            `Volume: <b>${volMultiple.toFixed(1)}x</b> since rejection\n` +
+            `Was: <b>${token.final_decision}</b> (score ${token.composite_score}, ${token.claude_risk||'?'} risk)\n\n` +
+            `<a href="https://dexscreener.com/solana/${token.contract_address}">View on DexScreener →</a>`
+          ).catch(() => {});
+
+          // Re-queue for full scoring if it's still in range
+          if (currentMcap <= 85000) {
+            try {
+              const candidate = { contractAddress: token.contract_address, token: token.token, marketCap: currentMcap };
+              setImmediate(() => processCandidate(candidate, true).catch(() => {}));
+              console.log(`[revival] Re-queued $${tok} for full scoring`);
+            } catch {}
+          }
+        }
+
+        await new Promise(r => setTimeout(r, 500)); // rate limit DexScreener
+      } catch {}
+    }
+
+    if (revivals > 0) {
+      console.log(`[revival] Found ${revivals} revivals out of ${passed.length} checked`);
+      logEvent('INFO', 'REVIVAL_SCAN', `${revivals} revivals found from ${passed.length} rejected tokens`);
+    }
+  } catch (err) {
+    console.warn('[revival] Error:', err.message);
+  }
+}
+
+// Run revival tracker every 30 minutes
+setInterval(runRevivalTracker, 30 * 60_000);
+setTimeout(runRevivalTracker, 5 * 60_000); // first run 5min after boot
+console.log('[revival] Revival tracker scheduled: every 30min');
+
+// ── MISSED WINNER DEEP ANALYSIS — daily pattern extraction + auto weight adjust ──
+async function runMissedWinnerDeepAnalysis() {
+  if (!_botActive || !CLAUDE_API_KEY) return;
+  try {
+    console.log('[missed-analysis] Running deep missed winner analysis...');
+
+    // Find tokens we passed on that pumped >2x
+    const missed = dbInstance.prepare(`
+      SELECT c.token, c.contract_address, c.composite_score, c.market_cap, c.liquidity,
+             c.volume_1h, c.final_decision, c.claude_risk, c.structure_grade, c.setup_type,
+             c.dev_wallet_pct, c.top10_holder_pct, c.bundle_risk, c.sniper_wallet_count,
+             c.buy_sell_ratio_1h, c.volume_velocity, c.buy_velocity, c.pair_age_hours,
+             c.launch_unique_buyer_ratio, c.claude_verdict
+      FROM candidates c
+      WHERE c.final_decision IN ('IGNORE','WATCHLIST','HOLD_FOR_REVIEW')
+        AND c.composite_score IS NOT NULL
+        AND c.created_at > datetime('now', '-48 hours')
+      ORDER BY c.composite_score DESC
+      LIMIT 50
+    `).all();
+
+    if (!missed.length) { console.log('[missed-analysis] No rejected tokens to analyze'); return; }
+
+    // Check which ones pumped via DexScreener
+    const pumped = [];
+    for (const token of missed.slice(0, 20)) {
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${token.contract_address}`, {
+          signal: AbortSignal.timeout(6000),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const pair = (data?.pairs ?? []).filter(p => p.chainId === 'solana')[0];
+        if (!pair) continue;
+
+        const currentMcap = pair.marketCap ?? 0;
+        const entryMcap = token.market_cap ?? 1;
+        const multiple = currentMcap / entryMcap;
+
+        if (multiple >= 2.0) {
+          pumped.push({ ...token, currentMcap, peakMultiple: multiple });
+        }
+        await new Promise(r => setTimeout(r, 400));
+      } catch {}
+    }
+
+    if (!pumped.length) { console.log('[missed-analysis] No missed winners found this cycle'); return; }
+
+    // Ask Claude to analyze patterns and suggest weight adjustments
+    const prompt = `You are analyzing MISSED WINNERS for a Solana micro-cap calling bot.
+
+These tokens were REJECTED by the bot but pumped 2x+ afterward. Your job:
+1. Find the PATTERN — what do these missed winners have in common?
+2. WHY did we miss them? Which scoring signals were too strict?
+3. Suggest SPECIFIC weight/threshold changes to catch these next time.
+
+CURRENT SCORING WEIGHTS: ${JSON.stringify(TUNING_CONFIG.discovery)}
+CURRENT THRESHOLDS: ${JSON.stringify(TUNING_CONFIG.thresholds)}
+
+MISSED WINNERS (${pumped.length} tokens that pumped 2x+ after we passed):
+${JSON.stringify(pumped.map(p => ({
+  token: p.token, score: p.composite_score, decision: p.final_decision,
+  risk: p.claude_risk, structure: p.structure_grade, setup: p.setup_type,
+  entryMcap: p.market_cap, peakMultiple: p.peakMultiple?.toFixed(1)+'x',
+  dev: p.dev_wallet_pct, top10: p.top10_holder_pct, bundle: p.bundle_risk,
+  snipers: p.sniper_wallet_count, buyRatio: p.buy_sell_ratio_1h,
+  velocity: p.volume_velocity, buyVel: p.buy_velocity, age: p.pair_age_hours,
+  ubr: p.launch_unique_buyer_ratio,
+})), null, 1)}
+
+Respond with valid JSON:
+{
+  "pattern": "What these missed winners had in common — specific metrics",
+  "why_missed": "Which scoring factors caused the miss — be specific",
+  "adjustments": [
+    { "param": "exact_param_name", "section": "discovery|thresholds", "current": value, "suggested": value, "reason": "why" }
+  ],
+  "summary": "One sentence takeaway"
+}`;
+
+    const claudeRes = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1500, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    if (!claudeRes.ok) { console.warn('[missed-analysis] Claude API:', claudeRes.status); return; }
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const jsonMatch = reply.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return;
+
+    const analysis = JSON.parse(jsonMatch[0]);
+
+    // Auto-apply weight adjustments within safety bounds
+    let applied = 0;
+    for (const adj of (analysis.adjustments || [])) {
+      if (!adj.param || adj.suggested == null) continue;
+      const section = adj.section || 'discovery';
+      if (TUNING_CONFIG[section]?.[adj.param] !== undefined) {
+        const old = TUNING_CONFIG[section][adj.param];
+        TUNING_CONFIG[section][adj.param] = Number(adj.suggested);
+        saveTuningConfig();
+        applied++;
+        dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+          `[MISSED-WINNER-FIX] ${adj.param}`, String(old), String(adj.suggested),
+          `${adj.reason} | Pattern: ${(analysis.pattern||'').slice(0,150)} | ${pumped.length} missed winners analyzed`,
+          'AUTO_APPLIED'
+        );
+      }
+    }
+
+    // Log the analysis
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      '[MISSED-WINNER-ANALYSIS]',
+      pumped.length + ' missed winners',
+      applied + ' adjustments applied',
+      `Pattern: ${analysis.pattern || '?'} | Why missed: ${analysis.why_missed || '?'} | ${analysis.summary || ''}`,
+      'AUTO_APPLIED'
+    );
+
+    console.log(`[missed-analysis] ${pumped.length} missed winners → ${applied} weight adjustments applied`);
+    console.log(`[missed-analysis] Pattern: ${(analysis.pattern||'').slice(0,100)}`);
+
+    // Telegram alert
+    if (pumped.length > 0) {
+      sendAdminAlert(
+        `😤 <b>Missed Winner Analysis</b>\n\n` +
+        `${pumped.length} tokens pumped 2x+ after we passed:\n` +
+        pumped.slice(0, 5).map(p => `• $${p.token||'?'} — ${p.peakMultiple?.toFixed(1)}x (was ${p.final_decision}, score ${p.composite_score})`).join('\n') +
+        `\n\n<b>Pattern:</b> ${(analysis.pattern||'?').slice(0,200)}` +
+        `\n<b>Fix:</b> ${applied} weight adjustments auto-applied` +
+        (analysis.summary ? `\n\n<i>${analysis.summary}</i>` : '')
+      ).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[missed-analysis] Error:', err.message);
+  }
+}
+
+// Run missed winner analysis every 12 hours
+setInterval(runMissedWinnerDeepAnalysis, 12 * 60 * 60_000);
+setTimeout(runMissedWinnerDeepAnalysis, 10 * 60_000); // first run 10min after boot
+console.log('[missed-analysis] Missed winner analysis scheduled: every 12h');
+
 app.get('/api/self-improve/status', (req, res) => {
   setCors(res);
   const lastRun = (() => { try { return dbInstance.prepare(`SELECT created_at FROM tuning_audit WHERE param='[SELF-IMPROVE]' ORDER BY created_at DESC LIMIT 1`).get()?.created_at; } catch { return null; } })();

@@ -103,6 +103,22 @@ export function calculateBehaviorMetrics(candidate) {
     telegram:             !!c.telegram,
     deployerHistoryRisk:  c.deployerHistoryRisk ?? c.deployer_history_risk ?? null,
     liqMcapRatio:         (c.liquidity && c.marketCap) ? c.liquidity / c.marketCap : null,
+    // Momentum metrics — rate of change
+    priceVelocity5m:      (() => { const p5=safeNum(c.priceChange5m??c.price_change_5m); return p5!=null?p5/5:null; })(), // %/min
+    priceVelocity1h:      (() => { const p1=safeNum(c.priceChange1h??c.price_change_1h); return p1!=null?p1/60:null; })(), // %/min
+    momentumShift:        (() => { // 5m velocity vs 1h velocity — positive = accelerating
+      const p5=safeNum(c.priceChange5m??c.price_change_5m);
+      const p1=safeNum(c.priceChange1h??c.price_change_1h);
+      if(p5==null||p1==null)return null;
+      return (p5/5)-(p1/60); // difference in %/min
+    })(),
+    volumeAcceleration:   (() => { // volume1h vs volume6h rate — >1 = accelerating
+      const v1=safeNum(c.volume1h??c.volume_1h);
+      const v6=safeNum(c.volume6h??c.volume_6h);
+      if(!v1||!v6)return null;
+      return (v1/1)/(v6/6); // normalize to per-hour
+    })(),
+    holderGrowthRate:     safeNum(c.holderGrowth24h ?? c.holder_growth_24h),
     // LunarCrush social data
     socialScore:          safeNum(c.socialScore ?? c.galaxyScore),
     socialVolume24h:      safeNum(c.socialVolume24h),
@@ -155,6 +171,21 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
       p = Math.min(maxVV, p + Math.round(maxVV * 0.10));
       reasons.push('Accelerating — 5m run-rate exceeds 1h avg');
     }
+  }
+
+  // Momentum shift bonus — price is accelerating RIGHT NOW
+  if (m.momentumShift != null && m.momentumShift > 0.5) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.08));
+    reasons.push(`Momentum shift +${m.momentumShift.toFixed(2)}%/min — breakout forming`);
+  } else if (m.momentumShift != null && m.momentumShift < -1.0) {
+    p = Math.max(0, p - Math.round(maxVV * 0.06));
+    risks.push(`Momentum fading ${m.momentumShift.toFixed(2)}%/min — deceleration`);
+  }
+
+  // Volume acceleration — volume1h outpacing volume6h rate
+  if (m.volumeAcceleration != null && m.volumeAcceleration > 2.0) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.06));
+    reasons.push(`Volume accelerating ${m.volumeAcceleration.toFixed(1)}x vs 6h avg`);
   }
 
   // Consistency check: high buys count = sustained, not just a spike
