@@ -47,6 +47,7 @@ const WebSocketImpl = _WS;
 
 const HELIUS_WS_URL = (apiKey) => `wss://mainnet.helius-rpc.com/?api-key=${apiKey}`;
 const HELIUS_RPC    = (apiKey) => `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
+const SOLANA_PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
 
 // Program IDs we care about
 const PUMP_FUN_PROGRAM    = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';

@@ -8849,16 +8849,16 @@ async function runApiHealthCheck() {
   const alerts = [];
   const checks = {};
 
-  // Helius
+  // Solana RPC (using free public endpoint — saves Helius credits)
   try {
-    const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`, {
+    const r = await fetch('https://api.mainnet-beta.solana.com', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth' }),
       signal: AbortSignal.timeout(8000),
     });
-    checks.helius = r.ok;
-    if (!r.ok && _apiHealthState.helius) alerts.push(`❌ <b>Helius RPC DOWN</b> — HTTP ${r.status}. Token detection + on-chain data affected.`);
-    if (r.ok && !_apiHealthState.helius) alerts.push(`✅ <b>Helius RPC RECOVERED</b>`);
+    checks.helius = r.ok; // still labeled helius for dashboard compat
+    if (!r.ok && _apiHealthState.helius) alerts.push(`❌ <b>Solana RPC DOWN</b> — HTTP ${r.status}. On-chain data affected.`);
+    if (r.ok && !_apiHealthState.helius) alerts.push(`✅ <b>Solana RPC RECOVERED</b>`);
     _apiHealthState.helius = r.ok;
   } catch (e) {
     if (_apiHealthState.helius) alerts.push(`❌ <b>Helius RPC DOWN</b> — ${e.message}. Token detection offline.`);
@@ -10408,14 +10408,11 @@ app.listen(PORT, async () => {
     console.warn('[startup] Momentum tracker failed to start:', err.message);
   }
 
-  // ── Pre-Launch Detector: watch exchange wallets for fresh dev funding ────
-  try {
-    const { startPreLaunchDetector } = await import('./pre-launch-detector.js');
-    startPreLaunchDetector(dbInstance);
-    console.log('[startup] ✓ Pre-launch detector active — 90s tick, watching exchange hot wallets');
-  } catch (err) {
-    console.warn('[startup] Pre-launch detector failed to start:', err.message);
-  }
+  // ── Pre-Launch Detector: DISABLED — burns 5,000+ Helius credits/day
+  // Watching exchange hot wallets every 90s is too expensive. The scanner
+  // catches these tokens via DexScreener within 90s anyway.
+  // Re-enable when on a higher Helius plan.
+  console.log('[startup] ⏸ Pre-launch detector DISABLED (saves ~5K Helius credits/day)');
 
   // ── Cross-Chain Tracker: ETH/Base trending → Solana migration matches ────
   try {

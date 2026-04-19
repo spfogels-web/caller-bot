@@ -36,6 +36,9 @@ const getHeliusRpc = () =>
 const getHeliusApi = () =>
   `https://api.helius.xyz/v0`;
 
+// Free Solana public RPC — use for basic calls to save Helius credits
+const SOLANA_PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
+
 const getBirdeyeKey    = () => process.env.BIRDEYE_API_KEY ?? '';
 const getHeliusKey    = () => process.env.HELIUS_API_KEY  ?? '';
 const getLunarCrushKey = () => process.env.LUNARCRUSH_API_KEY ?? '';
@@ -118,22 +121,28 @@ async function safeFetch(url, options = {}, label = 'fetch', timeoutMs = 12_000)
   }
 }
 
+// Basic RPC methods that can use the FREE Solana public RPC (saves Helius credits)
+const FREE_RPC_METHODS = new Set(['getAccountInfo', 'getTokenSupply', 'getTokenLargestAccounts', 'getMultipleAccounts']);
+
 async function heliusRpc(method, params, label = 'rpc') {
-  const key = getHeliusKey();
-  if (!key) {
-    console.warn('[enricher:helius] No HELIUS_API_KEY');
+  // Use free Solana public RPC for basic calls — saves Helius credits
+  const useFreeRpc = FREE_RPC_METHODS.has(method);
+  const url = useFreeRpc ? SOLANA_PUBLIC_RPC : getHeliusRpc();
+
+  if (!useFreeRpc && !getHeliusKey()) {
+    console.warn('[enricher:helius] No HELIUS_API_KEY for enhanced call');
     return null;
   }
 
   return safeFetch(
-    getHeliusRpc(),
+    url,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: label, method, params }),
     },
-    `helius:${label}`,
-    HELIUS_TIMEOUT
+    useFreeRpc ? `solana:${label}` : `helius:${label}`,
+    useFreeRpc ? 8_000 : HELIUS_TIMEOUT
   );
 }
 
