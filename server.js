@@ -2336,6 +2336,66 @@ async function processCandidate(candidate, isRescan = false) {
     }
     enrichedCandidate.mcapTier = mcapTier;
 
+    // ── VOLUME / PRICE DIVERGENCE ─────────────────────────────────────────
+    // Relationship between price action and volume tells us more than either
+    // alone.
+    //   Price DOWN + Volume RISING → accumulation (smart money stepping in) +3
+    //   Price UP   + Volume RISING → confirmed breakout (healthy)             0 (already priced in)
+    //   Price UP   + Volume DYING  → exhaustion (late to the party)          -4
+    //   Price DOWN + Volume DYING  → dying coin                              -5
+    // Only fires when we have both signals — silent otherwise.
+    {
+      const p1h    = enrichedCandidate.priceChange1h;
+      const volVel = enrichedCandidate.volumeVelocity;
+      if (p1h != null && volVel != null) {
+        let divDelta = 0;
+        let divLabel = null;
+        if (p1h <= -5 && volVel >= 0.35) {
+          divDelta = 3;
+          divLabel = `+3 accumulation divergence (price ${p1h.toFixed(0)}%, vol surge ${volVel.toFixed(2)})`;
+        } else if (p1h >= 15 && volVel <= 0.08) {
+          divDelta = -4;
+          divLabel = `${divDelta} exhaustion divergence (price +${p1h.toFixed(0)}%, vol dying ${volVel.toFixed(2)})`;
+        } else if (p1h <= -10 && volVel <= 0.08) {
+          divDelta = -5;
+          divLabel = `${divDelta} dying coin (price ${p1h.toFixed(0)}%, no volume)`;
+        }
+        if (divDelta !== 0) {
+          scoreResult.score = Math.max(0, Math.min(100, scoreResult.score + divDelta));
+          if (divDelta > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+            scoreResult.signals.market.push(divLabel);
+          } else {
+            (scoreResult.penalties = scoreResult.penalties || {}).market = scoreResult.penalties.market || [];
+            scoreResult.penalties.market.push(divLabel);
+          }
+        }
+      }
+    }
+
+    // ── BUNDLE-SETUP DETECTOR — coordinated sniper bundle in first 10 holders ──
+    // Heuristic using data we already have (no new API calls):
+    // When a coin has many snipers AND low unique-buyer ratio AND a short
+    // age, the first transactions were almost certainly a coordinated
+    // bundle (single bot dumping SOL into multiple fresh wallets that all
+    // buy in the same block). These rug 80%+ of the time.
+    {
+      const snipers = enrichedCandidate.sniperWalletCount ?? 0;
+      const ubr     = enrichedCandidate.launchUniqueBuyerRatio;
+      const age     = enrichedCandidate.pairAgeHours ?? 99;
+      const isBundleSetup =
+        snipers >= 10 && ubr != null && ubr < 0.35 && age < 0.5;
+      if (isBundleSetup) {
+        const dump = 10;
+        scoreResult.score = Math.max(0, scoreResult.score - dump);
+        (scoreResult.penalties = scoreResult.penalties || {}).launch = scoreResult.penalties.launch || [];
+        scoreResult.penalties.launch.push(
+          `-${dump} BUNDLE_SETUP — ${snipers} snipers + ${(ubr*100).toFixed(0)}% unique @ ${(age*60).toFixed(0)}min (coordinated bot bundle)`
+        );
+        enrichedCandidate._bundleSetup = true;
+      }
+    }
+
     // ── Dev fingerprint adjustment: boost ELITE/PROVEN devs, penalize RUGGERs ──
     try {
       const deployer = enrichedCandidate.deployerVerdict || enrichedCandidate.deployer_verdict;
@@ -2667,6 +2727,48 @@ async function processCandidate(candidate, isRescan = false) {
         logEvent('INFO', 'SMART_MONEY_PROMOTE', `${enrichedCandidate.token ?? ca.slice(0,6)} WATCHLIST → AUTO_POST (single winner, score ${scoreResult.score})`);
         finalDecision = 'AUTO_POST';
       }
+    }
+
+    // ── REGIME-ADAPTIVE FLOOR: tighten in DEAD, loosen in HOT ──────────────
+    // The baseline minScoreToPost (from SCORING_CONFIG) is tuned for NEUTRAL
+    // markets. In DEAD regimes where memecoins bleed and false signals spike,
+    // require a higher score. In HOT regimes where everything pumps, loosen.
+    // KOL and cluster alerts bypass — their conviction is independent of regime.
+    {
+      const smKindFloor = enrichedCandidate._smartMoney?.kind;
+      const bypassFloor = smKindFloor === 'cluster' || smKindFloor === 'kol';
+      if (!bypassFloor && finalDecision === 'AUTO_POST') {
+        const baseFloor = SCORING_CONFIG.minScoreToPost ?? 50;
+        const marketRegime = getRegime()?.market || 'NEUTRAL';
+        const regimeAdj =
+          marketRegime === 'DEAD'    ? +10 :
+          marketRegime === 'COLD'    ? +5  :
+          marketRegime === 'HOT'     ? -5  :
+          0;  // NEUTRAL
+        const effectiveFloor = baseFloor + regimeAdj;
+        if ((scoreResult.score ?? 0) < effectiveFloor) {
+          logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${effectiveFloor} (base ${baseFloor} ${regimeAdj >= 0 ? '+' : ''}${regimeAdj} ${marketRegime}) → WATCHLIST`);
+          console.log(`[auto-caller] 📊 Regime floor — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} in ${marketRegime} → WATCHLIST`);
+          finalDecision = 'WATCHLIST';
+        }
+      }
+    }
+
+    // ── BUNDLE-SETUP VETO ────────────────────────────────────────────────
+    // If the earlier bundle detector flagged this coin, block AUTO_POST
+    // regardless of AI consensus. Cluster / KOL alerts still bypass — the
+    // tradeoff: if a KOL is buying a bundle-launch coin, that's their
+    // conviction call, not ours to veto. Single-wallet signals DO get
+    // blocked here.
+    if (
+      finalDecision === 'AUTO_POST' &&
+      enrichedCandidate._bundleSetup &&
+      enrichedCandidate._smartMoney?.kind !== 'cluster' &&
+      enrichedCandidate._smartMoney?.kind !== 'kol'
+    ) {
+      logEvent('WARN', 'BUNDLE_VETO', `${enrichedCandidate.token ?? ca.slice(0,6)} coordinated bundle detected → WATCHLIST`);
+      console.log(`[auto-caller] 🪤 Bundle-setup veto — $${enrichedCandidate.token ?? ca.slice(0,6)} → WATCHLIST`);
+      finalDecision = 'WATCHLIST';
     }
 
     // ── MOMENTUM GATE: never buy a coin that's currently bleeding ───────────
