@@ -3742,6 +3742,75 @@ body::before {
         </div>
       </div>
 
+      <!-- ═══ BRAIN INTELLIGENCE — learning visualization ═══ -->
+      <div class="card" style="border-color:rgba(156,39,176,0.4);margin-bottom:14px;background:linear-gradient(135deg,rgba(156,39,176,0.04),rgba(24,255,255,0.02));overflow:hidden">
+        <div style="padding:20px;position:relative">
+          <!-- Animated grid background -->
+          <div style="position:absolute;inset:0;background-image:linear-gradient(rgba(156,39,176,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(156,39,176,0.03) 1px,transparent 1px);background-size:25px 25px;pointer-events:none"></div>
+
+          <!-- Header -->
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;position:relative">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,rgba(156,39,176,0.2),rgba(24,255,255,0.15));border:2px solid rgba(156,39,176,0.4);display:flex;align-items:center;justify-content:center;font-size:24px;animation:hexPulse 3s ease-in-out infinite;box-shadow:0 0 20px rgba(156,39,176,0.2)">🧠</div>
+              <div>
+                <div style="font-family:'Orbitron',var(--mono);font-size:14px;font-weight:700;background:linear-gradient(90deg,#ce93d8,#18ffff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:2px">BRAIN INTELLIGENCE</div>
+                <div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-top:2px">LEARNING · ADAPTING · EVOLVING</div>
+              </div>
+            </div>
+            <div id="brainLevel" style="text-align:right">
+              <div style="font-family:'Orbitron',var(--mono);font-size:22px;font-weight:900;color:var(--purple);text-shadow:0 0 15px rgba(156,39,176,0.4)">—</div>
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">INTELLIGENCE LEVEL</div>
+            </div>
+          </div>
+
+          <!-- Brain Growth Meter -->
+          <div style="margin-bottom:16px;position:relative">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+              <span style="font-family:var(--mono);font-size:8px;color:var(--text3)">GROWTH PROGRESS</span>
+              <span style="font-family:var(--mono);font-size:8px;color:var(--purple)" id="brainGrowthPct">—</span>
+            </div>
+            <div style="height:12px;background:rgba(0,0,0,0.4);border-radius:6px;border:1px solid rgba(156,39,176,0.2);overflow:hidden;position:relative">
+              <div id="brainGrowthBar" style="height:100%;width:0%;background:linear-gradient(90deg,#9c27b0,#18ffff,#00e676);border-radius:6px;transition:width 1s ease-out;box-shadow:0 0 10px rgba(156,39,176,0.3)"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-top:3px">
+              <span style="font-family:var(--mono);font-size:6px;color:var(--text3)">NEWBORN</span>
+              <span style="font-family:var(--mono);font-size:6px;color:var(--text3)">LEARNING</span>
+              <span style="font-family:var(--mono);font-size:6px;color:var(--text3)">SKILLED</span>
+              <span style="font-family:var(--mono);font-size:6px;color:var(--text3)">EXPERT</span>
+              <span style="font-family:var(--mono);font-size:6px;color:var(--text3)">MASTER</span>
+            </div>
+          </div>
+
+          <!-- Intelligence Metrics Grid -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;position:relative">
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(156,39,176,0.2);border-radius:8px;padding:10px;text-align:center">
+              <div style="font-family:var(--mono);font-size:20px;font-weight:900;color:var(--green)" id="brainWins">—</div>
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-top:2px">WINS LEARNED</div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(156,39,176,0.2);border-radius:8px;padding:10px;text-align:center">
+              <div style="font-family:var(--mono);font-size:20px;font-weight:900;color:var(--red)" id="brainLosses">—</div>
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-top:2px">LOSSES STUDIED</div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(156,39,176,0.2);border-radius:8px;padding:10px;text-align:center">
+              <div style="font-family:var(--mono);font-size:20px;font-weight:900;color:var(--cyan)" id="brainPatterns">—</div>
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-top:2px">PATTERNS FOUND</div>
+            </div>
+            <div style="background:rgba(0,0,0,0.3);border:1px solid rgba(156,39,176,0.2);border-radius:8px;padding:10px;text-align:center">
+              <div style="font-family:var(--mono);font-size:20px;font-weight:900;color:var(--gold)" id="brainAdjustments">—</div>
+              <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-top:2px">AUTO-ADJUSTMENTS</div>
+            </div>
+          </div>
+
+          <!-- What the brain has learned -->
+          <div style="position:relative">
+            <div style="font-family:'Orbitron',var(--mono);font-size:9px;color:var(--purple);letter-spacing:1.5px;margin-bottom:8px">WHAT I'VE LEARNED</div>
+            <div id="brainLessons" style="display:flex;flex-direction:column;gap:6px;max-height:200px;overflow-y:auto">
+              <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:12px">Gathering intelligence...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- ═══ AUTONOMOUS AGENT PANEL ═══ -->
       <div class="card" style="border-color:rgba(68,138,255,0.4);margin-bottom:14px">
         <!-- Header with tabs -->
@@ -6892,6 +6961,99 @@ async function loadAI(){
   }
   if(memory)renderAIMemoryPanel(memory);
   startNeuralCanvas(ai,memory);
+  loadBrainIntelligence();
+}
+
+async function loadBrainIntelligence() {
+  try {
+    var [stats, audit, memory, improve] = await Promise.all([
+      apiFetch('/api/stats'),
+      apiFetch('/api/control-station'),
+      apiFetch('/api/agent/memory'),
+      apiFetch('/api/self-improve/status'),
+    ]);
+
+    var wins = stats?.stats?.winCount || 0;
+    var losses = stats?.stats?.lossCount || 0;
+    var totalEvals = stats?.stats?.totalEvaluated || 0;
+    var auditEntries = (audit?.audit || []);
+    var memories = (memory?.memories || []);
+
+    // Count patterns (lessons + blind spots from audit)
+    var patterns = auditEntries.filter(function(a) {
+      return (a.param || '').includes('LESSON') || (a.param || '').includes('BLIND-SPOT') || (a.param || '').includes('MISSED-WINNER');
+    }).length;
+
+    // Count auto-adjustments
+    var adjustments = auditEntries.filter(function(a) {
+      return a.status === 'AUTO_APPLIED' && !(a.param || '').includes('SELF-IMPROVE');
+    }).length;
+
+    // Calculate intelligence level (0-100)
+    // Based on: resolved calls, patterns found, adjustments made, memories stored
+    var resolvedCalls = wins + losses;
+    var levelScore = Math.min(100,
+      Math.min(resolvedCalls * 3, 30) +       // max 30 from resolved calls (need 10+)
+      Math.min(patterns * 5, 20) +             // max 20 from patterns (need 4+)
+      Math.min(adjustments * 2, 20) +          // max 20 from adjustments (need 10+)
+      Math.min(memories.length * 2, 15) +      // max 15 from memories (need 8+)
+      Math.min(totalEvals / 100, 15)           // max 15 from total evals (need 1500+)
+    );
+
+    var levelLabel = levelScore >= 80 ? 'EXPERT' : levelScore >= 60 ? 'SKILLED' : levelScore >= 40 ? 'LEARNING' : levelScore >= 20 ? 'DEVELOPING' : 'NEWBORN';
+    var levelCol = levelScore >= 80 ? 'var(--green)' : levelScore >= 60 ? 'var(--cyan)' : levelScore >= 40 ? 'var(--gold)' : 'var(--orange)';
+
+    // Update UI
+    var levelEl = document.getElementById('brainLevel');
+    if (levelEl) levelEl.innerHTML = '<div style="font-family:Orbitron,var(--mono);font-size:22px;font-weight:900;color:' + levelCol + ';text-shadow:0 0 15px ' + levelCol + '44">' + levelLabel + '</div><div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">INTELLIGENCE LEVEL</div>';
+
+    setText('brainGrowthPct', Math.round(levelScore) + '% / 100%');
+    var bar = document.getElementById('brainGrowthBar');
+    if (bar) bar.style.width = levelScore + '%';
+
+    setText('brainWins', wins);
+    setText('brainLosses', losses);
+    setText('brainPatterns', patterns);
+    setText('brainAdjustments', adjustments);
+
+    // Lessons learned
+    var lessonsEl = document.getElementById('brainLessons');
+    if (lessonsEl) {
+      var lessons = auditEntries.filter(function(a) {
+        return (a.param || '').includes('LESSON') || (a.param || '').includes('BLIND-SPOT') || (a.param || '').includes('MISSED-WINNER') || (a.param || '').includes('OPENAI-LEARNING');
+      }).slice(0, 8);
+
+      var memoryLessons = memories.filter(function(m) { return m.category === 'operator_teaching'; }).slice(0, 4);
+
+      var allLessons = [];
+
+      // Add audit lessons
+      lessons.forEach(function(l) {
+        var icon = (l.param || '').includes('LESSON') ? '💡' : (l.param || '').includes('BLIND-SPOT') ? '👁' : (l.param || '').includes('MISSED-WINNER') ? '😤' : '🧠';
+        var col = (l.param || '').includes('LESSON') ? 'var(--cyan)' : (l.param || '').includes('BLIND-SPOT') ? 'var(--orange)' : (l.param || '').includes('MISSED-WINNER') ? 'var(--gold)' : 'var(--purple)';
+        allLessons.push({ icon: icon, col: col, text: l.reason || '', type: (l.param || '').replace(/\[|\]/g, '') });
+      });
+
+      // Add operator teachings
+      memoryLessons.forEach(function(m) {
+        allLessons.push({ icon: '📚', col: 'var(--green)', text: (m.content || '').slice(0, 150), type: 'OPERATOR TAUGHT' });
+      });
+
+      if (allLessons.length) {
+        lessonsEl.innerHTML = allLessons.map(function(l) {
+          return '<div style="padding:8px 10px;background:rgba(0,0,0,0.3);border-radius:6px;border-left:3px solid ' + l.col + '">' +
+            '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
+              '<span style="font-size:12px">' + l.icon + '</span>' +
+              '<span style="font-family:var(--mono);font-size:7px;color:' + l.col + ';letter-spacing:1px;font-weight:700">' + l.type + '</span>' +
+            '</div>' +
+            '<div style="font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.5">' + esc((l.text || '').slice(0, 200)) + '</div>' +
+          '</div>';
+        }).join('');
+      } else {
+        lessonsEl.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:16px">Brain is gathering intelligence. Lessons appear after self-improvement cycles run and calls resolve.</div>';
+      }
+    }
+  } catch (e) { console.warn('[brain]', e.message); }
 }
 
 function startNeuralCanvas(ai,memory){
