@@ -3896,7 +3896,7 @@ body::before {
         .cs-empty{text-align:center;padding:32px 12px;font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:1px}
       </style>
       <div class="cs-card" id="csCard">
-        <div class="cs-hdr" onclick="csToggle()">
+        <div class="cs-hdr" onclick="ctrlStationToggle()">
           <div class="cs-title-wrap">
             <div class="cs-logo">🛸</div>
             <div>
@@ -5436,9 +5436,12 @@ const _CS_STATE = {
   outcomes:  { current:{}, defaults:{}, dirty:new Set(), lastChange:{} },
 };
 
-function csToggle() {
+// Renamed from csToggle() to avoid collision with autonomous-agent
+// tuning's csToggle(system, section, key, current) defined further down.
+function ctrlStationToggle() {
   const body = document.getElementById('csBody');
   const label = document.getElementById('csToggleLabel');
+  if (!body) return;
   const opening = !body.classList.contains('open');
   body.classList.toggle('open');
   if (label) label.textContent = opening ? '▴ COLLAPSE' : '▾ EXPAND';
