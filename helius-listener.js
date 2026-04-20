@@ -751,25 +751,49 @@ export async function getTokenMetadata(mint, apiKey) {
  * Get top token holders using Helius.
  */
 export async function getTopHolders(mint, apiKey, limit = 20) {
+  let holders = [];
+
+  // 1. Free Solana RPC — getTokenLargestAccounts (max 20, free)
   try {
-    // Use free Solana public RPC — saves Helius credits
-    const res = await fetch(
-      SOLANA_PUBLIC_RPC,
-      {
+    const res = await fetch(SOLANA_PUBLIC_RPC, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenLargestAccounts', params: [mint] }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      holders = data.result?.value ?? [];
+    }
+  } catch {}
+
+  // 2. If we need more than 20 AND have Helius key, use DAS getTokenAccounts (costs 1 credit)
+  if (limit > 20 && apiKey && holders.length >= 19) {
+    try {
+      const res = await fetch(`https://mainnet.helius-rpc.com/?api-key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jsonrpc: '2.0', id: 1,
-          method: 'getTokenLargestAccounts',
-          params: [mint],
+          method: 'getTokenAccounts',
+          params: { mint, limit: Math.min(limit, 100), options: { showZeroBalance: false } },
         }),
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const dasHolders = (data.result?.token_accounts ?? []).map(a => ({
+          address: a.address,
+          amount: a.amount,
+          owner: a.owner,
+        }));
+        if (dasHolders.length > holders.length) {
+          console.log(`[helius] DAS getTokenAccounts: ${dasHolders.length} holders (upgraded from ${holders.length})`);
+          holders = dasHolders;
+        }
       }
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.result?.value?.slice(0, limit) ?? [];
-  } catch {
-    return [];
+    } catch {}
   }
+
+  return holders.slice(0, limit);
 }
