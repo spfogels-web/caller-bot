@@ -347,6 +347,19 @@ export async function runOutcomeTracker(dbInstance) {
 
   for (const call of unresolvedCalls) {
     try {
+      // If we already have a stored peak ≥1.5x and it's not marked WIN, fix it immediately
+      // without needing to fetch current price (token might be dead on DexScreener)
+      if (call.peak_multiple != null && call.peak_multiple >= WIN_PEAK && call.outcome !== 'WIN') {
+        const ca = call.contract_address ?? call.contractAddress;
+        dbInstance.prepare(`UPDATE calls SET outcome='WIN', auto_resolved=1, auto_resolved_at=datetime('now'), outcome_source='AUTO', outcome_set_at=datetime('now') WHERE id=?`).run(call.id);
+        if (ca) {
+          try { dbInstance.prepare(`UPDATE audit_archive SET outcome='WIN', outcome_locked_at=datetime('now'), peak_multiple=CASE WHEN peak_multiple IS NULL OR ?> peak_multiple THEN ? ELSE peak_multiple END WHERE contract_address=?`).run(call.peak_multiple, call.peak_multiple, ca); } catch {}
+          try { dbInstance.prepare(`UPDATE calls_archive SET outcome='WIN', peak_multiple=CASE WHEN peak_multiple IS NULL OR ?>peak_multiple THEN ? ELSE peak_multiple END WHERE contract_address=?`).run(call.peak_multiple, call.peak_multiple, ca); } catch {}
+        }
+        console.log(`[outcome-tracker] ✅ FIXED: $${call.token} peak=${call.peak_multiple.toFixed(2)}x was ${call.outcome} → WIN`);
+        await sleep(300); continue;
+      }
+
       const result = await checkCallOutcome(call);
       if (!result) continue;
 
