@@ -705,47 +705,71 @@ function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, 
 async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
   const result = { lunarCrushOk: false };
   const key = getLunarCrushKey();
-  if (!key) return result;
+  if (!key) {
+    console.log('[enricher:lunarcrush] ✗ LUNARCRUSH_API_KEY not set');
+    return result;
+  }
 
-  // Try by contract address first (most accurate), fall back to symbol
+  // v4 endpoint reality for fresh Solana memes:
+  //   /coins/<X>/v1     — needs LC's internal coin ID (won't work for fresh CAs)
+  //   /topic/<slug>/v1  — topic lookup, works for any symbol/keyword
+  //   /coins/list/v1    — ALL coins, way too much; skip
+  // Strategy: hit topic first (works for most symbols), fall back to coins endpoint.
   const queries = [];
-  if (contractAddress) queries.push(`coins/${contractAddress}/v1`);
-  if (tokenSymbol) queries.push(`coins/${tokenSymbol}/v1`);
+  if (tokenSymbol)     queries.push({ path: `topic/${tokenSymbol.toLowerCase()}/v1`,        shape: 'topic' });
+  if (contractAddress) queries.push({ path: `coins/${contractAddress}/v1`,                  shape: 'coins' });
+  if (tokenSymbol)     queries.push({ path: `coins/${tokenSymbol.toUpperCase()}-solana/v1`, shape: 'coins' });
 
-  for (const path of queries) {
+  const diagnostics = [];
+  for (const { path, shape } of queries) {
     try {
       const res = await fetch(`${LUNARCRUSH_BASE}/${path}`, {
         headers: { 'Authorization': `Bearer ${key}` },
         signal: AbortSignal.timeout(6000),
       });
+      diagnostics.push(`${path}→${res.status}`);
       if (!res.ok) continue;
       const data = await res.json();
       const d = data?.data;
       if (!d) continue;
 
       result.lunarCrushOk = true;
-      result.socialScore        = d.galaxy_score ?? d.alt_rank_30d ?? null;
-      result.socialVolume       = d.social_volume ?? null;
-      result.socialVolume24h    = d.social_volume_24h ?? d.social_volume ?? null;
-      result.socialDominance    = d.social_dominance ?? null;
-      result.socialSentiment    = d.sentiment ?? null;
-      result.twitterMentions    = d.tweet_mentions ?? d.tweets ?? null;
-      result.twitterEngagement  = d.tweet_interactions ?? null;
-      result.twitterFollowers   = d.twitter_followers ?? null;
-      result.socialContributors = d.social_contributors ?? null;
-      result.galaxyScore        = d.galaxy_score ?? null;
-      result.altRank            = d.alt_rank ?? null;
-      result.newsVolume         = d.news ?? null;
-      result.socialSpike        = (d.social_volume_24h ?? 0) > (d.social_volume ?? 1) * 2;
+      if (shape === 'topic') {
+        // Topic endpoint fields
+        result.socialScore        = d.interactions_24h ? Math.min(100, Math.round(Math.log10(d.interactions_24h + 1) * 15)) : null;
+        result.socialVolume       = d.num_posts ?? null;
+        result.socialVolume24h    = d.num_posts ?? d.interactions_24h ?? null;
+        result.socialSentiment    = d.types_sentiment?.tweet ?? d.sentiment ?? null;
+        result.twitterMentions    = d.num_posts ?? null;
+        result.twitterEngagement  = d.interactions_24h ?? null;
+        result.socialContributors = d.num_contributors ?? null;
+        result.socialSpike        = (d.trend ?? '').toLowerCase() === 'up';
+      } else {
+        // Coins endpoint fields
+        result.socialScore        = d.galaxy_score ?? d.alt_rank_30d ?? null;
+        result.socialVolume       = d.social_volume ?? null;
+        result.socialVolume24h    = d.social_volume_24h ?? d.social_volume ?? null;
+        result.socialDominance    = d.social_dominance ?? null;
+        result.socialSentiment    = d.sentiment ?? null;
+        result.twitterMentions    = d.tweet_mentions ?? d.tweets ?? null;
+        result.twitterEngagement  = d.tweet_interactions ?? null;
+        result.twitterFollowers   = d.twitter_followers ?? null;
+        result.socialContributors = d.social_contributors ?? null;
+        result.galaxyScore        = d.galaxy_score ?? null;
+        result.altRank            = d.alt_rank ?? null;
+        result.newsVolume         = d.news ?? null;
+        result.socialSpike        = (d.social_volume_24h ?? 0) > (d.social_volume ?? 1) * 2;
+      }
 
-      console.log(`[enricher:lunarcrush] ✓ galaxy:${result.galaxyScore ?? '?'} sentiment:${result.socialSentiment ?? '?'} tweets:${result.twitterMentions ?? '?'} vol24h:${result.socialVolume24h ?? '?'}`);
+      console.log(`[enricher:lunarcrush] ✓ ${shape} ${path} → score:${result.socialScore ?? '?'} sentiment:${result.socialSentiment ?? '?'} mentions:${result.twitterMentions ?? '?'}`);
       return result;
     } catch (e) {
-      // Try next query
+      diagnostics.push(`${path}→threw:${e.message?.slice(0,40)}`);
     }
   }
 
-  console.log(`[enricher:lunarcrush] ✗ no data for ${tokenSymbol ?? contractAddress?.slice(0,8) ?? '?'}`);
+  // No luck — surface the exact statuses so we can tell the user WHY
+  console.log(`[enricher:lunarcrush] ✗ no data for ${tokenSymbol ?? contractAddress?.slice(0,8) ?? '?'} · ${diagnostics.join(' · ')}`);
   return result;
 }
 
