@@ -7773,7 +7773,31 @@ app.post('/api/seed/scan', async (req, res) => {
           contractId
         );
 
-        console.log(`[seed] ✓ Seeded ${walletSet.size} wallets for ${ca} — ALPHA:${counters.ALPHA} SMART:${counters.SMART_MONEY} MOMENTUM:${counters.MOMENTUM}`);
+        // 6. Auto-promote ALPHA and SMART_MONEY wallets to tracked_wallets DB
+        let promoted = 0;
+        try {
+          const goodWallets = dbInstance.prepare(`
+            SELECT wallet_address, category, final_score FROM seeded_wallets
+            WHERE seeded_contract_id=? AND category IN ('ALPHA','SMART_MONEY','MOMENTUM')
+            ORDER BY final_score DESC
+          `).all(contractId);
+
+          const upsertTracked = dbInstance.prepare(`
+            INSERT INTO tracked_wallets (address, category, source, score, is_watchlist, added_by, notes)
+            VALUES (?, ?, 'brain_analyzer', ?, 1, 'auto', ?)
+            ON CONFLICT(address) DO UPDATE SET
+              score = MAX(score, excluded.score),
+              category = CASE WHEN excluded.score > score THEN excluded.category ELSE category END,
+              updated_at = datetime('now')
+          `);
+
+          for (const w of goodWallets) {
+            upsertTracked.run(w.wallet_address, w.category === 'ALPHA' ? 'WINNER' : w.category, w.final_score, 'Auto-promoted from brain analyzer scan of ' + ca.slice(0,8));
+            promoted++;
+          }
+        } catch (e) { console.warn('[seed] Wallet promotion failed:', e.message); }
+
+        console.log(`[seed] ✓ Seeded ${walletSet.size} wallets for ${ca} — ALPHA:${counters.ALPHA} SMART:${counters.SMART_MONEY} MOMENTUM:${counters.MOMENTUM} | ${promoted} promoted to wallet DB`);
 
       } catch (err) {
         console.error(`[seed] Scan failed for ${ca}:`, err.message);
