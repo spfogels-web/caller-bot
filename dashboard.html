@@ -3951,6 +3951,24 @@ body::before {
                 <button class="cs-btn cs-btn-save" onclick="csSave('wallets')">💾 SAVE</button>
               </div>
             </div>
+            <!-- Dune wallet DB health indicator + rescan -->
+            <div id="csDuneHealth" style="margin-bottom:14px;padding:12px 14px;background:linear-gradient(135deg,rgba(156,39,176,0.06),rgba(68,138,255,0.04));border:1px solid rgba(156,39,176,0.25);border-radius:7px">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <div id="csDuneDot" style="width:10px;height:10px;border-radius:50%;background:#666;box-shadow:0 0 8px #666"></div>
+                  <div>
+                    <div style="font-family:var(--mono);font-size:9px;color:#fff;font-weight:700;letter-spacing:1px">DUNE WALLET DATABASE</div>
+                    <div id="csDuneSubtitle" style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-top:2px">Checking status…</div>
+                  </div>
+                </div>
+                <div style="display:flex;gap:6px">
+                  <button class="cs-btn" onclick="csDuneRefresh()">↻ REFRESH</button>
+                  <button class="cs-btn cs-btn-save" style="background:linear-gradient(135deg,rgba(156,39,176,0.25),rgba(68,138,255,0.18));border-color:rgba(156,39,176,0.5);color:var(--purple)" onclick="csDuneRescan(this)">🐋 RESCAN NOW</button>
+                </div>
+              </div>
+              <div id="csDuneStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:12px"></div>
+              <div id="csDuneStatus" style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:10px;min-height:12px;letter-spacing:0.5px"></div>
+            </div>
             <div class="cs-knob-grid" data-grid="wallets"></div>
             <div class="cs-status" data-status="wallets"></div>
           </div>
@@ -5458,7 +5476,88 @@ function ctrlStationToggle() {
 function csSwitchTab(tab) {
   document.querySelectorAll('.cs-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('.cs-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === tab));
-  if (tab === 'audit') csLoadAudit();
+  if (tab === 'audit')   csLoadAudit();
+  if (tab === 'wallets') csDuneRefresh();
+}
+
+// ── Dune wallet DB health + rescan (Wallets tab) ──────────────────────
+async function csDuneRefresh() {
+  const dot       = document.getElementById('csDuneDot');
+  const subtitle  = document.getElementById('csDuneSubtitle');
+  const statsEl   = document.getElementById('csDuneStats');
+  if (!dot || !statsEl) return;
+  try {
+    const res  = await fetch('/api/v8/dune-wallet-status');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'status check failed');
+
+    const ready   = !!data.ready;
+    const winners = data.dbStats?.winners ?? 0;
+    const snipers = data.dbStats?.snipers ?? 0;
+    const total   = data.dbStats?.total   ?? 0;
+    const manual  = data.dbStats?.manual  ?? 0;
+    const dune    = data.dbStats?.dune    ?? 0;
+    const lastScan = data.lastScan || data.lastScanAt || null;
+
+    // Decide health color:
+    //   green — ready + ≥500 winners + scan <24h old
+    //   gold  — ready but few winners OR old scan
+    //   red   — not ready or 0 winners
+    let color, label;
+    const scanAgeH = lastScan ? (Date.now() - new Date(lastScan.includes('Z') ? lastScan : lastScan + 'Z').getTime()) / 3600_000 : 999;
+    if (!ready || winners === 0)          { color = 'var(--red)';    label = 'EMPTY OR NOT READY'; }
+    else if (winners < 500 || scanAgeH > 48) { color = 'var(--gold)'; label = 'STALE / THIN'; }
+    else                                     { color = 'var(--green)'; label = 'HEALTHY'; }
+    dot.style.background = color;
+    dot.style.boxShadow  = `0 0 10px ${color}`;
+    subtitle.textContent = `${label} · last scan ${lastScan ? csTimeAgo(lastScan) : 'never'}`;
+    subtitle.style.color = color;
+
+    statsEl.innerHTML = [
+      ['WINNERS', winners.toLocaleString(), 'var(--green)'],
+      ['SNIPERS', snipers.toLocaleString(), 'var(--red)'],
+      ['TOTAL',   total.toLocaleString(),   'var(--cyan)'],
+      ['FROM DUNE',   dune.toLocaleString(),   'var(--purple)'],
+      ['MANUAL ADDS', manual.toLocaleString(), 'var(--text2)'],
+    ].map(([lbl, val, col]) => `
+      <div style="padding:8px 10px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:5px">
+        <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">${lbl}</div>
+        <div style="font-family:var(--mono);font-size:14px;font-weight:700;color:${col};margin-top:2px">${val}</div>
+      </div>`).join('');
+  } catch (err) {
+    dot.style.background = 'var(--red)';
+    subtitle.textContent = '✕ ' + err.message;
+    subtitle.style.color = 'var(--red)';
+  }
+}
+
+async function csDuneRescan(btn) {
+  const statusEl = document.getElementById('csDuneStatus');
+  if (!confirm('Trigger a full Dune wallet rescan? This pulls fresh WINNER / SMART MONEY / SNIPER wallets from Dune and can take 2-5 minutes.\n\nUses Dune API credits — make sure you have budget.')) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ SCANNING…'; }
+  if (statusEl) { statusEl.textContent = 'Kicking off scan…'; statusEl.style.color = 'var(--text3)'; }
+  try {
+    const res = await fetch('/api/v8/dune-wallet-scan', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'scan failed');
+    if (statusEl) {
+      statusEl.textContent = '✓ Scan triggered — this runs in background. Refreshing status every 30s for 5min…';
+      statusEl.style.color = 'var(--green)';
+    }
+    // Poll status every 30s for 5 minutes to catch completion
+    let polls = 0;
+    const pollTimer = setInterval(() => {
+      polls++;
+      csDuneRefresh();
+      if (polls >= 10) clearInterval(pollTimer);
+    }, 30_000);
+    csDuneRefresh();
+  } catch (err) {
+    if (statusEl) { statusEl.textContent = '✕ ' + err.message; statusEl.style.color = 'var(--red)'; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '🐋 RESCAN NOW'; }
+  }
 }
 
 async function csLoad(category) {

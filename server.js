@@ -2700,12 +2700,20 @@ async function processCandidate(candidate, isRescan = false) {
         : (walletDb.size() > 0 ? walletDb.crossReference(holderAddrs) : null);
 
       if (walletIntel) {
+        // If the Dune DB has no winner side loaded, smartMoneyScore of 0
+        // is misleading (it reads like "no signal" but really means "no
+        // data"). Surface null → dashboard shows "—" instead of "0".
+        const duneStats = getDuneWalletStatus();
+        const duneWinnerPool = duneStats?.dbStats?.winners ?? 0;
+        const winnerCount = walletIntel.knownWinnerWalletCount ?? 0;
+        const noWinnerData = duneWinnerPool === 0 && winnerCount === 0;
+
         enrichedCandidate.walletIntel            = walletIntel;
-        enrichedCandidate.smartMoneyScore        = walletIntel.smartMoneyScore;
+        enrichedCandidate.smartMoneyScore        = noWinnerData ? null : walletIntel.smartMoneyScore;
         enrichedCandidate.sniperWalletCount      = walletIntel.sniperWalletCount;
         enrichedCandidate.suspiciousClusterScore = walletIntel.suspiciousClusterScore;
         enrichedCandidate.walletVerdict          = walletIntel.walletVerdict;
-        enrichedCandidate.walletIntelScore       = walletIntel.smartMoneyScore;
+        enrichedCandidate.walletIntelScore       = noWinnerData ? null : walletIntel.smartMoneyScore;
         enrichedCandidate.knownWinnerWallets     = walletIntel.winnerWallets ?? [];
 
         if (walletIntel.knownWinnerWalletCount > 0) {
