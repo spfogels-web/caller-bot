@@ -99,6 +99,49 @@ function uniq(arr) {
   return [...new Set(arr.filter(Boolean))];
 }
 
+/**
+ * Classify the LP-security state of a token from burn / lock percentages +
+ * unlock timestamp. Values are 0-100 percentages.
+ *
+ * Thresholds are tuned for a SHORT-HOLD caller bot — memecoins rarely live
+ * 24h, so any lock covering that window is effectively "safe for the hold".
+ * A 3-day lock is plenty of runway for a 10x play that fires in minutes.
+ *
+ *   BURNED          — ≥95% burned (safest — unrugable)
+ *   LOCKED_LONG     — ≥80% locked, unlock >30d away
+ *   LOCKED_MEDIUM   — ≥80% locked, unlock 7-30d out (safe for any hold window)
+ *   LOCKED_SHORT    — ≥80% locked, unlock 1-7d out (still covers typical hold)
+ *   LOCKED_IMMINENT — ≥80% locked, unlock within 24h (actual rug window)
+ *   PARTIAL         — 50-80% burn+lock: some LP secured, rest free
+ *   UNLOCKED        — <20% burn+lock, dev holds LP directly (high rug risk)
+ *   UNKNOWN         — no Birdeye data (don't reward or penalize)
+ *
+ * Note: pump.fun bonding-curve tokens are returned as UNKNOWN here because
+ * they have no LP yet — the bonding curve is program-controlled, not
+ * LP-rugable. The merge layer re-tags those as BONDING_CURVE.
+ */
+function classifyLpSecurity(burnedPct, lockedPct, unlockTimeSec) {
+  const burn  = Number.isFinite(burnedPct) ? burnedPct : 0;
+  const lock  = Number.isFinite(lockedPct) ? lockedPct : 0;
+  const safe  = burn + lock;
+
+  if (burnedPct == null && lockedPct == null) return 'UNKNOWN';
+  if (burn >= 95) return 'BURNED';
+
+  if (safe >= 80) {
+    if (!Number.isFinite(unlockTimeSec)) return 'LOCKED_LONG';
+    const daysOut = (unlockTimeSec * 1000 - Date.now()) / (1000 * 60 * 60 * 24);
+    if (daysOut >= 30)  return 'LOCKED_LONG';
+    if (daysOut >= 7)   return 'LOCKED_MEDIUM';
+    if (daysOut >= 1)   return 'LOCKED_SHORT';
+    return 'LOCKED_IMMINENT';
+  }
+
+  if (safe >= 50) return 'PARTIAL';
+  if (safe <  20) return 'UNLOCKED';
+  return 'PARTIAL';
+}
+
 async function safeFetch(url, options = {}, label = 'fetch', timeoutMs = 12_000) {
   try {
     const res = await fetch(url, {
@@ -202,12 +245,29 @@ async function enrichWithBirdeye(ca) {
 
     if (s.freezeAuthority != null) result.freezeAuthority = s.freezeAuthority ? 1 : 0;
     if (s.isMutable != null)       result.mintAuthority   = s.isMutable ? 1 : 0;
-    // FIXED: Only set lpLocked=1 if we can confirm it — don't set 0 for unknown
-    if (s.lpBurned === true)       result.lpLocked = 1;
-    // If lpBurned is false or null, leave result.lpLocked as undefined (null in merge)
-    // This prevents the scorer from penalizing for "not locked" when we just don't know
 
-    console.log(`[enricher:birdeye] ✓ security — top10:${result.top10HolderPct?.toFixed?.(1) ?? '?'}% dev:${result.devWalletPct?.toFixed?.(1) ?? '?'}%`);
+    // ── LP SECURITY — broader parse of Birdeye's security fields ─────────
+    // Birdeye returns a bag of LP fields under different names depending on
+    // age/source. Read them all greedily so we can classify properly later.
+    //   - lpBurnedPercentage / lpBurnPercentage — how much LP sent to burn
+    //   - lockInfo.lockedPercent / lpLockedPercentage — how much in lockers
+    //   - lockInfo.unlockTime — unix seconds when lock releases
+    const lpBurnedPct = toNum(s.lpBurnedPercentage ?? s.lpBurnPercentage, null);
+    const lpLockedPct = toNum(s.lpLockedPercentage ?? s.lockInfo?.lockedPercent, null);
+    const unlockTime  = toNum(s.lockInfo?.unlockTime ?? s.lpUnlockAt, null);
+    if (lpBurnedPct != null) result.lpBurnedPct    = lpBurnedPct;
+    if (lpLockedPct != null) result.lpLockedPct    = lpLockedPct;
+    if (unlockTime  != null) result.lpUnlockAtSec  = unlockTime;
+
+    // Legacy lpLocked flag — still set for backwards compat when clearly safe
+    if (s.lpBurned === true || lpBurnedPct >= 95 || (lpLockedPct ?? 0) >= 80) {
+      result.lpLocked = 1;
+    }
+
+    // Compose lpSecurityStatus for scorer/caption consumption
+    result.lpSecurityStatus = classifyLpSecurity(lpBurnedPct, lpLockedPct, unlockTime);
+
+    console.log(`[enricher:birdeye] ✓ security — top10:${result.top10HolderPct?.toFixed?.(1) ?? '?'}% dev:${result.devWalletPct?.toFixed?.(1) ?? '?'}% lp:${result.lpSecurityStatus ?? '?'}`);
   } else {
     console.warn('[enricher:birdeye] ✗ no security data');
   }
@@ -691,6 +751,18 @@ function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, 
     merged.lpLocked = 1;
   }
   // If lpLocked_helius is null, don't set merged.lpLocked to 0 — leave as null (unknown)
+
+  // pump.fun pre-graduation tokens don't have an LP yet — all liquidity is
+  // in the program-controlled bonding curve. Mark these as BONDING_CURVE so
+  // the scorer treats them as "not an LP-rug vector" rather than UNLOCKED.
+  // Detection: candidate.dex === 'pumpfun' and market cap < ~70K (graduation).
+  if (
+    (merged.lpSecurityStatus == null || merged.lpSecurityStatus === 'UNKNOWN') &&
+    (candidate.dex === 'pumpfun' || candidate.dex === 'pump-fun' || candidate.dex === 'pump.fun') &&
+    (merged.marketCap ?? 0) < 70_000
+  ) {
+    merged.lpSecurityStatus = 'BONDING_CURVE';
+  }
 
   merged.heliusOk    = heliusData.heliusOk    ?? false;
   merged.birdeyeOk   = birdeyeData.birdeyeOk  ?? false;

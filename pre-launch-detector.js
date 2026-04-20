@@ -26,7 +26,7 @@ const EXCHANGE_WALLETS = {
   // Add more as you identify them
 };
 
-const TICK_MS         = 90_000;        // 90s between sweeps
+const TICK_MS         = 300_000;       // 5min between sweeps (credit budget)
 const SUSPECT_TTL_MS  = 6 * 60 * 60_000; // 6h window
 const MIN_SOL_OUTFLOW = 1;
 const MAX_SOL_OUTFLOW = 10;

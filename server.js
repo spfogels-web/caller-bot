@@ -88,7 +88,8 @@ import {
 
 const {
   TELEGRAM_BOT_TOKEN,
-  TELEGRAM_GROUP_CHAT_ID,
+  TELEGRAM_GROUP_CHAT_ID,        // VIP channel — fires on raw signal
+  TELEGRAM_FREE_CHAT_ID,         // Free channel — fires only after 2x delayed
   CLAUDE_API_KEY,
   OPENAI_API_KEY,
   ADMIN_TELEGRAM_ID,
@@ -1016,9 +1017,11 @@ const SCORING_CONFIG_DEFAULTS = {
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
   devFingerprintCap:       3,   // max positive delta from dev history
-  noSignalCap:            65,   // structure-only coins capped here
+  globalBonusCap:         10,   // total bonus stack across all sources
+  noSignalCap:            68,   // structure-only coins capped here
   rugGuardMinScore:       60,   // $13K-$17.5K requires this score
-  consensusOverrideScore: 65,   // single-AI override floor
+  consensusOverrideScore: 60,   // single-AI override floor
+  deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
   winPeakMultiple:         1.5, // peak X to lock WIN
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
 };
@@ -1035,6 +1038,101 @@ function persistScoringConfig() {
   try {
     dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoring_config', ?)`).run(JSON.stringify(SCORING_CONFIG));
   } catch {}
+}
+
+// ─── Additional runtime configs (persisted to kv_store) ──────────────────────
+// These live in server memory + kv_store; when the modules that USE them
+// are started, they can read these values. Changes to module-level constants
+// (e.g. smart-money-watcher POLL_INTERVAL_MS) take effect on next restart
+// unless the module re-reads on tick.
+
+const SCANNER_CONFIG_DEFAULTS = {
+  maxPromotedCandidates: 50,
+  maxTokensToFetch:      300,
+  dexBatchSize:          30,
+  maxPairAgeHours:       4,
+  quickScoreAutoPromote: 35,
+  quickScoreWatchlist:   22,
+  quickScoreDrop:        15,
+  rescanScheduleMins:    '1,3,7,15',
+};
+const WALLETS_CONFIG_DEFAULTS = {
+  topNWatched:        80,
+  clusterThreshold:    3,
+  perWalletTxLimit:    5,
+  pollIntervalSec:   300,
+  kolWallets:         '',  // comma-separated; empty = use DEFAULT_KOL_WALLETS
+};
+const PRELAUNCH_CONFIG_DEFAULTS = {
+  tickIntervalSec:   300,
+  suspectTtlHours:     6,
+  minSolOutflow:       1,
+  maxSolOutflow:      10,
+  bundleCacheHours:   24,
+};
+const OUTCOMES_CONFIG_DEFAULTS = {
+  slMultiple:   0.75, // stop-loss threshold vs entry MCap
+  tp1Multiple:  1.5,  // WIN threshold (peak must hit this)
+  tp2Multiple:  5.0,
+  tp3Multiple: 10.0,
+};
+
+let SCANNER_CONFIG   = { ...SCANNER_CONFIG_DEFAULTS };
+let WALLETS_CONFIG   = { ...WALLETS_CONFIG_DEFAULTS };
+let PRELAUNCH_CONFIG = { ...PRELAUNCH_CONFIG_DEFAULTS };
+let OUTCOMES_CONFIG  = { ...OUTCOMES_CONFIG_DEFAULTS };
+
+try {
+  const loadKv = (key) => {
+    const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key=?`).get(key);
+    return row?.value ? JSON.parse(row.value) : null;
+  };
+  const loaded = {
+    scanner:   loadKv('scanner_config'),
+    wallets:   loadKv('wallets_config'),
+    prelaunch: loadKv('prelaunch_config'),
+    outcomes:  loadKv('outcomes_config'),
+  };
+  if (loaded.scanner)   SCANNER_CONFIG   = { ...SCANNER_CONFIG_DEFAULTS,   ...loaded.scanner };
+  if (loaded.wallets)   WALLETS_CONFIG   = { ...WALLETS_CONFIG_DEFAULTS,   ...loaded.wallets };
+  if (loaded.prelaunch) PRELAUNCH_CONFIG = { ...PRELAUNCH_CONFIG_DEFAULTS, ...loaded.prelaunch };
+  if (loaded.outcomes)  OUTCOMES_CONFIG  = { ...OUTCOMES_CONFIG_DEFAULTS,  ...loaded.outcomes };
+} catch (err) { console.warn('[config] Failed to restore extended configs:', err.message); }
+
+function persistExtendedConfig(category) {
+  const map = {
+    scanner:   ['scanner_config',   SCANNER_CONFIG],
+    wallets:   ['wallets_config',   WALLETS_CONFIG],
+    prelaunch: ['prelaunch_config', PRELAUNCH_CONFIG],
+    outcomes:  ['outcomes_config',  OUTCOMES_CONFIG],
+  };
+  const entry = map[category];
+  if (!entry) return;
+  try {
+    dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)`).run(entry[0], JSON.stringify(entry[1]));
+  } catch {}
+}
+
+// ─── Audit logger — every config change gets one row ──────────────────────
+// Writes to config_changes table; used by Control Station audit tab +
+// per-knob "last changed" metadata. Keeps old/new as JSON-strings so any
+// value type (number, string, boolean, array) round-trips cleanly.
+function logConfigChange(category, knobKey, oldValue, newValue, source = 'operator', reason = null) {
+  try {
+    dbInstance.prepare(`
+      INSERT INTO config_changes (category, source, knob_key, old_value, new_value, reason)
+      VALUES (?,?,?,?,?,?)
+    `).run(
+      String(category).toUpperCase(),
+      source,
+      knobKey,
+      oldValue == null ? null : JSON.stringify(oldValue),
+      newValue == null ? null : JSON.stringify(newValue),
+      reason ?? null
+    );
+  } catch (err) {
+    console.warn(`[config-audit] log failed: ${err.message}`);
+  }
 }
 function getAIConfigSummary() {
   const overrides = Object.keys(AI_CONFIG_OVERRIDES).length;
@@ -1412,18 +1510,21 @@ async function uploadBannerToTelegram() {
   }
 }
 
-async function sendCallAlertWithImage(caption, fullText) {
+async function sendCallAlertWithImage(caption, _unusedFullText, coinImageUrl = null) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
 
-  const photoSrc = _bannerFileId ?? BANNER_IMAGE_URL;
+  // Prefer the coin's own image (DexScreener info.imageUrl). Fall back to
+  // pulse-caller banner if the coin has no metadata image.
+  const photoSrc = coinImageUrl || _bannerFileId || BANNER_IMAGE_URL;
+  const usingCoinImage = !!coinImageUrl;
 
   let safeCaption = caption;
-  if (safeCaption.length > 950) {
-    safeCaption = safeCaption.slice(0, 947) + '…';
-    console.warn(`[TG] Caption truncated from ${caption.length} to 950 chars`);
+  if (safeCaption.length > 1020) {
+    safeCaption = safeCaption.slice(0, 1017) + '…';
+    console.warn(`[TG] Caption truncated from ${caption.length} to 1020 chars`);
   }
 
-  console.log(`[TG] Sending banner+caption (${safeCaption.length} chars) via ${_bannerFileId ? 'file_id' : 'URL'}: ${BANNER_IMAGE_URL.slice(0,60)}`);
+  console.log(`[TG] Sending ${usingCoinImage ? 'coin' : 'banner'}+caption (${safeCaption.length} chars)`);
 
   try {
     const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
@@ -1441,47 +1542,32 @@ async function sendCallAlertWithImage(caption, fullText) {
     const photoData = await photoRes.json();
 
     if (photoRes.ok && photoData.ok) {
-      const photos = photoData.result?.photo;
-      if (photos?.length && !_bannerFileId) {
-        _bannerFileId = photos[photos.length - 1].file_id;
-        console.log(`[TG] Banner file_id cached for future calls`);
+      // Only cache the PULSE banner file_id (coin images are per-token, not reusable)
+      if (!usingCoinImage) {
+        const photos = photoData.result?.photo;
+        if (photos?.length && !_bannerFileId) {
+          _bannerFileId = photos[photos.length - 1].file_id;
+          console.log(`[TG] Banner file_id cached for future calls`);
+        }
       }
-      console.log(`[TG] ✓ Banner+caption sent`);
-    } else {
-      console.warn(`[TG] Banner failed: ${JSON.stringify(photoData).slice(0, 500)}`);
-      console.warn(`[TG] Banner URL was: ${photoSrc?.slice(0, 100)}`);
-      if (_bannerFileId) { _bannerFileId = null; console.warn('[TG] file_id cache cleared — will retry with URL'); }
-      await sendTelegramGroupMessage(safeCaption).catch(() => {});
+      console.log(`[TG] ✓ Photo+caption sent`);
+      return;
     }
-  } catch (err) {
-    console.warn(`[TG] Banner error: ${err.message}`);
+
+    console.warn(`[TG] Photo send failed: ${JSON.stringify(photoData).slice(0, 400)}`);
+
+    // If the coin image URL was rejected by Telegram, retry with pulse banner
+    if (usingCoinImage) {
+      console.warn(`[TG] Retrying with pulse banner fallback`);
+      await sendCallAlertWithImage(caption, null, null);
+      return;
+    }
+    // Pulse banner also failed → text-only
+    if (_bannerFileId) { _bannerFileId = null; console.warn('[TG] banner file_id cleared'); }
     await sendTelegramGroupMessage(safeCaption).catch(() => {});
-  }
-
-  await sleep(600);
-
-  try {
-    const msgRes = await fetch(`${TELEGRAM_API}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id:    TELEGRAM_GROUP_CHAT_ID,
-        text:       fullText,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    if (!msgRes.ok) {
-      const errBody = await msgRes.text();
-      console.error(`[TG] Full text failed ${msgRes.status}: ${errBody.slice(0, 200)}`);
-    } else {
-      console.log(`[TG] ✓ Full detail message sent`);
-    }
   } catch (err) {
-    console.error(`[TG] Full text error: ${err.message}`);
-    await sendTelegramGroupMessage(fullText).catch(() => {});
+    console.warn(`[TG] Photo error: ${err.message}`);
+    await sendTelegramGroupMessage(safeCaption).catch(() => {});
   }
 }
 
@@ -1837,59 +1923,84 @@ function buildSLTPBlock(candidate) {
 
 function buildCallAlertCaption(candidate, verdict, scoreResult) {
   const { risk='?', setup_type='?' } = verdict;
-  // Use the COMPOSITE score (full pipeline: scorer + bonuses + AI adjustments),
-  // NOT verdict.score (which is just Claude's opinion). Claude's score can be
-  // much lower than the composite when Claude disagrees with the scorer —
-  // showing it on TG made posts look low-rated when the bot actually scored
-  // them high overall.
   const score = scoreResult?.score ?? verdict.score ?? 0;
   const grade = scoreResult?.structureGrade ?? '?';
-  const stage = scoreResult?.stage ?? '?';
 
-  const entryMcap  = fmt(candidate.marketCap, '$');
-  const entryPrice = candidate.priceUsd ? `$${Number(candidate.priceUsd).toFixed(8)}` : '?';
-  const age        = candidate.pairAgeHours != null ? candidate.pairAgeHours.toFixed(1)+'h' : '?';
+  // Format helpers
+  const kFmt = (n) => {
+    if (n == null) return '?';
+    if (n >= 1_000_000) return `$${(n/1_000_000).toFixed(2)}M`;
+    if (n >= 1_000)     return `$${(n/1_000).toFixed(1)}K`;
+    return `$${n.toFixed(0)}`;
+  };
+  const ageFmt = (h) => {
+    if (h == null) return '?';
+    if (h < 1)  return `${Math.round(h*60)}m`;
+    if (h < 24) return `${h.toFixed(1)}h`;
+    return `${(h/24).toFixed(1)}d`;
+  };
+  const pct = (v) => v == null ? '?' : `${v > 0 ? '+' : ''}${v.toFixed(0)}%`;
 
-  const mintOk   = candidate.mintAuthority   === 0 ? '🟢' : candidate.mintAuthority   === 1 ? '🔴' : '⚪';
-  const freezeOk = candidate.freezeAuthority === 0 ? '🟢' : candidate.freezeAuthority === 1 ? '🔴' : '⚪';
-  const lpOk     = candidate.lpLocked === 1 ? '🟢' : candidate.lpLocked === 0 ? '🔴' : '⚪';
+  const entryMcap = kFmt(candidate.marketCap);
+  const vol24     = kFmt(candidate.volume24h);
+  const age       = ageFmt(candidate.pairAgeHours);
 
-  const p1h  = candidate.priceChange1h  != null ? (candidate.priceChange1h  > 0 ? '+' : '') + candidate.priceChange1h.toFixed(0)  + '%' : '?';
-  const p24h = candidate.priceChange24h != null ? (candidate.priceChange24h > 0 ? '+' : '') + candidate.priceChange24h.toFixed(0) + '%' : '?';
+  const mintOk   = candidate.mintAuthority   === 0 ? '✓' : candidate.mintAuthority   === 1 ? '⚠' : '?';
+  const freezeOk = candidate.freezeAuthority === 0 ? '✓' : candidate.freezeAuthority === 1 ? '⚠' : '?';
+  // LP status glyph — granular over the old binary lpLocked field.
+  // 🔥 burned · 🔒 locked (long/short) · ⏳ locked-soon · ⚠ unlocked · ~ bonding-curve / unknown
+  const lpStatus = candidate.lpSecurityStatus;
+  const lpOk =
+      lpStatus === 'BURNED'                               ? '🔥'
+    : lpStatus === 'LOCKED_LONG' || lpStatus === 'LOCKED_SHORT' ? '🔒'
+    : lpStatus === 'LOCKED_SOON'                          ? '⏳'
+    : lpStatus === 'UNLOCKED'                             ? '⚠'
+    : lpStatus === 'PARTIAL'                              ? '⚠'
+    : lpStatus === 'BONDING_CURVE'                        ? '~'
+    : candidate.lpLocked === 1                            ? '🔒'
+    : candidate.lpLocked === 0                            ? '⚠'
+    : '?';
 
-  const top10  = candidate.top10HolderPct != null ? candidate.top10HolderPct.toFixed(1) + '%' : '?';
-  const dev    = candidate.devWalletPct   != null ? candidate.devWalletPct.toFixed(2)   + '%' : '?';
-  const holders= candidate.holders?.toLocaleString() ?? '?';
+  const top10   = candidate.top10HolderPct != null ? candidate.top10HolderPct.toFixed(0) + '%' : '?';
+  const devPct  = candidate.devWalletPct   != null ? candidate.devWalletPct.toFixed(1)   + '%' : '?';
+  const holders = candidate.holders?.toLocaleString() ?? '?';
+
+  // Dev rap sheet — if we have fingerprint, show launches/wins
+  const fp = scoreResult?.devFingerprint;
+  const devRap = fp && fp.total_launches > 0
+    ? `Tokens: ${fp.total_launches} | Wins: ${fp.wins ?? 0}${fp.grade && fp.grade !== 'NEUTRAL' ? ` · ${fp.grade}` : ''}`
+    : '—';
 
   const tokenLabel = candidate.token
     || candidate.tokenName
     || (candidate.contractAddress ? candidate.contractAddress.slice(0, 4).toUpperCase() : '?');
-  const nameLabel  = candidate.tokenName && candidate.tokenName !== candidate.token ? candidate.tokenName : '';
+  const nameLabel  = candidate.tokenName && candidate.tokenName !== candidate.token
+    ? candidate.tokenName : '';
+
+  // Compact verdict (1-2 lines, strip to ~140 chars)
+  const vText = (verdict.verdict || '').replace(/\s+/g, ' ').trim();
+  const vSnip = vText.length > 140 ? vText.slice(0, 137) + '…' : vText;
+
+  // Links line
+  const linkParts = [];
+  if (candidate.twitter)  linkParts.push(`<a href="${candidate.twitter}">X</a>`);
+  if (candidate.telegram) linkParts.push(`<a href="${candidate.telegram}">TG</a>`);
+  if (candidate.website)  linkParts.push(`<a href="${candidate.website}">Web</a>`);
+  linkParts.push(`<a href="https://dexscreener.com/solana/${candidate.contractAddress}">DEX</a>`);
+  linkParts.push(`<a href="https://pump.fun/${candidate.contractAddress}">PF</a>`);
 
   return (
-    `⚡ <b>PULSE CALLER — CALL ALERT</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `<b>$${escapeHtml(tokenLabel)}</b>  <i>${escapeHtml(nameLabel)}</i>  •  ${stage}\n` +
+    `⚡ <b>PULSE CALLER</b> · Entry: ${entryMcap}\n\n` +
+    `<b>$${escapeHtml(tokenLabel)}</b>${nameLabel ? ` | <i>${escapeHtml(nameLabel)}</i>` : ''}\n` +
     `<code>${escapeHtml(candidate.contractAddress ?? '—')}</code>\n\n` +
-    `📊 <b>Stats</b>\n` +
-    `Price: <b>${entryPrice}</b>\n` +
-    `MC: <b>${entryMcap}</b>  |  Vol24h: <b>${fmt(candidate.volume24h, '$')}</b>  |  Age: <b>${age}</b>\n` +
-    `5M: <b>${candidate.priceChange5m != null ? (candidate.priceChange5m > 0 ? '+' : '') + candidate.priceChange5m.toFixed(0) + '%' : '?'}</b>  |  1H: <b>${p1h}</b>  |  24H: <b>${p24h}</b>\n` +
-    `1H Txns: <b>${candidate.buys1h ?? '?'}</b> 🟢  <b>${candidate.sells1h ?? '?'}</b> 🔴\n\n` +
-    `🔒 <b>Security</b>\n` +
-    `${mintOk} Mint  ${freezeOk} Freeze  ${lpOk} LP\n` +
-    `Top 10: <b>${top10}</b>  |  Dev: <b>${dev}</b>  |  Holders: <b>${holders}</b>\n\n` +
-    `🧠 <b>Score: ${score}/100</b>  ${scoreBar(score)}\n` +
-    `Risk: ${riskEmoji(risk)} <b>${risk}</b>  |  Structure: ${gradeEmoji(grade)} <b>${grade}</b>\n` +
-    buildFoundationSignalsBlock(scoreResult) +
-    buildMultiplierTargetBlock(candidate) +
-    buildSLTPBlock(candidate) +
-    (candidate.website || candidate.twitter || candidate.telegram
-      ? `\n🔗 <b>Links</b>\n` +
-        (candidate.website  ? `🌐 <a href="${candidate.website}">Web</a>  ` : '') +
-        (candidate.twitter  ? `𝕏 <a href="${candidate.twitter}">X</a>  `   : '') +
-        (candidate.telegram ? `✈️ <a href="${candidate.telegram}">TG</a>`   : '')
-      : '')
+    `├ MC: <b>${entryMcap}</b> · Vol24h: <b>${vol24}</b> · Age: <b>${age}</b>\n` +
+    `├ 1H: <b>${pct(candidate.priceChange1h)}</b> · 24H: <b>${pct(candidate.priceChange24h)}</b> · Buys/Sells 1H: <b>${candidate.buys1h ?? '?'}/${candidate.sells1h ?? '?'}</b>\n` +
+    `├ 🔒 Mint:${mintOk} Freeze:${freezeOk} LP:${lpOk} · Top10: <b>${top10}</b> · Dev: <b>${devPct}</b> · Holders: <b>${holders}</b>\n` +
+    `├ 👤 Dev: ${devRap}\n` +
+    `├ 🧠 Score: <b>${score}/100</b> · Risk: <b>${risk}</b> · Setup: <b>${setup_type}</b>\n` +
+    `└ 🎯 Structure: <b>${grade}</b>\n` +
+    (vSnip ? `\n💬 <i>${escapeHtml(vSnip)}</i>\n` : '') +
+    `\n🔗 ${linkParts.join(' · ')}`
   );
 }
 
@@ -2300,6 +2411,22 @@ async function processCandidate(candidate, isRescan = false) {
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
 
+    // ── Global bonus-cap helper ────────────────────────────────────────────
+    // Every post-score bonus draws from a shared budget (SCORING_CONFIG.globalBonusCap).
+    // Prevents stacked bonuses (sweet-spot + pre-launch + cross-chain + dev-fp + divergence)
+    // from manufacturing a 90+ composite out of a mediocre base score.
+    scoreResult._bonusBudgetUsed = 0;
+    const addBonusCapped = (amount) => {
+      const cap = SCORING_CONFIG.globalBonusCap ?? 8;
+      const remaining = Math.max(0, cap - scoreResult._bonusBudgetUsed);
+      const applied = Math.max(0, Math.min(amount, remaining));
+      if (applied > 0) {
+        scoreResult.score = Math.min(100, scoreResult.score + applied);
+        scoreResult._bonusBudgetUsed += applied;
+      }
+      return applied; // caller can label with actual amount applied
+    };
+
     // ── DATA QUALITY GATE: reject tokens with zero enrichment data ────────
     // If Birdeye AND Helius both failed AND we have no market cap, this token
     // has no real data — scoring is meaningless. Don't waste Claude/OpenAI
@@ -2320,16 +2447,18 @@ async function processCandidate(candidate, isRescan = false) {
     const ssMax = TUNING_CONFIG?.thresholds?.sweetSpotMax ?? 40_000;
     let mcapTier = null;
     if (mcap >= ssMin && mcap <= ssMax) {
-      const b = SCORING_CONFIG.sweetSpotBonus;
-      scoreResult.score = Math.min(100, scoreResult.score + b);
-      (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($${ssMin/1000}K-$${ssMax/1000}K)`);
+      const b = addBonusCapped(SCORING_CONFIG.sweetSpotBonus);
+      if (b > 0) {
+        (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+        scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($${ssMin/1000}K-$${ssMax/1000}K)`);
+      }
       mcapTier = 'SWEET_SPOT';
     } else if (mcap > ssMax && mcap <= 80_000) {
-      const b = SCORING_CONFIG.secondaryBonus;
-      scoreResult.score = Math.min(100, scoreResult.score + b);
-      (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push(`+${b} secondary MCap ($${ssMax/1000}K-$80K)`);
+      const b = addBonusCapped(SCORING_CONFIG.secondaryBonus);
+      if (b > 0) {
+        (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+        scoreResult.signals.launch.push(`+${b} secondary MCap ($${ssMax/1000}K-$80K)`);
+      }
       mcapTier = 'SECONDARY';
     } else if (mcap > 0 && mcap < ssMin) {
       mcapTier = 'PRE_SWEETSPOT';
@@ -2360,15 +2489,16 @@ async function processCandidate(candidate, isRescan = false) {
           divDelta = -5;
           divLabel = `${divDelta} dying coin (price ${p1h.toFixed(0)}%, no volume)`;
         }
-        if (divDelta !== 0) {
-          scoreResult.score = Math.max(0, Math.min(100, scoreResult.score + divDelta));
-          if (divDelta > 0) {
+        if (divDelta > 0) {
+          const applied = addBonusCapped(divDelta);
+          if (applied > 0) {
             (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
-            scoreResult.signals.market.push(divLabel);
-          } else {
-            (scoreResult.penalties = scoreResult.penalties || {}).market = scoreResult.penalties.market || [];
-            scoreResult.penalties.market.push(divLabel);
+            scoreResult.signals.market.push(`+${applied} accumulation divergence (price ${p1h.toFixed(0)}%, vol surge ${volVel.toFixed(2)})`);
           }
+        } else if (divDelta < 0) {
+          scoreResult.score = Math.max(0, scoreResult.score + divDelta);
+          (scoreResult.penalties = scoreResult.penalties || {}).market = scoreResult.penalties.market || [];
+          scoreResult.penalties.market.push(divLabel);
         }
       }
     }
@@ -2404,14 +2534,22 @@ async function processCandidate(candidate, isRescan = false) {
         const fp = getDevFingerprint(deployer, dbInstance);
         const adj = devScoreAdjustment(fp);
         if (adj.delta !== 0) {
-          // Cap dev fingerprint bonus at +3 (penalties left uncapped — RUGGER
-          // should still hurt as much as the model says).
-          const cappedDelta = adj.delta > 0 ? Math.min(adj.delta, SCORING_CONFIG.devFingerprintCap) : adj.delta;
-          scoreResult.score = Math.max(0, Math.min(100, scoreResult.score + cappedDelta));
-          scoreResult.devFingerprint = { ...fp, adjustment: { ...adj, delta: cappedDelta } };
-          (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-          if (cappedDelta > 0) scoreResult.signals.launch.push(`+${cappedDelta} ${adj.reason}`);
-          else (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `${cappedDelta} ${adj.reason}`];
+          // Dev fingerprint: positive deltas go through the global bonus budget
+          // AND the per-source devFingerprintCap. Penalties (RUGGER) stay
+          // uncapped — bad dev history should still hurt as much as the model says.
+          if (adj.delta > 0) {
+            const bounded = Math.min(adj.delta, SCORING_CONFIG.devFingerprintCap);
+            const applied = addBonusCapped(bounded);
+            scoreResult.devFingerprint = { ...fp, adjustment: { ...adj, delta: applied } };
+            if (applied > 0) {
+              (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+              scoreResult.signals.launch.push(`+${applied} ${adj.reason}`);
+            }
+          } else {
+            scoreResult.score = Math.max(0, scoreResult.score + adj.delta);
+            scoreResult.devFingerprint = { ...fp, adjustment: { ...adj, delta: adj.delta } };
+            (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `${adj.delta} ${adj.reason}`];
+          }
         }
       }
     } catch {}
@@ -2423,12 +2561,70 @@ async function processCandidate(candidate, isRescan = false) {
         const { isPreLaunchSuspect, markSuspectConsumed } = await import('./pre-launch-detector.js');
         const suspect = isPreLaunchSuspect(deployer, dbInstance);
         if (suspect) {
-          scoreResult.score = Math.min(100, scoreResult.score + SCORING_CONFIG.preLaunchBonus);
+          const applied = addBonusCapped(SCORING_CONFIG.preLaunchBonus);
           scoreResult.preLaunchPredicted = true;
-          (scoreResult.signals = scoreResult.signals || {}).launch =
-            [...(scoreResult.signals.launch || []),
-             `+6 PRE_LAUNCH_PREDICTED — dev funded by ${suspect.source_exchange} ${suspect.funded_amount}◎ within last 6h`];
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).launch =
+              [...(scoreResult.signals.launch || []),
+               `+${applied} PRE_LAUNCH_PREDICTED — dev funded by ${suspect.source_exchange} ${suspect.funded_amount}◎ within last 6h`];
+          }
           markSuspectConsumed(deployer, ca, dbInstance);
+        }
+      }
+    } catch {}
+
+    // ── LP SECURITY SCORING ─────────────────────────────────────────────
+    // We hunt coins with hold windows of minutes to hours. Any LP that's
+    // actually locked (even 1 hour out) means the dev CANNOT rug during
+    // the trade — so short locks aren't penalized. Only treat it as a
+    // rug-risk when LP is directly in the dev's hands (UNLOCKED / PARTIAL).
+    // Long locks still earn a small bonus as a quality signal.
+    try {
+      const lpStatus = enrichedCandidate.lpSecurityStatus;
+      if (lpStatus && lpStatus !== 'UNKNOWN' && lpStatus !== 'BONDING_CURVE') {
+        if (lpStatus === 'BURNED') {
+          const applied = addBonusCapped(6);
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+            scoreResult.signals.launch.push(`+${applied} LP_BURNED — liquidity permanently unrugable`);
+          }
+        } else if (lpStatus === 'LOCKED_LONG') {
+          const applied = addBonusCapped(5);
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+            scoreResult.signals.launch.push(`+${applied} LP_LOCKED_LONG — unlock >30d away`);
+          }
+        } else if (lpStatus === 'LOCKED_MEDIUM') {
+          const applied = addBonusCapped(2);
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+            scoreResult.signals.launch.push(`+${applied} LP_LOCKED_MEDIUM — unlock 7-30d out`);
+          }
+        } else if (lpStatus === 'LOCKED_SHORT' || lpStatus === 'LOCKED_IMMINENT') {
+          // Neutral — any active lock covers the typical short hold window.
+          // Tag as informational signal so it surfaces in logs, no score change.
+          (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+          scoreResult.signals.launch.push(`LP_${lpStatus.slice(7)} — locked (no score change, covers typical hold)`);
+        } else if (lpStatus === 'PARTIAL') {
+          // Soft penalty — some LP secured, rest held by dev. Common at
+          // early MCaps before a dev invests in locking.
+          scoreResult.score = Math.max(0, scoreResult.score - 2);
+          (scoreResult.penalties = scoreResult.penalties || {}).launch = scoreResult.penalties.launch || [];
+          scoreResult.penalties.launch.push(`-2 LP_PARTIAL ⚠ — only some LP secured, rest in dev hands`);
+        } else if (lpStatus === 'UNLOCKED') {
+          // Most coins don't get locked until $25K-$40K MCap, so UNLOCKED
+          // below $25K is *normal*. Only penalize above that threshold where
+          // a locked LP is expected. Below $25K, surface as informational
+          // signal so you see it without score impact.
+          const mcapForLp = enrichedCandidate.marketCap ?? 0;
+          if (mcapForLp >= 25_000) {
+            scoreResult.score = Math.max(0, scoreResult.score - 5);
+            (scoreResult.penalties = scoreResult.penalties || {}).launch = scoreResult.penalties.launch || [];
+            scoreResult.penalties.launch.push(`-5 LP_UNLOCKED ⚠ — dev still holds LP above $25K MCap`);
+          } else {
+            (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+            scoreResult.signals.launch.push(`LP_UNLOCKED ⚠ — normal below $25K, watch as MCap grows`);
+          }
         }
       }
     } catch {}
@@ -2438,11 +2634,13 @@ async function processCandidate(candidate, isRescan = false) {
       const { getCrossChainMatch } = await import('./cross-chain-tracker.js');
       const match = getCrossChainMatch(ca, dbInstance);
       if (match && match.match_confidence >= 0.85) {
-        scoreResult.score = Math.min(100, scoreResult.score + SCORING_CONFIG.crossChainBonus);
+        const applied = addBonusCapped(SCORING_CONFIG.crossChainBonus);
         scoreResult.crossChainMatch = match;
-        (scoreResult.signals = scoreResult.signals || {}).social =
-          [...(scoreResult.signals.social || []),
-           `+4 CROSS-CHAIN MATCH — $${match.source_symbol} on ${match.source_chain} up ${Math.round(match.source_price_change||0)}% (${Math.round(match.match_confidence*100)}% match)`];
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).social =
+            [...(scoreResult.signals.social || []),
+             `+${applied} CROSS-CHAIN MATCH — $${match.source_symbol} on ${match.source_chain} up ${Math.round(match.source_price_change||0)}% (${Math.round(match.match_confidence*100)}% match)`];
+        }
       }
     } catch {}
     let regimeAdj = { adjustedScore: scoreResult.score, thresholdAdjust: 0, regimeNotes: [] };
@@ -2461,18 +2659,23 @@ async function processCandidate(candidate, isRescan = false) {
     // presence — or any wallet intel score above 0 — the ceiling stays at
     // 65. Those coins can still hit WATCHLIST but never AUTO_POST on the
     // strength of structure alone.
+    // Close the backdoor: preLaunchPredicted / crossChainMatch were previously
+    // enough to exempt a coin from the NO_SIGNAL cap on their own. That let
+    // structure-only coins post at 80+ just from a dev-funding hit. Now the
+    // cap is lifted only when REAL wallet-side alpha is present (smart money,
+    // known winners, or a live cluster/KOL trigger). Pre-launch/cross-chain
+    // still give their bonus points through addBonusCapped, but can't bypass
+    // the 65 ceiling by themselves.
     const hasWalletIntel = (enrichedCandidate.walletIntelScore ?? 0) > 0
                         || (enrichedCandidate.smartMoneyScore  ?? 0) > 0
                         || (enrichedCandidate.knownWinnerWalletCount ?? 0) > 0
-                        || enrichedCandidate._smartMoney
-                        || scoreResult.preLaunchPredicted
-                        || scoreResult.crossChainMatch;
+                        || enrichedCandidate._smartMoney;
     const CAP = SCORING_CONFIG.noSignalCap;
     if (!hasWalletIntel && scoreResult.score > CAP) {
       const prior = scoreResult.score;
       scoreResult.score = CAP;
       (scoreResult.penalties = scoreResult.penalties || {}).wallet = scoreResult.penalties.wallet || [];
-      scoreResult.penalties.wallet.push(`-${prior - CAP} NO_ALPHA_SIGNAL cap — no smart money, no wallet intel, no pre-launch/cross-chain hit`);
+      scoreResult.penalties.wallet.push(`-${prior - CAP} NO_ALPHA_SIGNAL cap — no smart money or wallet-intel signal`);
       console.log(`[auto-caller] 🚧 $${enrichedCandidate.token??ca.slice(0,6)} capped at ${CAP} (was ${prior}) — structure-only, no alpha signal`);
     }
 
@@ -2684,6 +2887,28 @@ async function processCandidate(candidate, isRescan = false) {
     ) {
       logEvent('WARN', 'CLAUDE_EXTREME_VETO', `${enrichedCandidate.token ?? ca.slice(0,6)} Claude=${verdict.score}/100 EXTREME — vetoed AUTO_POST despite OpenAI=${openAIDecision?.decision ?? '?'} ${openAIDecision?.conviction ?? '?'}%`);
       console.log(`[auto-caller] 🚨 Claude EXTREME veto — $${enrichedCandidate.token ?? ca.slice(0,6)} (Claude score ${verdict.score}, OpenAI ${openAIDecision?.decision ?? '?'}) → WATCHLIST`);
+      try {
+        dbInstance.prepare(`
+          INSERT INTO consensus_disagreements
+            (contract_address, token, composite_score,
+             claude_decision, claude_score, claude_risk,
+             openai_decision, openai_conviction,
+             trigger, market_regime, market_cap)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        `).run(
+          ca,
+          enrichedCandidate.token ?? null,
+          scoreResult.score ?? null,
+          verdict?.decision ?? null,
+          verdict?.score ?? null,
+          verdict?.risk ?? null,
+          openAIDecision?.decision ?? null,
+          openAIDecision?.conviction ?? null,
+          'CLAUDE_EXTREME_VETO',
+          getRegime()?.market ?? null,
+          enrichedCandidate.marketCap ?? null
+        );
+      } catch {}
       finalDecision = 'WATCHLIST';
     }
 
@@ -2701,6 +2926,32 @@ async function processCandidate(candidate, isRescan = false) {
         const reason = `Claude=${verdict?.decision ?? 'none'} OpenAI=${openAIDecision?.decision ?? 'none'} score=${scoreResult.score}`;
         logEvent('INFO', 'CONSENSUS_GATE', `${enrichedCandidate.token ?? ca.slice(0,6)} AUTO_POST→WATCHLIST — ${reason}`);
         console.log(`[auto-caller] 🧠 Consensus gate — $${enrichedCandidate.token ?? ca.slice(0,6)} demoted to WATCHLIST (${reason})`);
+        // Persist the demotion so we can audit missed calls later. These are
+        // the ones most likely to moon without us when the gate is too strict.
+        try {
+          dbInstance.prepare(`
+            INSERT INTO consensus_disagreements
+              (contract_address, token, composite_score,
+               claude_decision, claude_score, claude_risk,
+               openai_decision, openai_conviction,
+               trigger, market_regime, market_cap)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+          `).run(
+            ca,
+            enrichedCandidate.token ?? null,
+            scoreResult.score ?? null,
+            verdict?.decision ?? null,
+            verdict?.score ?? null,
+            verdict?.risk ?? null,
+            openAIDecision?.decision ?? null,
+            openAIDecision?.conviction ?? null,
+            'CONSENSUS_GATE',
+            getRegime()?.market ?? null,
+            enrichedCandidate.marketCap ?? null
+          );
+        } catch (dbErr) {
+          console.warn(`[consensus-log] insert failed: ${dbErr.message}`);
+        }
         finalDecision = 'WATCHLIST';
       }
     }
@@ -2741,7 +2992,7 @@ async function processCandidate(candidate, isRescan = false) {
         const baseFloor = SCORING_CONFIG.minScoreToPost ?? 50;
         const marketRegime = getRegime()?.market || 'NEUTRAL';
         const regimeAdj =
-          marketRegime === 'DEAD'    ? +10 :
+          marketRegime === 'DEAD'    ? (SCORING_CONFIG.deadRegimeFloorAdj ?? 12) :
           marketRegime === 'COLD'    ? +5  :
           marketRegime === 'HOT'     ? -5  :
           0;  // NEUTRAL
@@ -2823,9 +3074,16 @@ async function processCandidate(candidate, isRescan = false) {
       const isHighConviction = smKind === 'cluster' || smKind === 'kol';
       if (!isHighConviction && finalDecision === 'AUTO_POST') {
         let momentumBlock = null;
+        // Brand-new coins (<30 min) can flash -25-30% in 5m during normal
+        // post-launch volatility. Use a looser 5m threshold for them so we
+        // don't blocklist healthy early wicks.
+        const isBabyToken = (enrichedCandidate.pairAgeHours ?? 99) < 0.5;
+        const accel5mThreshold = isBabyToken ? -30 : -25;
         if ((p5  != null && p5  <= -35) || (p1h != null && p1h <= -60)) {
           momentumBlock = `SEVERE_DUMP 5m=${p5}% 1h=${p1h}%`;
-        } else if (p1h != null && p1h <= -40 && p5 != null && p5 <= -18) {
+        } else if ((p1h != null && p1h <= -40) || (p5 != null && p5 <= accel5mThreshold)) {
+          // OR logic: either severe 1h bleed OR sharp 5m drop trips veto.
+          // 5m threshold loosened for <30min coins (normal launch volatility).
           momentumBlock = `ACCELERATING_DUMP 5m=${p5}% 1h=${p1h}%`;
         } else if ((p5 != null && p5 <= -20) || (p1h != null && p1h <= -30)) {
           momentumBlock = `DUMPING 5m=${p5 ?? '?'}% 1h=${p1h ?? '?'}%`;
@@ -2997,14 +3255,14 @@ async function processCandidate(candidate, isRescan = false) {
       {
       // Use v8 caption builder that includes OpenAI decision layer
       const caption  = buildV8Caption(enrichedCandidate, verdict, scoreResult, openAIDecision);
-      const message  = buildCallAlertMessage(enrichedCandidate, verdict, scoreResult, similarity, ftResult);
+      const coinImg  = enrichedCandidate.imageUrl || enrichedCandidate.headerUrl || null;
 
       // Respect pausePosting config override (set via dashboard or /config Telegram command)
       if (AI_CONFIG_OVERRIDES.pausePosting) {
         console.log(`[ai-os] ⏸ Posting PAUSED — $${enrichedCandidate.token} would have posted (score ${scoreResult.score})`);
         logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
       } else {
-        await sendCallAlertWithImage(caption, message);
+        await sendCallAlertWithImage(caption, null, coinImg);
       }
 
       await sleep(1500);
@@ -3577,14 +3835,18 @@ app.post('/api/config/scoring', express.json(), (req, res) => {
   setCors(res);
   try {
     const updates = req.body ?? {};
+    const source  = updates.__source || 'operator';
+    const reason  = updates.__reason || null;
     const allowed = Object.keys(SCORING_CONFIG_DEFAULTS);
     const applied = {};
     for (const key of allowed) {
       if (updates[key] == null || updates[key] === '') continue;
       const num = Number(updates[key]);
-      if (Number.isFinite(num)) {
+      if (Number.isFinite(num) && SCORING_CONFIG[key] !== num) {
+        const prev = SCORING_CONFIG[key];
         SCORING_CONFIG[key] = num;
         applied[key] = num;
+        logConfigChange('SCORING', key, prev, num, source, reason);
       }
     }
     persistScoringConfig();
@@ -3596,10 +3858,139 @@ app.post('/api/config/scoring', express.json(), (req, res) => {
 // Reset all scoring knobs back to code defaults
 app.post('/api/config/scoring/reset', (req, res) => {
   setCors(res);
+  for (const key of Object.keys(SCORING_CONFIG_DEFAULTS)) {
+    if (SCORING_CONFIG[key] !== SCORING_CONFIG_DEFAULTS[key]) {
+      logConfigChange('SCORING', key, SCORING_CONFIG[key], SCORING_CONFIG_DEFAULTS[key], 'operator', 'reset to defaults');
+    }
+  }
   SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
   persistScoringConfig();
   logEvent('INFO', 'SCORING_CONFIG_RESET', 'back to defaults');
   res.json({ ok: true, current: SCORING_CONFIG });
+});
+
+// ─── Extended Config Endpoints (Scanner / Wallets / Pre-Launch / Outcomes) ─
+// Follow the same GET/POST pattern as /api/config/scoring. Values persist
+// to kv_store and get logged to config_changes for the audit tab. Note:
+// module-level constants (e.g. POLL_INTERVAL_MS) take effect on next
+// restart unless the consuming module re-reads each tick.
+function makeConfigEndpoints(category, defaultsObj, getState, setState) {
+  app.get(`/api/config/${category}`, (req, res) => {
+    setCors(res);
+    res.json({ ok: true, defaults: defaultsObj, current: getState() });
+  });
+  app.post(`/api/config/${category}`, express.json(), (req, res) => {
+    setCors(res);
+    try {
+      const updates = req.body ?? {};
+      const source  = updates.__source || 'operator';
+      const reason  = updates.__reason || null;
+      const current = getState();
+      const applied = {};
+      for (const key of Object.keys(defaultsObj)) {
+        if (updates[key] == null || updates[key] === '') continue;
+        // Accept numbers OR strings (for knobs like kolWallets / rescanScheduleMins)
+        const defVal = defaultsObj[key];
+        let val;
+        if (typeof defVal === 'number') {
+          const num = Number(updates[key]);
+          if (!Number.isFinite(num)) continue;
+          val = num;
+        } else {
+          val = String(updates[key]);
+        }
+        if (current[key] !== val) {
+          const prev = current[key];
+          current[key] = val;
+          applied[key] = val;
+          logConfigChange(category, key, prev, val, source, reason);
+        }
+      }
+      setState(current);
+      persistExtendedConfig(category);
+      logEvent('INFO', `${category.toUpperCase()}_CONFIG_UPDATED`, JSON.stringify(applied));
+      res.json({ ok: true, applied, current: getState() });
+    } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  });
+  app.post(`/api/config/${category}/reset`, (req, res) => {
+    setCors(res);
+    const current = getState();
+    for (const key of Object.keys(defaultsObj)) {
+      if (current[key] !== defaultsObj[key]) {
+        logConfigChange(category, key, current[key], defaultsObj[key], 'operator', 'reset to defaults');
+      }
+    }
+    setState({ ...defaultsObj });
+    persistExtendedConfig(category);
+    res.json({ ok: true, current: getState() });
+  });
+}
+
+makeConfigEndpoints('scanner',   SCANNER_CONFIG_DEFAULTS,   () => SCANNER_CONFIG,   (v) => { SCANNER_CONFIG   = v; });
+makeConfigEndpoints('wallets',   WALLETS_CONFIG_DEFAULTS,   () => WALLETS_CONFIG,   (v) => { WALLETS_CONFIG   = v; });
+makeConfigEndpoints('prelaunch', PRELAUNCH_CONFIG_DEFAULTS, () => PRELAUNCH_CONFIG, (v) => { PRELAUNCH_CONFIG = v; });
+makeConfigEndpoints('outcomes',  OUTCOMES_CONFIG_DEFAULTS,  () => OUTCOMES_CONFIG,  (v) => { OUTCOMES_CONFIG  = v; });
+
+// ─── Audit Log + Revert Endpoints ──────────────────────────────────────────
+// GET /api/config/audit — paginated history of every config change.
+//   Query params: category, knob_key, limit (default 50), offset (default 0)
+// POST /api/config/revert/:id — replays the old_value of a past change.
+app.get('/api/config/audit', (req, res) => {
+  setCors(res);
+  try {
+    const limit    = Math.min(200, Number(req.query.limit  ?? 50));
+    const offset   = Math.max(0,   Number(req.query.offset ?? 0));
+    const category = req.query.category ? String(req.query.category).toUpperCase() : null;
+    const knobKey  = req.query.knob_key ? String(req.query.knob_key) : null;
+    const where = [];
+    const params = [];
+    if (category) { where.push('category = ?'); params.push(category); }
+    if (knobKey)  { where.push('knob_key = ?'); params.push(knobKey); }
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const rows = dbInstance.prepare(`
+      SELECT id, changed_at, category, source, knob_key, old_value, new_value, reason
+      FROM config_changes ${whereClause}
+      ORDER BY changed_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+    const total = dbInstance.prepare(`SELECT COUNT(*) as n FROM config_changes ${whereClause}`).get(...params).n;
+    res.json({
+      ok: true,
+      total,
+      rows: rows.map(r => ({
+        ...r,
+        old_value: r.old_value ? JSON.parse(r.old_value) : null,
+        new_value: r.new_value ? JSON.parse(r.new_value) : null,
+      })),
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.post('/api/config/revert/:id', (req, res) => {
+  setCors(res);
+  try {
+    const row = dbInstance.prepare(`SELECT * FROM config_changes WHERE id = ?`).get(req.params.id);
+    if (!row) return res.status(404).json({ ok: false, error: 'change not found' });
+    const oldVal = row.old_value ? JSON.parse(row.old_value) : null;
+    const category = row.category.toLowerCase();
+    const key = row.knob_key;
+    const configMap = {
+      scoring:   [SCORING_CONFIG,   (v) => { SCORING_CONFIG   = v; }, persistScoringConfig],
+      scanner:   [SCANNER_CONFIG,   (v) => { SCANNER_CONFIG   = v; }, () => persistExtendedConfig('scanner')],
+      wallets:   [WALLETS_CONFIG,   (v) => { WALLETS_CONFIG   = v; }, () => persistExtendedConfig('wallets')],
+      prelaunch: [PRELAUNCH_CONFIG, (v) => { PRELAUNCH_CONFIG = v; }, () => persistExtendedConfig('prelaunch')],
+      outcomes:  [OUTCOMES_CONFIG,  (v) => { OUTCOMES_CONFIG  = v; }, () => persistExtendedConfig('outcomes')],
+    };
+    const entry = configMap[category];
+    if (!entry) return res.status(400).json({ ok: false, error: `unsupported category ${category}` });
+    const [cfg, setter, persist] = entry;
+    const currentVal = cfg[key];
+    cfg[key] = oldVal;
+    setter(cfg);
+    persist();
+    logConfigChange(row.category, key, currentVal, oldVal, 'operator', `revert to change #${row.id} (${row.changed_at})`);
+    res.json({ ok: true, reverted: { key, from: currentVal, to: oldVal } });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 app.get('/api/ai/learning-metrics', (req, res) => {
@@ -3809,6 +4200,7 @@ app.post('/api/ai/config', (req, res) => {
 
     logEvent('INFO', 'AI_CONFIG_CHANGE', JSON.stringify({ key, prev, value, reason: reason ?? 'dashboard' }));
     console.log(`[ai-os] Config change: ${key} ${JSON.stringify(prev)} → ${JSON.stringify(value)} (${reason ?? 'no reason'})`);
+    logConfigChange('AI', key, prev, value, req.body?.__source || 'operator', reason);
 
     // Send admin alert
     sendAdminAlert(
@@ -10536,10 +10928,58 @@ app.listen(PORT, async () => {
 
   // Wire up milestone TG alerts (2x / 5x / 10x on active calls). Uses the
   // group chat, and respects pausePosting so a paused bot stays silent.
-  setMilestoneTelegramHook(async (msg) => {
+  // Milestone alerts go to VIP always; at 2x we ALSO post the original call
+  // to the free channel (AXIOSCAN-style 2x-delayed free tier), and every
+  // subsequent milestone (5/10/25x) also hits the free channel.
+  setMilestoneTelegramHook(async (msg, meta = {}) => {
     if (AI_CONFIG_OVERRIDES.pausePosting) return;
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
-    return sendTelegramGroupMessage(msg);
+    if (!TELEGRAM_BOT_TOKEN) return;
+    const sends = [];
+
+    // Always fire milestone to VIP group
+    if (TELEGRAM_GROUP_CHAT_ID) {
+      sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg));
+    }
+
+    // Free tier: first 2x unlocks the call (post the original + milestone).
+    // Subsequent milestones (5/10/25x) also fire to free.
+    if (TELEGRAM_FREE_CHAT_ID && meta.milestone >= 2) {
+      try {
+        // On the first unlock (2x), fire the full entry card to free channel
+        if (meta.milestone === 2 && meta.ca) {
+          const callRow = dbInstance.prepare(`
+            SELECT c.token, c.contract_address, c.market_cap_at_call, c.called_at,
+                   c.claude_verdict, c.claude_risk, c.setup_type_at_call,
+                   c.structure_grade_at_call, c.score_at_call,
+                   ca.sltp
+            FROM calls c
+            LEFT JOIN candidates ca ON ca.id = c.candidate_id
+            WHERE c.contract_address = ? ORDER BY c.id DESC LIMIT 1
+          `).get(meta.ca);
+          if (callRow) {
+            const entryMc = callRow.market_cap_at_call ?? 0;
+            const verdictSnip = (callRow.claude_verdict || '').slice(0, 220);
+            const freeCard =
+              `🎯 <b>PULSE CALLER — FREE PICK (${meta.milestone}× confirmed)</b>\n` +
+              `━━━━━━━━━━━━━━━━━━━━━\n` +
+              `<b>$${(callRow.token || '?').toUpperCase()}</b>\n` +
+              `<code>${callRow.contract_address}</code>\n\n` +
+              `Entry MC: <b>$${Math.round(entryMc/1000)}K</b>\n` +
+              `Score: ${callRow.score_at_call ?? '?'}/100 · Risk: ${callRow.claude_risk ?? '?'}\n` +
+              `Setup: ${callRow.setup_type_at_call ?? '?'} · Structure: ${callRow.structure_grade_at_call ?? '?'}\n\n` +
+              (verdictSnip ? `<i>"${verdictSnip}${callRow.claude_verdict?.length > 220 ? '…' : ''}"</i>\n\n` : '') +
+              `<i>This was called on our VIP feed at entry. Now live on free — already 2× up.</i>`;
+            sends.push(sendTelegramMessage(TELEGRAM_FREE_CHAT_ID, freeCard));
+          }
+        }
+        // Every milestone also fires the follow-up message to free
+        sends.push(sendTelegramMessage(TELEGRAM_FREE_CHAT_ID, msg));
+      } catch (err) {
+        console.warn('[free-tier] milestone dispatch failed:', err.message);
+      }
+    }
+
+    await Promise.allSettled(sends);
   });
 
   // ── Smart Money Watcher: live feed of WINNER-tier wallet buys ─────────────

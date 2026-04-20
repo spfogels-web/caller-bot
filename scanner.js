@@ -336,6 +336,8 @@ export function normalizePair(pair) {
     website:  pair.info?.websites?.[0]?.url                                 ?? null,
     twitter:  pair.info?.socials?.find(s => s.type === 'twitter')?.url      ?? null,
     telegram: pair.info?.socials?.find(s => s.type === 'telegram')?.url     ?? null,
+    imageUrl: pair.info?.imageUrl                                           ?? null,
+    headerUrl: pair.info?.header                                            ?? null,
     labels:   pair.labels ?? [],
 
     holders: null, top10HolderPct: null, holderGrowth24h: null,

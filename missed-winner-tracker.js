@@ -434,7 +434,9 @@ export async function runOutcomeTracker(dbInstance) {
           const mRow = dbInstance.prepare(
             `SELECT milestone_alerted, token, peak_multiple, market_cap_at_call, contract_address FROM calls WHERE id=?`
           ).get(call.id);
-          const currentTier = mRow?.peak_multiple >= 10 ? 10
+          // Added 25x tier per AXIOSCAN-style multi-milestone flooding.
+          const currentTier = mRow?.peak_multiple >= 25 ? 25
+                            : mRow?.peak_multiple >= 10 ? 10
                             : mRow?.peak_multiple >= 5  ? 5
                             : mRow?.peak_multiple >= 2  ? 2
                             : 0;
@@ -443,12 +445,22 @@ export async function runOutcomeTracker(dbInstance) {
             dbInstance.prepare(`UPDATE calls SET milestone_alerted=? WHERE id=?`).run(currentTier, call.id);
             // Fire TG alert (best-effort — don't block the tracker loop)
             if (_telegramHook) {
-              const emoji = currentTier >= 10 ? '🚀🚀🚀' : currentTier >= 5 ? '🔥🔥' : '🎯';
-              const msg   = `${emoji} <b>$${mRow.token || '?'} just hit ${currentTier}×!</b>\n\n` +
-                            `Peak MCap: $${Math.round((mRow.peak_multiple * (mRow.market_cap_at_call||0))/1000)}K\n` +
-                            `<code>${mRow.contract_address}</code>\n\n` +
-                            (currentTier >= 5 ? `Consider taking profit on the move.` : `Momentum building — watch the chart.`);
-              _telegramHook(msg).catch(e => console.warn('[milestone] TG send failed:', e.message));
+              const emoji = currentTier >= 25 ? '💎👑💎'
+                          : currentTier >= 10 ? '🚀🚀🚀'
+                          : currentTier >= 5  ? '🔥🔥'
+                          :                     '🎯';
+              const entryMc = mRow.market_cap_at_call || 0;
+              const peakMc  = mRow.peak_multiple * entryMc;
+              // AXIOSCAN-style: always include entry MC on every follow-up so
+              // the multiplier math does itself in the reader's head.
+              const msg = `${emoji} <b>$${mRow.token || '?'} just hit ${currentTier}×!</b>\n\n` +
+                          `Entry: $${Math.round(entryMc/1000)}K  →  Peak: $${Math.round(peakMc/1000)}K\n` +
+                          `Multiple: <b>${mRow.peak_multiple?.toFixed?.(2)}x</b>\n` +
+                          `<code>${mRow.contract_address}</code>\n\n` +
+                          (currentTier >= 10 ? `🏆 Take profit if you haven't already.`
+                           : currentTier >= 5 ? `Consider taking profit on the move.`
+                           :                    `Momentum building — watch the chart.`);
+              _telegramHook(msg, { milestone: currentTier, ca: mRow.contract_address }).catch(e => console.warn('[milestone] TG send failed:', e.message));
             }
             console.log(`[outcome-tracker] ${currentTier}× MILESTONE — $${mRow.token || call.id} peak=${mRow.peak_multiple?.toFixed?.(2)}x`);
           }

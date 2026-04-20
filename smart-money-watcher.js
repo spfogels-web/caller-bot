@@ -20,12 +20,13 @@ const HELIUS_API_BASE = 'https://api.helius.xyz/v0';
 
 const CLUSTER_WINDOW_MS       = 10 * 60_000;  // 10-min sliding cluster window
 const CLUSTER_THRESHOLD       = 3;             // ≥3 WINNER buys = cluster alert
-const POLL_INTERVAL_MS        = 90_000;        // poll every 90s
-// User upgraded from 60 → 200 watched wallets. Helius Enhanced Transactions
-// tolerates the 3x load easily at this cadence (~130 req/min peak).
-const TOP_N_WATCHED           = 200;
-const PER_WALLET_TX_LIMIT     = 10;            // last 10 swaps each wallet
-const INTER_WALLET_DELAY_MS   = 120;           // tightened for larger watchlist
+const POLL_INTERVAL_MS        = 300_000;       // poll every 5 min (credit budget)
+// Budget-tuned for Helius Developer plan. 80 wallets × 288 ticks/day ×
+// 10 credits = ~230K/day, leaves headroom for the rest of the pipeline.
+// The 10-min cluster window still covers 2 ticks so clusters detectable.
+const TOP_N_WATCHED           = 80;
+const PER_WALLET_TX_LIMIT     = 5;             // last 5 swaps each wallet
+const INTER_WALLET_DELAY_MS   = 250;           // gentler on rate limit at lower cadence
 const SEEN_TX_TTL_MS          = 6 * 3_600_000; // forget signatures after 6h
 const ALERT_COOLDOWN_HOURS    = 24;            // dedupe alerts per coin
 

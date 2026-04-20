@@ -3256,7 +3256,8 @@ body::before {
       </div>
 
       <!-- ═══ LIVE SCORING CONTROLS — edit & save without redeploy ═══ -->
-      <div class="card scoring-config-card" style="margin-bottom:14px;border:1px solid rgba(255,215,64,0.25);background:linear-gradient(135deg,rgba(255,215,64,0.03),rgba(255,109,0,0.03))">
+      <!-- HIDDEN: replaced by CONTROL STATION above (preserved for rollback) -->
+      <div class="card scoring-config-card" style="display:none;margin-bottom:14px;border:1px solid rgba(255,215,64,0.25);background:linear-gradient(135deg,rgba(255,215,64,0.03),rgba(255,109,0,0.03))">
         <div class="card-hdr" style="border-bottom:1px solid rgba(255,215,64,0.2)">
           <div class="card-title" style="color:#ffffff;font-size:13px"><span class="icon" style="filter:drop-shadow(0 0 6px rgba(255,215,64,0.8))">⚙️</span>SCORING CONTROLS — edit any value · save applies live</div>
           <div style="display:flex;gap:6px">
@@ -3820,6 +3821,178 @@ body::before {
             <div id="brainLessons" style="display:flex;flex-direction:column;gap:6px;max-height:200px;overflow-y:auto">
               <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:12px">Gathering intelligence...</div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ CONTROL STATION — every knob that affects gem discovery ═══ -->
+      <style>
+        .cs-card{position:relative;background:linear-gradient(135deg,rgba(0,229,255,0.04),rgba(156,39,176,0.04) 40%,rgba(255,215,64,0.03));border:1px solid rgba(0,229,255,0.25);border-radius:12px;margin-bottom:16px;overflow:hidden}
+        .cs-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(0,229,255,0.8),rgba(156,39,176,0.6),rgba(255,215,64,0.5),transparent)}
+        .cs-hdr{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;background:linear-gradient(135deg,rgba(0,229,255,0.06),rgba(156,39,176,0.04));border-bottom:1px solid rgba(0,229,255,0.15);user-select:none}
+        .cs-hdr:hover{background:linear-gradient(135deg,rgba(0,229,255,0.10),rgba(156,39,176,0.08))}
+        .cs-title-wrap{display:flex;align-items:center;gap:12px}
+        .cs-logo{width:38px;height:38px;border-radius:9px;background:linear-gradient(135deg,#00e5ff,#9c27b0,#ffd740);display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 0 20px rgba(0,229,255,0.25)}
+        .cs-title{font-family:var(--mono);font-size:13px;font-weight:700;color:#fff;letter-spacing:2px}
+        .cs-subtitle{font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-top:2px}
+        .cs-pulse{width:8px;height:8px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan);animation:csPulse 2s ease-in-out infinite}
+        @keyframes csPulse{0%,100%{opacity:0.6;transform:scale(1)}50%{opacity:1;transform:scale(1.3)}}
+        .cs-toggle{font-family:var(--mono);font-size:9px;color:var(--text2);padding:4px 10px;border-radius:4px;background:rgba(255,255,255,0.04);border:1px solid var(--border);transition:transform 0.2s}
+        .cs-body{display:none;padding:0}
+        .cs-body.open{display:block}
+        .cs-tabs{display:flex;gap:4px;padding:10px 14px;background:rgba(0,0,0,0.15);border-bottom:1px solid rgba(0,229,255,0.1);overflow-x:auto;flex-wrap:nowrap}
+        .cs-tab{background:rgba(255,255,255,0.03);border:1px solid transparent;color:var(--text3);border-radius:5px;padding:7px 11px;font-family:var(--mono);font-size:9px;cursor:pointer;letter-spacing:1px;white-space:nowrap;transition:all 0.15s}
+        .cs-tab:hover{background:rgba(255,255,255,0.06);color:var(--text2)}
+        .cs-tab.active[data-tab="scoring"]   {background:rgba(0,229,255,0.10);border-color:rgba(0,229,255,0.5);color:var(--cyan)}
+        .cs-tab.active[data-tab="discovery"] {background:rgba(0,230,118,0.10);border-color:rgba(0,230,118,0.5);color:var(--green)}
+        .cs-tab.active[data-tab="wallets"]   {background:rgba(156,39,176,0.10);border-color:rgba(156,39,176,0.5);color:var(--purple)}
+        .cs-tab.active[data-tab="prelaunch"] {background:rgba(255,109,0,0.10);border-color:rgba(255,109,0,0.5);color:var(--orange)}
+        .cs-tab.active[data-tab="ai"]        {background:rgba(68,138,255,0.10);border-color:rgba(68,138,255,0.5);color:var(--blue)}
+        .cs-tab.active[data-tab="audit"]     {background:rgba(255,215,64,0.10);border-color:rgba(255,215,64,0.5);color:var(--gold)}
+        .cs-panel{display:none;padding:16px 18px}
+        .cs-panel.active{display:block}
+        .cs-panel-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.05)}
+        .cs-panel-title{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--text2)}
+        .cs-panel-actions{display:flex;gap:6px}
+        .cs-btn{background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:5px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px}
+        .cs-btn:hover{background:rgba(255,255,255,0.08);color:#fff}
+        .cs-btn-save{background:linear-gradient(135deg,rgba(0,229,255,0.18),rgba(156,39,176,0.14));border-color:rgba(0,229,255,0.5);color:var(--cyan);font-weight:700}
+        .cs-btn-save:hover{background:linear-gradient(135deg,rgba(0,229,255,0.28),rgba(156,39,176,0.22))}
+        .cs-knob-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+        .cs-knob{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:11px 12px;position:relative;transition:border-color 0.15s}
+        .cs-knob:hover{border-color:rgba(0,229,255,0.25)}
+        .cs-knob.dirty{border-color:rgba(255,215,64,0.5);background:rgba(255,215,64,0.03)}
+        .cs-knob-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px}
+        .cs-knob-name{font-family:var(--mono);font-size:9px;font-weight:700;color:#fff;letter-spacing:0.5px;line-height:1.3}
+        .cs-knob-info{color:var(--text3);font-size:10px;cursor:help;user-select:none}
+        .cs-knob-info:hover{color:var(--cyan)}
+        .cs-knob-desc{font-family:var(--mono);font-size:8px;color:var(--text3);line-height:1.45;margin-bottom:8px;min-height:22px}
+        .cs-knob-impact{font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:0.5px;margin-bottom:6px;padding:3px 5px;background:rgba(255,255,255,0.02);border-radius:3px;border-left:2px solid rgba(0,229,255,0.25)}
+        .cs-knob-row{display:flex;align-items:center;gap:8px}
+        .cs-knob-input{flex:1;background:rgba(0,0,0,0.3);border:1px solid var(--border);color:#fff;border-radius:4px;padding:6px 8px;font-family:var(--mono);font-size:11px;font-weight:700}
+        .cs-knob-input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 2px rgba(0,229,255,0.1)}
+        .cs-knob-default{font-family:var(--mono);font-size:7px;color:var(--text3);min-width:50px;text-align:right}
+        .cs-knob-meta{font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:7px;padding-top:7px;border-top:1px dashed rgba(255,255,255,0.05);display:flex;justify-content:space-between;gap:6px}
+        .cs-knob-meta-src{color:var(--cyan)}
+        .cs-status{font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:12px;min-height:14px;letter-spacing:0.5px}
+        .cs-status.ok{color:var(--green)}
+        .cs-status.err{color:var(--red)}
+        .cs-audit-row{display:grid;grid-template-columns:110px 80px 140px 1fr 80px;gap:10px;padding:9px 12px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);border-radius:5px;margin-bottom:4px;font-family:var(--mono);font-size:9px;align-items:center}
+        .cs-audit-row:hover{background:rgba(255,255,255,0.04)}
+        .cs-audit-cat{font-weight:700;letter-spacing:1px}
+        .cs-audit-cat.SCORING  {color:var(--cyan)}
+        .cs-audit-cat.SCANNER  {color:var(--green)}
+        .cs-audit-cat.WALLETS  {color:var(--purple)}
+        .cs-audit-cat.PRELAUNCH{color:var(--orange)}
+        .cs-audit-cat.OUTCOMES {color:var(--gold)}
+        .cs-audit-cat.AI       {color:var(--blue)}
+        .cs-audit-change{color:var(--text2);font-size:8px}
+        .cs-audit-change .old{color:var(--red)}
+        .cs-audit-change .new{color:var(--green)}
+        .cs-audit-time{color:var(--text3);font-size:8px}
+        .cs-audit-src{color:var(--text2);font-size:8px}
+        .cs-audit-revert{background:rgba(255,109,0,0.08);border:1px solid rgba(255,109,0,0.3);color:var(--orange);padding:4px 8px;border-radius:3px;font-family:var(--mono);font-size:8px;cursor:pointer}
+        .cs-audit-revert:hover{background:rgba(255,109,0,0.18);color:#fff}
+        .cs-empty{text-align:center;padding:32px 12px;font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:1px}
+      </style>
+      <div class="cs-card" id="csCard">
+        <div class="cs-hdr" onclick="csToggle()">
+          <div class="cs-title-wrap">
+            <div class="cs-logo">🛸</div>
+            <div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div class="cs-title">CONTROL STATION</div>
+                <div class="cs-pulse"></div>
+              </div>
+              <div class="cs-subtitle">EVERY KNOB · EVERY GATE · FULL AUDIT TRAIL</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="csDirtyCount" style="font-family:var(--mono);font-size:8px;color:var(--gold);letter-spacing:1px;display:none">✎ UNSAVED</span>
+            <div class="cs-toggle" id="csToggleLabel">▾ EXPAND</div>
+          </div>
+        </div>
+        <div class="cs-body" id="csBody">
+          <div class="cs-tabs">
+            <button class="cs-tab active" data-tab="scoring"   onclick="csSwitchTab('scoring')">🎯 SCORING</button>
+            <button class="cs-tab"        data-tab="discovery" onclick="csSwitchTab('discovery')">🔍 DISCOVERY</button>
+            <button class="cs-tab"        data-tab="wallets"   onclick="csSwitchTab('wallets')">🐋 WALLETS</button>
+            <button class="cs-tab"        data-tab="prelaunch" onclick="csSwitchTab('prelaunch')">🚨 PRE-LAUNCH</button>
+            <button class="cs-tab"        data-tab="ai"        onclick="csSwitchTab('ai')">🤖 AI BEHAVIOR</button>
+            <button class="cs-tab"        data-tab="audit"     onclick="csSwitchTab('audit')">📊 AUDIT</button>
+          </div>
+          <div class="cs-panel active" data-panel="scoring">
+            <div class="cs-panel-hdr">
+              <div class="cs-panel-title" style="color:var(--cyan)">🎯 SCORING ENGINE — 13 knobs that decide who posts</div>
+              <div class="cs-panel-actions">
+                <button class="cs-btn" onclick="csReset('scoring')">↺ RESET</button>
+                <button class="cs-btn cs-btn-save" onclick="csSave('scoring')">💾 SAVE</button>
+              </div>
+            </div>
+            <div class="cs-knob-grid" data-grid="scoring"></div>
+            <div class="cs-status" data-status="scoring"></div>
+          </div>
+          <div class="cs-panel" data-panel="discovery">
+            <div class="cs-panel-hdr">
+              <div class="cs-panel-title" style="color:var(--green)">🔍 DISCOVERY PARAMETERS — scanner + pre-filter knobs</div>
+              <div class="cs-panel-actions">
+                <button class="cs-btn" onclick="csReset('scanner')">↺ RESET</button>
+                <button class="cs-btn cs-btn-save" onclick="csSave('scanner')">💾 SAVE</button>
+              </div>
+            </div>
+            <div class="cs-knob-grid" data-grid="scanner"></div>
+            <div class="cs-status" data-status="scanner"></div>
+          </div>
+          <div class="cs-panel" data-panel="wallets">
+            <div class="cs-panel-hdr">
+              <div class="cs-panel-title" style="color:var(--purple)">🐋 WALLET INTELLIGENCE — smart money + cluster watcher</div>
+              <div class="cs-panel-actions">
+                <button class="cs-btn" onclick="csReset('wallets')">↺ RESET</button>
+                <button class="cs-btn cs-btn-save" onclick="csSave('wallets')">💾 SAVE</button>
+              </div>
+            </div>
+            <div class="cs-knob-grid" data-grid="wallets"></div>
+            <div class="cs-status" data-status="wallets"></div>
+          </div>
+          <div class="cs-panel" data-panel="prelaunch">
+            <div class="cs-panel-hdr">
+              <div class="cs-panel-title" style="color:var(--orange)">🚨 PRE-LAUNCH DETECTION — CEX funder + bundle trace</div>
+              <div class="cs-panel-actions">
+                <button class="cs-btn" onclick="csReset('prelaunch')">↺ RESET</button>
+                <button class="cs-btn cs-btn-save" onclick="csSave('prelaunch')">💾 SAVE</button>
+              </div>
+            </div>
+            <div class="cs-knob-grid" data-grid="prelaunch"></div>
+            <div class="cs-status" data-status="prelaunch"></div>
+          </div>
+          <div class="cs-panel" data-panel="ai">
+            <div class="cs-panel-hdr">
+              <div class="cs-panel-title" style="color:var(--blue)">🤖 AI BEHAVIOR — pipeline flags + outcome thresholds</div>
+              <div class="cs-panel-actions">
+                <button class="cs-btn" onclick="csReset('outcomes')">↺ RESET</button>
+                <button class="cs-btn cs-btn-save" onclick="csSave('outcomes')">💾 SAVE</button>
+              </div>
+            </div>
+            <div class="cs-knob-grid" data-grid="outcomes"></div>
+            <div class="cs-status" data-status="outcomes"></div>
+          </div>
+          <div class="cs-panel" data-panel="audit">
+            <div class="cs-panel-hdr">
+              <div class="cs-panel-title" style="color:var(--gold)">📊 AUDIT LOG — every change, who made it, why</div>
+              <div class="cs-panel-actions">
+                <select id="csAuditFilter" onchange="csLoadAudit()" class="cs-btn" style="padding:5px 8px">
+                  <option value="">All categories</option>
+                  <option value="SCORING">Scoring</option>
+                  <option value="SCANNER">Scanner</option>
+                  <option value="WALLETS">Wallets</option>
+                  <option value="PRELAUNCH">Pre-Launch</option>
+                  <option value="OUTCOMES">Outcomes</option>
+                  <option value="AI">AI</option>
+                </select>
+                <button class="cs-btn" onclick="csLoadAudit()">↻ REFRESH</button>
+              </div>
+            </div>
+            <div id="csAuditList"><div class="cs-empty">Loading audit history…</div></div>
           </div>
         </div>
       </div>
@@ -5180,6 +5353,316 @@ async function resetScoringConfig(btn){
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = orig || '↺ RESET'; }
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── CONTROL STATION — consolidated knob dashboard with audit trail ───
+// ══════════════════════════════════════════════════════════════════════
+// Single source of truth for every gem-discovery knob. Each knob row
+// shows its name, description, impact direction, current/default values,
+// and who-changed-it-last metadata. Writes flow through the same
+// /api/config/* endpoints as Telegram + autonomous agent, so every
+// change is auditable regardless of origin.
+
+const _CS_KNOBS = {
+  scoring: {
+    endpoint: 'scoring',
+    knobs: [
+      { key:'minScoreToPost',         label:'MIN SCORE TO POST',      desc:'Hard floor a coin must hit to AUTO_POST. Below this → WATCHLIST.',                           impact:'higher = fewer, stricter calls' },
+      { key:'sweetSpotBonus',         label:'SWEET SPOT BONUS',       desc:'Points added when MCap sits in the $15K–$40K sweet spot (best ROI historically).',          impact:'higher = more aggressive in sweet spot' },
+      { key:'secondaryBonus',         label:'SECONDARY BONUS',        desc:'Smaller bonus for $40K–$80K continuation plays.',                                            impact:'higher = more mid-cap calls' },
+      { key:'preLaunchBonus',         label:'PRE-LAUNCH BONUS',       desc:'Points when the dev wallet was funded by a CEX in the last 6h (pre-launch suspect).',      impact:'higher = rewards suspected alpha more' },
+      { key:'crossChainBonus',        label:'CROSS-CHAIN BONUS',      desc:'Points when an ETH/Base token is already mooning with a matching Solana launch.',          impact:'higher = rewards migration plays' },
+      { key:'devFingerprintCap',      label:'DEV FINGERPRINT CAP',    desc:'Max positive delta earnable from a PROVEN/ELITE dev history. Penalties uncapped.',          impact:'higher = elite devs get more lift' },
+      { key:'globalBonusCap',         label:'GLOBAL BONUS CAP',       desc:'Total bonus stack cap (sweet-spot + pre-launch + cross-chain + dev-fp + divergence, etc.)', impact:'higher = more bonus runway' },
+      { key:'noSignalCap',            label:'NO-SIGNAL CAP',          desc:'Max score for coins with no smart-money / wallet-intel signal. Prevents "clean-but-boring" AUTO_POST.', impact:'higher = relax cap, more structure-only posts' },
+      { key:'rugGuardMinScore',       label:'RUG GUARD MIN',          desc:'$13K–$17.5K band requires this score before AUTO_POST (rug cluster band).',                 impact:'higher = harder to post in rug band' },
+      { key:'consensusOverrideScore', label:'CONSENSUS OVERRIDE',     desc:'If only one AI says yes, coin must hit this score for single-AI override.',                impact:'higher = need both AIs to agree' },
+      { key:'deadRegimeFloorAdj',     label:'DEAD REGIME FLOOR ADJ',  desc:'Points added to minScoreToPost when market regime is DEAD.',                                 impact:'higher = tighter in dead markets' },
+      { key:'winPeakMultiple',        label:'WIN PEAK MULTIPLE',      desc:'Peak multiple required to lock a call as WIN (e.g. 1.5 = call needed to peak ≥1.5×).',      impact:'higher = harder to earn WIN' },
+      { key:'neutralDrawdownPct',     label:'NEUTRAL DRAWDOWN %',     desc:'Max drawdown at 6h still considered NEUTRAL (not LOSS). Above this → LOSS.',                impact:'higher = more tolerance before LOSS' },
+    ],
+  },
+  scanner: {
+    endpoint: 'scanner',
+    knobs: [
+      { key:'maxPromotedCandidates', label:'MAX PROMOTED',          desc:'Max candidates promoted per scan cycle.',                         impact:'higher = more parallel enrichment' },
+      { key:'maxTokensToFetch',      label:'MAX TOKENS / SCAN',     desc:'Max tokens pulled from DexScreener per cycle.',                   impact:'higher = wider net, more RPC load' },
+      { key:'dexBatchSize',          label:'DEX BATCH SIZE',        desc:'How many CAs queried per DexScreener batch.',                     impact:'higher = fewer requests' },
+      { key:'maxPairAgeHours',       label:'MAX PAIR AGE (h)',      desc:'Oldest a pair can be and still be considered a "gem" candidate.', impact:'higher = includes older coins' },
+      { key:'quickScoreAutoPromote', label:'QS AUTO-PROMOTE',       desc:'Quick-score threshold for auto-promotion to full enrichment.',    impact:'higher = stricter auto-promote' },
+      { key:'quickScoreWatchlist',   label:'QS WATCHLIST',          desc:'Quick-score threshold to land on watchlist for rescan.',          impact:'higher = fewer watchlist entries' },
+      { key:'quickScoreDrop',        label:'QS DROP',               desc:'Below this, candidate is dropped entirely from rescan.',          impact:'higher = drops more, saves RPC' },
+      { key:'rescanScheduleMins',    label:'RESCAN SCHEDULE (min)', desc:'Comma-separated rescan intervals (e.g. "1,3,7,15").',             impact:'more values = more rescans',       type:'string' },
+    ],
+  },
+  wallets: {
+    endpoint: 'wallets',
+    knobs: [
+      { key:'topNWatched',       label:'TOP N WATCHED',         desc:'How many WINNER-tier wallets the smart-money watcher polls.',                      impact:'higher = wider coverage, more Helius credits' },
+      { key:'clusterThreshold',  label:'CLUSTER THRESHOLD',     desc:'Minimum WINNER buys in 10min to force AUTO_POST (whale cluster alert).',           impact:'higher = stricter cluster detection' },
+      { key:'perWalletTxLimit',  label:'TX/WALLET LIMIT',       desc:'Last N swap txns pulled per wallet each tick.',                                    impact:'higher = deeper history, more credits' },
+      { key:'pollIntervalSec',   label:'POLL INTERVAL (sec)',   desc:'How often the watcher polls (in seconds). Lower = fresher but burns credits.',     impact:'lower = faster detection, more credits' },
+      { key:'kolWallets',        label:'KOL WALLETS',           desc:'Comma-separated KOL wallet addresses (Cupsey, Unipcs, etc.). Empty = defaults.',  impact:'any buy from these auto-posts',   type:'string' },
+    ],
+  },
+  prelaunch: {
+    endpoint: 'prelaunch',
+    knobs: [
+      { key:'tickIntervalSec',   label:'TICK INTERVAL (sec)',   desc:'How often the pre-launch detector sweeps CEX transfers.',            impact:'lower = faster detection, more Helius calls' },
+      { key:'suspectTtlHours',   label:'SUSPECT TTL (h)',       desc:'How long (hours) a CEX-funded dev stays flagged as pre-launch suspect.', impact:'higher = wider capture window' },
+      { key:'minSolOutflow',     label:'MIN SOL OUTFLOW',       desc:'Smallest SOL outflow from CEX that counts as a dev-funding candidate.', impact:'lower = more noise, tighter net' },
+      { key:'maxSolOutflow',     label:'MAX SOL OUTFLOW',       desc:'Largest outflow still treated as a "dev warming up" (vs. whale transfer).', impact:'higher = includes bigger funders' },
+      { key:'bundleCacheHours',  label:'BUNDLE CACHE (h)',      desc:'Hours to cache bundle-detector results (avoid re-hitting Helius).',   impact:'higher = fewer RPC calls, staler data' },
+    ],
+  },
+  outcomes: {
+    endpoint: 'outcomes',
+    knobs: [
+      { key:'slMultiple',  label:'STOP-LOSS MULTIPLE',  desc:'MCap × this = stop-loss level (e.g. 0.75 = -25%).',            impact:'lower = tighter stop' },
+      { key:'tp1Multiple', label:'TP1 MULTIPLE',        desc:'First take-profit target (also the WIN threshold when equal to winPeakMultiple).', impact:'higher = demands more to call it WIN' },
+      { key:'tp2Multiple', label:'TP2 MULTIPLE',        desc:'Second take-profit target for runners.',                       impact:'higher = runner targets' },
+      { key:'tp3Multiple', label:'TP3 MULTIPLE',        desc:'Moon target — the 10× dream.',                                  impact:'reference only' },
+    ],
+  },
+};
+
+// In-memory state per category: current values, defaults, dirty set, last-change meta
+const _CS_STATE = {
+  scoring:   { current:{}, defaults:{}, dirty:new Set(), lastChange:{} },
+  scanner:   { current:{}, defaults:{}, dirty:new Set(), lastChange:{} },
+  wallets:   { current:{}, defaults:{}, dirty:new Set(), lastChange:{} },
+  prelaunch: { current:{}, defaults:{}, dirty:new Set(), lastChange:{} },
+  outcomes:  { current:{}, defaults:{}, dirty:new Set(), lastChange:{} },
+};
+
+function csToggle() {
+  const body = document.getElementById('csBody');
+  const label = document.getElementById('csToggleLabel');
+  const opening = !body.classList.contains('open');
+  body.classList.toggle('open');
+  if (label) label.textContent = opening ? '▴ COLLAPSE' : '▾ EXPAND';
+  if (opening && !body.dataset.initialLoad) {
+    body.dataset.initialLoad = '1';
+    csLoad('scoring');
+    csLoad('scanner');
+    csLoad('wallets');
+    csLoad('prelaunch');
+    csLoad('outcomes');
+  }
+}
+
+function csSwitchTab(tab) {
+  document.querySelectorAll('.cs-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.cs-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === tab));
+  if (tab === 'audit') csLoadAudit();
+}
+
+async function csLoad(category) {
+  const def = _CS_KNOBS[category];
+  if (!def) return;
+  try {
+    const [cfgRes, auditRes] = await Promise.all([
+      fetch(`/api/config/${def.endpoint}`),
+      fetch(`/api/config/audit?category=${category.toUpperCase()}&limit=200`),
+    ]);
+    const cfg = await cfgRes.json();
+    const audit = await auditRes.json();
+    if (!cfg.ok) throw new Error(cfg.error || 'load failed');
+    _CS_STATE[category].current  = cfg.current || {};
+    _CS_STATE[category].defaults = cfg.defaults || {};
+    _CS_STATE[category].dirty.clear();
+
+    // Build "last change per knob" lookup from audit history
+    const lastMap = {};
+    (audit.rows || []).forEach(r => {
+      if (!lastMap[r.knob_key]) lastMap[r.knob_key] = r;
+    });
+    _CS_STATE[category].lastChange = lastMap;
+
+    csRender(category);
+    csDirtyCheck();
+  } catch (err) {
+    const status = document.querySelector(`[data-status="${category}"]`);
+    if (status) { status.textContent = '✕ ' + err.message; status.className = 'cs-status err'; }
+  }
+}
+
+function csRender(category) {
+  const def = _CS_KNOBS[category];
+  const grid = document.querySelector(`[data-grid="${category}"]`);
+  if (!def || !grid) return;
+  const state = _CS_STATE[category];
+  grid.innerHTML = def.knobs.map(k => {
+    const cur = state.current[k.key];
+    const dflt = state.defaults[k.key];
+    const last = state.lastChange[k.key];
+    const dirty = state.dirty.has(k.key);
+    const type = k.type === 'string' ? 'text' : 'number';
+    const displayVal = cur == null ? '' : cur;
+    const lastLine = last
+      ? `<span class="cs-knob-meta-src">${(last.source || 'api').toUpperCase()}</span> · ${csTimeAgo(last.changed_at)}${last.reason ? ` · ${csEscape(last.reason.slice(0, 60))}` : ''}`
+      : 'never changed';
+    return `
+      <div class="cs-knob${dirty ? ' dirty' : ''}" data-knob="${k.key}">
+        <div class="cs-knob-head">
+          <div class="cs-knob-name">${k.label}</div>
+          <span class="cs-knob-info" title="${csEscape(k.desc)}">ℹ</span>
+        </div>
+        <div class="cs-knob-desc">${csEscape(k.desc)}</div>
+        <div class="cs-knob-impact">↕ ${csEscape(k.impact)}</div>
+        <div class="cs-knob-row">
+          <input class="cs-knob-input" type="${type}" value="${csEscapeAttr(displayVal)}" step="any"
+                 oninput="csMarkDirty('${category}', '${k.key}', this.value)"
+                 data-orig="${csEscapeAttr(displayVal)}">
+          <div class="cs-knob-default">def: ${dflt != null ? csEscape(String(dflt)) : '—'}</div>
+        </div>
+        <div class="cs-knob-meta">${lastLine}</div>
+      </div>`;
+  }).join('');
+}
+
+function csMarkDirty(category, key, value) {
+  const state = _CS_STATE[category];
+  const input = document.querySelector(`[data-grid="${category}"] [data-knob="${key}"] input`);
+  const knobEl = document.querySelector(`[data-grid="${category}"] [data-knob="${key}"]`);
+  if (!input || !knobEl) return;
+  const orig = input.dataset.orig;
+  if (String(value) !== orig) {
+    state.dirty.add(key);
+    knobEl.classList.add('dirty');
+  } else {
+    state.dirty.delete(key);
+    knobEl.classList.remove('dirty');
+  }
+  csDirtyCheck();
+}
+
+function csDirtyCheck() {
+  const totalDirty = Object.values(_CS_STATE).reduce((sum, s) => sum + s.dirty.size, 0);
+  const el = document.getElementById('csDirtyCount');
+  if (!el) return;
+  if (totalDirty > 0) {
+    el.style.display = 'inline';
+    el.textContent = `✎ ${totalDirty} UNSAVED`;
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+async function csSave(category) {
+  const def = _CS_KNOBS[category];
+  if (!def) return;
+  const state = _CS_STATE[category];
+  const updates = { __source: 'operator' };
+  def.knobs.forEach(k => {
+    const input = document.querySelector(`[data-grid="${category}"] [data-knob="${k.key}"] input`);
+    if (!input) return;
+    const val = input.value;
+    if (val === '' && state.current[k.key] != null) return; // leave blank = no change
+    updates[k.key] = val;
+  });
+  const status = document.querySelector(`[data-status="${category}"]`);
+  if (status) { status.textContent = '⏳ saving…'; status.className = 'cs-status'; }
+  try {
+    const res = await fetch(`/api/config/${def.endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'save failed');
+    if (status) {
+      const n = Object.keys(data.applied || {}).length;
+      status.textContent = `✓ Saved ${n} change${n === 1 ? '' : 's'}`;
+      status.className = 'cs-status ok';
+    }
+    csLoad(category);
+  } catch (err) {
+    if (status) { status.textContent = '✕ ' + err.message; status.className = 'cs-status err'; }
+  }
+}
+
+async function csReset(category) {
+  const def = _CS_KNOBS[category];
+  if (!def) return;
+  if (!confirm(`Reset all ${category.toUpperCase()} knobs to defaults?`)) return;
+  const status = document.querySelector(`[data-status="${category}"]`);
+  try {
+    const res = await fetch(`/api/config/${def.endpoint}/reset`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'reset failed');
+    if (status) { status.textContent = '✓ Reset to defaults'; status.className = 'cs-status ok'; }
+    csLoad(category);
+  } catch (err) {
+    if (status) { status.textContent = '✕ ' + err.message; status.className = 'cs-status err'; }
+  }
+}
+
+async function csLoadAudit() {
+  const list = document.getElementById('csAuditList');
+  if (!list) return;
+  const cat = document.getElementById('csAuditFilter')?.value || '';
+  const q = cat ? `?category=${cat}&limit=100` : '?limit=100';
+  try {
+    const res = await fetch(`/api/config/audit${q}`);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'audit load failed');
+    if (!data.rows.length) {
+      list.innerHTML = '<div class="cs-empty">No config changes yet. Tweak any knob and save to create the first audit entry.</div>';
+      return;
+    }
+    list.innerHTML = `
+      <div style="display:grid;grid-template-columns:110px 80px 140px 1fr 80px;gap:10px;padding:6px 12px;font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:4px">
+        <div>WHEN</div><div>CATEGORY</div><div>KNOB</div><div>CHANGE</div><div></div>
+      </div>
+      ${data.rows.map(r => `
+        <div class="cs-audit-row">
+          <div class="cs-audit-time">${csTimeAgo(r.changed_at)}</div>
+          <div class="cs-audit-cat ${r.category}">${r.category}</div>
+          <div>${csEscape(r.knob_key)}</div>
+          <div class="cs-audit-change">
+            <span class="old">${csEscape(JSON.stringify(r.old_value))}</span>
+            →
+            <span class="new">${csEscape(JSON.stringify(r.new_value))}</span>
+            <div class="cs-audit-src">by ${csEscape(r.source)}${r.reason ? ` · ${csEscape(r.reason)}` : ''}</div>
+          </div>
+          <button class="cs-audit-revert" onclick="csRevert(${r.id})" title="Restore the old value">↶ REVERT</button>
+        </div>
+      `).join('')}`;
+  } catch (err) {
+    list.innerHTML = `<div class="cs-empty" style="color:var(--red)">✕ ${csEscape(err.message)}</div>`;
+  }
+}
+
+async function csRevert(id) {
+  if (!confirm('Revert this config change? The current value will be replaced by the previous one.')) return;
+  try {
+    const res = await fetch(`/api/config/revert/${id}`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'revert failed');
+    csLoadAudit();
+    // Reload all categories in case the reverted knob is one being viewed
+    Object.keys(_CS_KNOBS).forEach(csLoad);
+  } catch (err) {
+    alert('✕ ' + err.message);
+  }
+}
+
+// ── small helpers ─────────────────────────────────────────────────────
+function csEscape(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+function csEscapeAttr(s) { return csEscape(s); }
+function csTimeAgo(ts) {
+  if (!ts) return 'never';
+  const t = new Date(ts.includes('Z') ? ts : ts + 'Z').getTime();
+  if (!Number.isFinite(t)) return ts;
+  const s = Math.max(1, Math.round((Date.now() - t) / 1000));
+  if (s < 60)   return s + 's ago';
+  if (s < 3600) return Math.round(s/60) + 'm ago';
+  if (s < 86400) return Math.round(s/3600) + 'h ago';
+  return Math.round(s/86400) + 'd ago';
 }
 
 // ── OVERVIEW — Call outcome tile row ─────────────────────────────────

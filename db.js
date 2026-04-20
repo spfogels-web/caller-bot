@@ -605,6 +605,45 @@ function runMigrations() {
      )`,
     `CREATE INDEX IF NOT EXISTS idx_bundle_checks_at ON bundle_checks(checked_at DESC)`,
     `DELETE FROM bundle_checks WHERE checked_at < datetime('now', '-7 days')`,
+
+    // Consensus-gate demotion log — every time Claude + OpenAI disagree and
+    // we silently downgrade AUTO_POST → WATCHLIST. Use this to audit missed
+    // calls and judge whether the gate is too strict.
+    `CREATE TABLE IF NOT EXISTS consensus_disagreements (
+       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+       logged_at          TEXT    DEFAULT (datetime('now')),
+       contract_address   TEXT,
+       token              TEXT,
+       composite_score    INTEGER,
+       claude_decision    TEXT,
+       claude_score       INTEGER,
+       claude_risk        TEXT,
+       openai_decision    TEXT,
+       openai_conviction  INTEGER,
+       trigger            TEXT,
+       market_regime      TEXT,
+       market_cap         REAL
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_consensus_disagreements_at ON consensus_disagreements(logged_at DESC)`,
+    `DELETE FROM consensus_disagreements WHERE logged_at < datetime('now', '-30 days')`,
+
+    // Config-change audit log — every POST /api/config/* writes one row.
+    // Captures category (SCORING/DISCOVERY/WALLETS/PRELAUNCH/OUTCOMES/AI),
+    // source (operator/agent/telegram/api), knob_key, old_value, new_value,
+    // reason. Feeds the Control Station audit tab + per-knob history.
+    `CREATE TABLE IF NOT EXISTS config_changes (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       changed_at TEXT    NOT NULL DEFAULT (datetime('now')),
+       category   TEXT    NOT NULL,
+       source     TEXT    NOT NULL DEFAULT 'api',
+       knob_key   TEXT    NOT NULL,
+       old_value  TEXT,
+       new_value  TEXT,
+       reason     TEXT
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_config_changes_at       ON config_changes(changed_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_config_changes_category ON config_changes(category, knob_key, changed_at DESC)`,
+    `DELETE FROM config_changes WHERE changed_at < datetime('now', '-90 days')`,
     // v9: Foundation Signals scoring data
     `ALTER TABLE candidates ADD COLUMN dual_parts TEXT`,
     `ALTER TABLE candidates ADD COLUMN discovery_score INTEGER`,
