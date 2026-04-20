@@ -3118,7 +3118,7 @@ body::before {
       </div>
     </div>
   </div>
-  <div class="tile-sub" id="v8OpenAI" style="font-size:7px">GPT-4o + Claude</div>
+  <div class="tile-sub" id="v8OpenAI" style="font-size:7px">Claude Sonnet · Foundation Signals v3</div>
 </div>
       </div>
 
@@ -5470,7 +5470,7 @@ function renderOverviewStats(stats,memory,v8){
   setText('statEvaluated',s.totalEvaluated||0);
   setText('statEval24h',`24h: ${s.last24hEvaluated||0}`);
   setText('statWinRate',s.winRate||'—');
-  updateAIBrainRank({wins:s.wins||0,losses:s.losses||0,evaluations:s.total||0});
+  updateAIBrainRank({wins:s.winCount||s.wins||0, losses:s.lossCount||s.losses||0, evaluations:s.totalEvaluated||s.total||0});
   setText('statWL',`${s.winCount||0}W / ${s.lossCount||0}L`);
   const wr=parseFloat(s.winRate)||0;
   setWidth('aiWinBar',wr);
@@ -10000,19 +10000,29 @@ function updateBrainRating(stats) {
 
 
 
-// ── AI BRAIN RANKING — live performance grade ─────────────────────
+// ── AI BRAIN RANKING — Claude performance grade ─────────────────────
 function updateAIBrainRank(statsData) {
-  // Calculate brain rank from bot performance data
-  const wins    = statsData?.wins   ?? 0;
-  const losses  = statsData?.losses ?? 0;
-  const evals   = statsData?.evaluations ?? statsData?.total ?? 0;
+  const wins    = statsData?.wins   ?? statsData?.winCount ?? 0;
+  const losses  = statsData?.losses ?? statsData?.lossCount ?? 0;
+  const evals   = statsData?.evaluations ?? statsData?.totalEvaluated ?? statsData?.total ?? 0;
   const wl = wins + losses;
   const wr = wl > 0 ? wins / wl : 0;
 
-  // Composite score: win rate (60%) + evaluation volume (20%) + ratio (20%)
+  // Need minimum 5 resolved calls before giving a real rank
+  if (wl < 5) {
+    const rankEl = document.getElementById('aiBrainRank');
+    const barEl  = document.getElementById('aiBrainBar');
+    const lblEl  = document.getElementById('aiBrainLabel');
+    if (rankEl) { rankEl.textContent = '—'; rankEl.style.color = 'var(--text3)'; }
+    if (barEl) barEl.style.width = (wl / 5 * 100) + '%';
+    if (lblEl) lblEl.textContent = 'NEED ' + (5 - wl) + ' MORE CALLS';
+    return;
+  }
+
+  // Composite: win rate (60%) + call volume (20%) + consistency (20%)
   const wrScore   = wr * 60;
-  const volScore  = Math.min(evals / 100, 1) * 20;
-  const ratioScore = wl > 0 ? Math.min(wins / Math.max(wl, 1), 1) * 20 : 0;
+  const volScore  = Math.min(wl / 30, 1) * 20; // need 30 resolved for full vol score
+  const ratioScore = Math.min(wins / Math.max(wl, 1), 1) * 20;
   const total = Math.round(wrScore + volScore + ratioScore);
 
   const rank = total >= 85 ? 'S' :
