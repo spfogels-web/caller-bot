@@ -7274,7 +7274,13 @@ app.get('/api/stats/rolling', (req, res) => {
   try {
     const windows = { '1h': '-1 hour', '5h': '-5 hours', '24h': '-24 hours', '7d': '-7 days' };
     const safeCount = (sql, ...params) => {
-      try { return dbInstance.prepare(sql).get(...params).n; } catch { return 0; }
+      try {
+        const row = dbInstance.prepare(sql).get(...params);
+        return (row && row.n != null) ? row.n : 0;
+      } catch (err) {
+        console.warn('[rolling] query failed:', err.message, sql.slice(0, 80));
+        return 0;
+      }
     };
 
     const out = {};

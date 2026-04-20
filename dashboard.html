@@ -4830,7 +4830,7 @@ function refreshTabData(name){
     case 'overview':    loadOverview();      break;
     case 'calls':       loadCallsTab();      break;
     case 'candidates':  loadAudit();         break;
-    case 'analytics':   loadAnalytics();     break;
+    case 'analytics':   loadAnalytics(); loadRollingStats(); break;
     case 'ai':          loadAI();            break;
     case 'smart':       loadSmartMoneyTab(); break;
     case 'brainstorm':  /* no load — on-demand */ break;
@@ -10992,8 +10992,26 @@ let _rollingData = null;
 let _rollingWindow = '1h';
 
 async function loadRollingStats(){
-  const data = await apiFetch('/api/stats/rolling');
-  if (!data || !data.ok) return;
+  let data;
+  try {
+    const r = await fetch('/api/stats/rolling', { signal: AbortSignal.timeout(15000) });
+    const txt = await r.text();
+    try { data = JSON.parse(txt); }
+    catch { throw new Error('Non-JSON response (' + r.status + '): ' + txt.slice(0, 150)); }
+    if (!data.ok) throw new Error(data.error || 'Server returned ok:false');
+  } catch (err) {
+    console.error('[rolling-stats] fetch failed:', err.message);
+    // Paint an explicit error into every tile so the user sees WHY it's blank
+    ['rsScanned','rsQuick','rsEval','rsClaude','rsOpenai','rsAutoPost',
+     'rsWatch','rsIgnore','rsBlock','rsArchived','rsWins','rsLosses',
+     'rsGem','rsWallets'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) { el.textContent = '✕'; el.style.color = 'var(--red)'; el.title = err.message; }
+    });
+    const upd = document.getElementById('rollingLastUpdate');
+    if (upd) upd.textContent = 'error: ' + err.message.slice(0, 60);
+    return;
+  }
   _rollingData = data;
   renderRollingStats();
   // All-time totals
