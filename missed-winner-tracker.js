@@ -324,13 +324,16 @@ export async function runOutcomeTracker(dbInstance) {
   const NEUT_PCT  = Number(cfg.neutralDrawdownPct) || 10;
   let unresolvedCalls;
   try {
+    // Check ALL recent calls — including resolved ones.
+    // If a call was marked LOSS but peak later hit 1.5x, upgrade to WIN.
+    // Peak is the final answer, always.
     unresolvedCalls = dbInstance.prepare(`
       SELECT id, contract_address, token, market_cap_at_call, called_at, score_at_call,
-             outcome, outcome_source
+             outcome, outcome_source, peak_multiple
       FROM calls
-      WHERE (outcome IS NULL OR outcome = 'PENDING' OR outcome_source != 'MANUAL')
-        AND called_at > datetime('now', '-48 hours')
+      WHERE called_at > datetime('now', '-48 hours')
         AND contract_address IS NOT NULL
+      ORDER BY id DESC
       LIMIT 50
     `).all();
   } catch (err) {
@@ -407,8 +410,8 @@ export async function runOutcomeTracker(dbInstance) {
         }
       }
 
-      // Respect manual overrides — never auto-flip a user-set outcome
-      if (call.outcome_source === 'MANUAL') { await sleep(300); continue; }
+      // If peak hit WIN threshold, ALWAYS upgrade — even manual overrides.
+      // Peak is the final answer. A 4x peak should never stay as LOSS.
 
       // ── OUTCOME RULES: PEAK IS FINAL ──────────────────────────────────
       // The peak multiple IS the result. If a coin hit 4.8x at 15min then
@@ -429,9 +432,12 @@ export async function runOutcomeTracker(dbInstance) {
       const reachedWinBar = peakNow >= WIN_PEAK;
       const confirmWindow = minutesSince >= 120; // 2h confirmation (was 6h)
 
+      // Skip calls already correctly marked WIN
+      if (call.outcome === 'WIN' && reachedWinBar) { await sleep(300); continue; }
+
       if (reachedWinBar) {
-        // Lock WIN IMMEDIATELY — peak hit 1.5x, no waiting required
-        // The peak is the result. Current price is irrelevant.
+        // Lock WIN IMMEDIATELY — peak hit 1.5x, override ANY previous outcome.
+        // A 4x peak should NEVER stay as LOSS. Peak is the final answer.
         dbInstance.prepare(`
           UPDATE calls SET
             outcome = 'WIN',
@@ -440,7 +446,7 @@ export async function runOutcomeTracker(dbInstance) {
             auto_resolved_at = datetime('now'),
             outcome_source = 'AUTO',
             outcome_set_at = datetime('now')
-          WHERE id = ? AND (outcome IS NULL OR outcome = 'PENDING')
+          WHERE id = ?
         `).run(result.pctChange, call.id);
         if (ca) {
           try {
