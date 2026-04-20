@@ -449,17 +449,28 @@ export async function runOutcomeTracker(dbInstance) {
           WHERE id = ?
         `).run(result.pctChange, call.id);
         if (ca) {
+          // Update audit_archive — force WIN regardless of current outcome
           try {
             dbInstance.prepare(`
               UPDATE audit_archive
-              SET outcome = 'WIN', outcome_locked_at = datetime('now')
-              WHERE contract_address = ? AND (outcome IS NULL OR outcome = 'PENDING')
-            `).run(ca);
+              SET outcome = 'WIN', outcome_locked_at = datetime('now'),
+                  peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END
+              WHERE contract_address = ?
+            `).run(peakNow, peakNow, ca);
+          } catch {}
+          // Update calls_archive (backup table from scoreboard resets)
+          try {
+            dbInstance.prepare(`
+              UPDATE calls_archive
+              SET outcome = 'WIN', peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END
+              WHERE contract_address = ?
+            `).run(peakNow, peakNow, ca);
           } catch {}
         }
-        console.log(`[outcome-tracker] ✅ Auto-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call) — LOCKED`);
-      } else if (confirmWindow && !reachedWinBar) {
-        // 2h passed and peak never hit 1.5x.
+        const wasUpgrade = call.outcome && call.outcome !== 'WIN' && call.outcome !== 'PENDING';
+        console.log(`[outcome-tracker] ✅ ${wasUpgrade ? 'UPGRADED' : 'Auto'}-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)${wasUpgrade ? ' (was ' + call.outcome + ')' : ''} — LOCKED`);
+      } else if (confirmWindow && !reachedWinBar && call.outcome !== 'WIN') {
+        // 2h passed and peak never hit 1.5x. Never downgrade an existing WIN.
         // Peak 0.9x–1.49x → NEUTRAL (didn't lose money)
         // Peak < 0.9x → LOSS (real drawdown)
         const finalOutcome = peakNow >= 0.9 ? 'NEUTRAL' : 'LOSS';
@@ -472,18 +483,19 @@ export async function runOutcomeTracker(dbInstance) {
             auto_resolved_at = datetime('now'),
             outcome_source = 'AUTO',
             outcome_set_at = datetime('now')
-          WHERE id = ?
+          WHERE id = ? AND (outcome IS NULL OR outcome = 'PENDING' OR outcome != 'WIN')
         `).run(finalOutcome, result.pctChange, call.id);
         if (ca) {
           try {
             dbInstance.prepare(`
               UPDATE audit_archive
-              SET outcome = ?, outcome_locked_at = datetime('now')
-              WHERE contract_address = ? AND (outcome IS NULL OR outcome = 'PENDING')
-            `).run(finalOutcome, ca);
+              SET outcome = ?, outcome_locked_at = datetime('now'),
+                  peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END
+              WHERE contract_address = ? AND outcome != 'WIN'
+            `).run(finalOutcome, peakNow, peakNow, ca);
           } catch {}
         }
-        console.log(`[outcome-tracker] ${emoji} Auto-${finalOutcome}: $${call.token} peak=${peakNow.toFixed(2)}x after 6h (current ${result.pctChange.toFixed(0)}%)`);
+        console.log(`[outcome-tracker] ${emoji} Auto-${finalOutcome}: $${call.token} peak=${peakNow.toFixed(2)}x after 2h (current ${result.pctChange.toFixed(0)}%)`);
       } else {
         // Still in observation window — log without resolving
         const phase = minutesSince < 60 ? 'pre-1h' : (minutesSince < 360 ? '1h-6h watch' : '???');
