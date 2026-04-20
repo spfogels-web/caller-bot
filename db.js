@@ -592,6 +592,18 @@ function runMigrations() {
     `ALTER TABLE candidates ADD COLUMN dual_parts TEXT`,
     `ALTER TABLE candidates ADD COLUMN discovery_score INTEGER`,
     `ALTER TABLE candidates ADD COLUMN model_used TEXT`,
+    // v9: Outcome tracker columns
+    `ALTER TABLE calls ADD COLUMN auto_resolved INTEGER DEFAULT 0`,
+    `ALTER TABLE calls ADD COLUMN auto_resolved_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN outcome_source TEXT`,
+    `ALTER TABLE calls ADD COLUMN outcome_set_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN peak_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN time_to_peak_minutes INTEGER`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_1h REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_3h REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_6h REAL`,
+    `ALTER TABLE calls ADD COLUMN last_snapshot_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap REAL`,
   ];
 
   let added = 0;
