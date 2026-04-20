@@ -94,7 +94,7 @@ const {
   PORT              = 3000,
   NODE_ENV          = 'development',
   MIN_SCORE_TO_POST = 50,
-  SCAN_INTERVAL_MS  = 90 * 1000,
+  SCAN_INTERVAL_MS  = 60 * 1000,  // 60s — was 90s, scan more frequently
 } = process.env;
 
 const TELEGRAM_API   = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
@@ -3271,7 +3271,7 @@ async function runAutoCallerCycle() {
       // Claude/OpenAI timeouts, we can sustain higher concurrency without
       // overwhelming downstream APIs. Speed is the edge — score in seconds,
       // not minutes.
-      const PROCESS_BATCH = 16;
+      const PROCESS_BATCH = 24; // was 16 — process more tokens in parallel
       for (let i = 0; i < enriched.length; i += PROCESS_BATCH) {
         const batch = enriched.slice(i, i + PROCESS_BATCH);
         await Promise.all(batch.map(candidate => processCandidate(candidate, false)));

@@ -21,17 +21,17 @@ import { logEvent } from './db.js';
 
 const CHAIN = 'solana';
 
-const MAX_PROMOTED_CANDIDATES = Number(process.env.MAX_CANDIDATES      ?? 30);
-const MAX_TOKENS_TO_FETCH     = Number(process.env.MAX_TOKENS_TO_FETCH ?? 200);
+const MAX_PROMOTED_CANDIDATES = Number(process.env.MAX_CANDIDATES      ?? 50);  // was 30
+const MAX_TOKENS_TO_FETCH     = Number(process.env.MAX_TOKENS_TO_FETCH ?? 300); // was 200
 const DEX_BATCH_SIZE          = Number(process.env.DEX_BATCH_SIZE      ?? 30);
 
 const RESCAN_SCHEDULE_MINUTES = [1, 3, 7, 15];
 const MAX_RESCANS             = RESCAN_SCHEDULE_MINUTES.length;
 
-// CHANGED: Lowered all thresholds to get more coins promoted and called
-const QUICK_SCORE_AUTO_PROMOTE = Number(process.env.QUICK_SCORE_AUTO_PROMOTE ?? 40);
-const QUICK_SCORE_WATCHLIST    = Number(process.env.QUICK_SCORE_WATCHLIST    ?? 28);
-const QUICK_SCORE_DROP         = Number(process.env.QUICK_SCORE_DROP         ?? 20);
+// v7: Widened net — scan more, let Foundation Signals + Claude filter quality
+const QUICK_SCORE_AUTO_PROMOTE = Number(process.env.QUICK_SCORE_AUTO_PROMOTE ?? 35); // was 40
+const QUICK_SCORE_WATCHLIST    = Number(process.env.QUICK_SCORE_WATCHLIST    ?? 22); // was 28
+const QUICK_SCORE_DROP         = Number(process.env.QUICK_SCORE_DROP         ?? 15); // was 20
 
 // CHANGED: 0 minimum age — allow brand new coins from the moment they appear
 const MIN_PAIR_AGE_MINUTES = 0;
