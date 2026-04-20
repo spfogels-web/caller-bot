@@ -2542,17 +2542,13 @@ async function processCandidate(candidate, isRescan = false) {
       console.warn(`[ai-os] AUTO_POST without Claude key — scoring only`);
     }
 
-    // ── STEP 6: OpenAI GPT-4o — Advisory Only (Claude is final authority) ────
-    // OpenAI still runs for data collection and its verdict is logged, but
-    // it NEVER overrides Claude's decision. Claude is the final authority.
+    // ── STEP 6: OpenAI GPT-4o — DISABLED on per-token evaluation ────────────
+    // OpenAI was running on every candidate scoring ≥38, burning hundreds of
+    // GPT-4o calls/day while Claude overruled it most of the time. Now OpenAI
+    // only runs in the 6-hour self-improvement learning cycle where it
+    // analyzes resolved outcomes in batch — much more efficient.
     let openAIDecision = null;
-    const shouldRunOpenAI = OPENAI_API_KEY && (
-      finalDecision === 'AUTO_POST' ||
-      finalDecision === 'WATCHLIST' ||
-      finalDecision === 'RETEST' ||
-      finalDecision === 'HOLD_FOR_REVIEW' ||
-      (scoreResult.score >= 38 && finalDecision !== 'BLOCKLIST')
-    );
+    const shouldRunOpenAI = false; // Disabled — OpenAI learns in batch via self-improvement cycle only
 
     if (shouldRunOpenAI) {
       try {
