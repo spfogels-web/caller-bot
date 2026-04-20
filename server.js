@@ -76,6 +76,7 @@ import {
 } from './openai-decision.js';
 import {
   startLearningLoop, detectMissedWinners, runOutcomeTracker, getLearningStats,
+  setTelegramHook as setMilestoneTelegramHook,
 } from './missed-winner-tracker.js';
 import {
   startWalletScanner, runDuneWalletScan, crossReferenceHolders as duneXRef,
@@ -2650,10 +2651,14 @@ async function processCandidate(candidate, isRescan = false) {
     // single WINNER buy still defers to the AI stack, but we tag the caption
     // so the TG alert shouts BIG WALLET ALERT.
     const sm = enrichedCandidate._smartMoney;
-    if (sm?.kind === 'cluster') {
+    if (sm?.kind === 'cluster' || sm?.kind === 'kol') {
+      // KOL follow-buys are treated as cluster-tier conviction: force AUTO_POST.
+      // These are hardcoded public alpha wallets (Cupsey / Unipcs / Ansem etc.)
+      // with >60% micro-cap hit rates. Their entry alone is enough signal.
+      const label = sm.kind === 'kol' ? 'KOL' : `cluster=${sm.clusterSize}`;
       if (finalDecision !== 'AUTO_POST') {
-        logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (cluster=${sm.clusterSize})`);
-        console.log(`[smart-money] 🐋🐋🐋 CLUSTER OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (cluster=${sm.clusterSize})`);
+        logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
+        console.log(`[smart-money] ${sm.kind === 'kol' ? '⭐' : '🐋🐋🐋'} ${sm.kind.toUpperCase()} OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
       }
       finalDecision = 'AUTO_POST';
     } else if (sm?.kind === 'single') {
@@ -2681,8 +2686,12 @@ async function processCandidate(candidate, isRescan = false) {
     {
       const p5  = enrichedCandidate.priceChange5m  ?? null;
       const p1h = enrichedCandidate.priceChange1h  ?? null;
-      const isCluster = enrichedCandidate._smartMoney?.kind === 'cluster';
-      if (!isCluster && finalDecision === 'AUTO_POST') {
+      // Both cluster and KOL alerts bypass the momentum gate — highest-
+      // conviction smart-money signals override the "don't catch falling
+      // knives" rule.
+      const smKind = enrichedCandidate._smartMoney?.kind;
+      const isHighConviction = smKind === 'cluster' || smKind === 'kol';
+      if (!isHighConviction && finalDecision === 'AUTO_POST') {
         let momentumBlock = null;
         if ((p5  != null && p5  <= -35) || (p1h != null && p1h <= -60)) {
           momentumBlock = `SEVERE_DUMP 5m=${p5}% 1h=${p1h}%`;
@@ -2712,11 +2721,12 @@ async function processCandidate(candidate, isRescan = false) {
     // enough conviction on their own.
     const mcapNow = enrichedCandidate.marketCap ?? 0;
     const isHighRiskBand = mcapNow >= 13_000 && mcapNow <= 17_500;
-    const isClusterAlert = enrichedCandidate._smartMoney?.kind === 'cluster';
+    const smKindRG = enrichedCandidate._smartMoney?.kind;
+    const bypassRugGuard = smKindRG === 'cluster' || smKindRG === 'kol';
     if (
       finalDecision === 'AUTO_POST' &&
       isHighRiskBand &&
-      !isClusterAlert &&
+      !bypassRugGuard &&
       (scoreResult.score ?? 0) < SCORING_CONFIG.rugGuardMinScore
     ) {
       logEvent('INFO', 'RUG_GUARD', `${enrichedCandidate.token ?? ca.slice(0,6)} mcap=${Math.round(mcapNow/1000)}K score=${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore} → WATCHLIST (high-risk band guard)`);
@@ -3309,7 +3319,13 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
   // ── Smart-money alert banner (prepended) ────────────────────────────────
   // User request: never reveal which wallet bought. Just flag it loudly.
   const sm = candidate._smartMoney;
-  if (sm?.kind === 'cluster') {
+  if (sm?.kind === 'kol') {
+    basePart =
+      `⭐ <b>KOL WALLET FOLLOW</b> ⭐\n` +
+      `<i>A known alpha caller wallet just bought this coin. These wallets have documented 60%+ micro-cap hit rates.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
+  } else if (sm?.kind === 'cluster') {
     basePart =
       `🐋🐋🐋 <b>WHALE CLUSTER ALERT</b> 🐋🐋🐋\n` +
       `<i>${sm.clusterSize} tracked winner wallets bought this coin in the last 10 minutes. Forced auto-post.</i>\n` +
@@ -10388,6 +10404,14 @@ app.listen(PORT, async () => {
   learningLoopHandles = startLearningLoop(dbInstance, CLAUDE_API_KEY);
   console.log('[startup] ✓ Learning loop active — outcome tracking + missed winner detection');
 
+  // Wire up milestone TG alerts (2x / 5x / 10x on active calls). Uses the
+  // group chat, and respects pausePosting so a paused bot stays silent.
+  setMilestoneTelegramHook(async (msg) => {
+    if (AI_CONFIG_OVERRIDES.pausePosting) return;
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
+    return sendTelegramGroupMessage(msg);
+  });
+
   // ── Smart Money Watcher: live feed of WINNER-tier wallet buys ─────────────
   // Polls Helius Enhanced Transactions for the top N tracked wallets and
   // emits an alert when one (or a cluster of 3+) buys a fresh coin. The alert
@@ -10397,11 +10421,31 @@ app.listen(PORT, async () => {
     const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
     startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {
       try {
+        // EXIT alerts are WARNINGS about coins we already called or are
+        // watching — post a TG notice but do NOT push into processCandidate
+        // (no new call to make; we're flagging whale exits for awareness).
+        if (kind === 'exit') {
+          console.log(`[smart-money→pipeline] 🚨 WHALE EXIT detected — ${ca.slice(0,8)} exitCluster=${clusterSize}`);
+          logEvent('WARN', 'WHALE_EXIT', `${ca} — ${clusterSize} tracked winners dumping`);
+          try {
+            if (TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID && !AI_CONFIG_OVERRIDES.pausePosting) {
+              await sendTelegramGroupMessage(
+                `🚨 <b>WHALE EXIT WARNING</b>\n` +
+                `${clusterSize} tracked winner wallet${clusterSize > 1 ? 's' : ''} just dumped this coin in the last 10 min.\n\n` +
+                `<code>${ca}</code>\n\n` +
+                `If you're holding, check the chart. This may be the top.`
+              );
+            }
+          } catch (e) { console.warn('[whale-exit] TG send failed:', e.message); }
+          return;
+        }
         console.log(`[smart-money→pipeline] $${ca.slice(0,8)} kind=${kind} cluster=${clusterSize} — pushing into processCandidate`);
         await processCandidate({
           contractAddress: ca,
           chain:           'solana',
-          candidateType:   kind === 'cluster' ? 'SMART_MONEY_CLUSTER' : 'SMART_MONEY_SINGLE',
+          candidateType:   kind === 'kol'     ? 'KOL_FOLLOW'
+                         : kind === 'cluster' ? 'SMART_MONEY_CLUSTER'
+                         :                      'SMART_MONEY_SINGLE',
           _smartMoney:     { kind, clusterSize, detectedAt: Date.now() },
           _discoveredAt:   Date.now(),
         });

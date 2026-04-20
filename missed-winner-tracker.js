@@ -20,6 +20,11 @@
 'use strict';
 
 const DEXSCREENER_API = 'https://api.dexscreener.com';
+
+// Optional Telegram sender — server.js wires this via setTelegramHook(fn).
+// When set, milestone alerts (2x/5x/10x) get pushed to TG.
+let _telegramHook = null;
+export function setTelegramHook(fn) { _telegramHook = typeof fn === 'function' ? fn : null; }
 const CLAUDE_API_URL  = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL    = 'claude-sonnet-4-20250514';
 
@@ -420,6 +425,35 @@ export async function runOutcomeTracker(dbInstance) {
           );
         } catch (err) {
           console.warn('[outcome-tracker] calls-row snapshot update failed:', err.message);
+        }
+
+        // ── MILESTONE ALERTS — ping Telegram when a call hits 2x/5x/10x ──
+        // Tracks `milestone_alerted` so we fire once per tier. Only emits
+        // when a higher tier than previously alerted is crossed.
+        try {
+          const mRow = dbInstance.prepare(
+            `SELECT milestone_alerted, token, peak_multiple, market_cap_at_call, contract_address FROM calls WHERE id=?`
+          ).get(call.id);
+          const currentTier = mRow?.peak_multiple >= 10 ? 10
+                            : mRow?.peak_multiple >= 5  ? 5
+                            : mRow?.peak_multiple >= 2  ? 2
+                            : 0;
+          const lastTier = mRow?.milestone_alerted ?? 0;
+          if (currentTier > lastTier) {
+            dbInstance.prepare(`UPDATE calls SET milestone_alerted=? WHERE id=?`).run(currentTier, call.id);
+            // Fire TG alert (best-effort — don't block the tracker loop)
+            if (_telegramHook) {
+              const emoji = currentTier >= 10 ? '🚀🚀🚀' : currentTier >= 5 ? '🔥🔥' : '🎯';
+              const msg   = `${emoji} <b>$${mRow.token || '?'} just hit ${currentTier}×!</b>\n\n` +
+                            `Peak MCap: $${Math.round((mRow.peak_multiple * (mRow.market_cap_at_call||0))/1000)}K\n` +
+                            `<code>${mRow.contract_address}</code>\n\n` +
+                            (currentTier >= 5 ? `Consider taking profit on the move.` : `Momentum building — watch the chart.`);
+              _telegramHook(msg).catch(e => console.warn('[milestone] TG send failed:', e.message));
+            }
+            console.log(`[outcome-tracker] ${currentTier}× MILESTONE — $${mRow.token || call.id} peak=${mRow.peak_multiple?.toFixed?.(2)}x`);
+          }
+        } catch (err) {
+          console.warn('[outcome-tracker] milestone check failed:', err.message);
         }
       }
 

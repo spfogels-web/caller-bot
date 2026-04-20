@@ -33,6 +33,26 @@ const ALERT_COOLDOWN_HOURS    = 24;            // dedupe alerts per coin
 
 const seenSignatures = new Map();                   // sig → expiresAt
 const clusterMap     = new Map();                   // token → Map<wallet, buyAtMs>
+const sellClusterMap = new Map();                   // token → Map<wallet, sellAtMs>
+const EXIT_THRESHOLD = 2;                            // ≥2 winners dumping = WHALE EXIT alert
+
+// KOL priority list — public wallets with documented alpha. These get
+// polled EVERY tick ahead of the main watchlist, and a single buy from
+// any of them triggers a TG alert immediately (no cluster threshold).
+// Override via KOL_WALLETS env var (comma-separated addresses).
+const DEFAULT_KOL_WALLETS = [
+  // Cupsey (prolific micro-cap caller)
+  'suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK',
+  // Unipcs (bonjaxxxxx) — memecoin KOL
+  '7iabBMwmSvS4CFPcjW2XYZY53bUCHqXjASJABqWvaXrF',
+  // Ansem public trading wallet
+  'BCnqTiQAkAQzAhRyB2xHAnGPbD1k7yfFzMK4gZjVpZ8k',
+  // Add more known KOLs here or via KOL_WALLETS env
+];
+function getKolWallets() {
+  const env = (process.env.KOL_WALLETS || '').split(',').map(s => s.trim()).filter(Boolean);
+  return env.length ? env : DEFAULT_KOL_WALLETS;
+}
 let _watchedWallets  = [];                          // [{address, category, score}]
 let _walletRefreshAt = 0;
 let _pollTimer       = null;
@@ -107,12 +127,22 @@ async function refreshWatchedWallets() {
 
 async function tick() {
   await refreshWatchedWallets();
-  if (!_watchedWallets.length) return;
-
   pruneSeenSignatures();
   pruneClusterMap();
 
-  for (const w of _watchedWallets) {
+  // KOL wallets are processed FIRST every tick. A single KOL buy always
+  // emits an alert (bypass cluster threshold + cooldown — these public
+  // alpha wallets each have 60%+ micro-cap hit rates).
+  const kolList = getKolWallets().map(addr => ({
+    address: addr, category: 'WINNER', score: 999, isKol: true,
+  }));
+  const kolAddrs = new Set(kolList.map(w => w.address));
+  const watchFiltered = _watchedWallets.filter(w => !kolAddrs.has(w.address));
+  const allWallets = [...kolList, ...watchFiltered];
+
+  if (!allWallets.length) return;
+
+  for (const w of allWallets) {
     try {
       const swaps = await fetchWalletSwaps(w.address);
       for (const tx of swaps) {
@@ -120,11 +150,13 @@ async function tick() {
         seenSignatures.set(tx.signature, Date.now() + SEEN_TX_TTL_MS);
 
         const boughtMint = extractBoughtMint(tx, w.address);
-        if (!boughtMint) continue;
-        // Ignore WSOL / stablecoins — we're after meme tokens
-        if (isStableOrWrapped(boughtMint)) continue;
-
-        onWinnerBuy(boughtMint, w, tx);
+        const soldMint   = extractSoldMint(tx, w.address);
+        if (boughtMint && !isStableOrWrapped(boughtMint)) {
+          onWinnerBuy(boughtMint, w, tx);
+        }
+        if (soldMint && !isStableOrWrapped(soldMint)) {
+          onWinnerSell(soldMint, w, tx);
+        }
       }
     } catch (err) {
       // Individual wallet failure shouldn't kill the loop
@@ -159,20 +191,39 @@ function extractBoughtMint(tx, walletAddress) {
   return best?.mint ?? null;
 }
 
+// Mirror of extractBoughtMint — finds the non-stable mint the wallet sent
+// OUT (sold). A swap has both sides; the user's intent is captured by
+// whichever side is the meme token.
+function extractSoldMint(tx, walletAddress) {
+  const transfers = tx.tokenTransfers ?? [];
+  let best = null;
+  for (const t of transfers) {
+    if (t.fromUserAccount !== walletAddress) continue;
+    if (!t.mint) continue;
+    if (isStableOrWrapped(t.mint)) continue;
+    const amt = Number(t.tokenAmount ?? 0);
+    if (!best || amt > Number(best.tokenAmount ?? 0)) best = t;
+  }
+  return best?.mint ?? null;
+}
+
 // Persist every detected buy to wallet_activity so we can later query
 // "every token wallet X bought" or "which wallets are accumulating token Y."
-function recordWalletActivity(wallet, tokenMint, tx) {
+function recordWalletActivity(wallet, tokenMint, tx, side = 'BUY') {
   if (!_db || !wallet?.address || !tokenMint || !tx?.signature) return;
   try {
     const xfer = (tx.tokenTransfers ?? []).find(t =>
-      t.toUserAccount === wallet.address && t.mint === tokenMint
+      (side === 'BUY'
+        ? t.toUserAccount === wallet.address
+        : t.fromUserAccount === wallet.address)
+      && t.mint === tokenMint
     );
     const amount = xfer ? Number(xfer.tokenAmount ?? 0) : null;
     _db.prepare(`
       INSERT OR IGNORE INTO wallet_activity
         (wallet_address, token_mint, tx_signature, side, token_amount, block_time)
-      VALUES (?, ?, ?, 'BUY', ?, ?)
-    `).run(wallet.address, tokenMint, tx.signature, amount, tx.timestamp || null);
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(wallet.address, tokenMint, tx.signature, side, amount, tx.timestamp || null);
   } catch (err) {
     // Don't let DB write errors stop the watcher loop — log once and move on
     console.warn('[smart-money] wallet_activity write failed:', err.message);
@@ -204,14 +255,43 @@ function onWinnerBuy(token, wallet, tx) {
   const fresh = Array.from(buyers.values()).filter(t => now - t <= CLUSTER_WINDOW_MS);
   const clusterSize = fresh.length;
 
-  console.log(`[smart-money] 🐋 ${wallet.category} buy detected — token=${token.slice(0,8)} clusterNow=${clusterSize}`);
+  const tag = wallet.isKol ? '⭐ KOL' : `🐋 ${wallet.category}`;
+  console.log(`[smart-money] ${tag} buy detected — token=${token.slice(0,8)} clusterNow=${clusterSize}`);
 
+  // KOL wallets always trigger — bypass cluster threshold + cooldown.
+  if (wallet.isKol) {
+    emitAlert(token, 'kol', clusterSize);
+    return;
+  }
   // Cluster alert: ≥3 distinct winners within 10 min
   if (clusterSize >= CLUSTER_THRESHOLD) {
     emitAlert(token, 'cluster', clusterSize);
   } else {
     // Single-winner alert (lower priority; still goes through the pipeline)
     emitAlert(token, 'single', clusterSize);
+  }
+}
+
+// Mirror of onWinnerBuy for the sell side — tracks which tracked wallets
+// are DUMPING a coin. When ≥EXIT_THRESHOLD distinct winners dump inside
+// the 10-min window, emit a WHALE_EXIT alert (TG warning, skip pipeline).
+function onWinnerSell(token, wallet, tx) {
+  const now = Date.now();
+
+  // Log SELL to wallet_activity ledger (override default side='BUY')
+  recordWalletActivity(wallet, token, tx, 'SELL');
+
+  if (!sellClusterMap.has(token)) sellClusterMap.set(token, new Map());
+  const sellers = sellClusterMap.get(token);
+  if (!sellers.has(wallet.address)) sellers.set(wallet.address, now);
+
+  const fresh = Array.from(sellers.values()).filter(t => now - t <= CLUSTER_WINDOW_MS);
+  const exitSize = fresh.length;
+
+  console.log(`[smart-money] 📉 ${wallet.category} SELL detected — token=${token.slice(0,8)} exitCluster=${exitSize}`);
+
+  if (exitSize >= EXIT_THRESHOLD) {
+    emitAlert(token, 'exit', exitSize);
   }
 }
 
@@ -222,6 +302,13 @@ function pruneClusterMap() {
       if (now - t > CLUSTER_WINDOW_MS) buyers.delete(addr);
     }
     if (!buyers.size) clusterMap.delete(token);
+  }
+  // Same prune for sells
+  for (const [token, sellers] of sellClusterMap) {
+    for (const [addr, t] of sellers) {
+      if (now - t > CLUSTER_WINDOW_MS) sellers.delete(addr);
+    }
+    if (!sellers.size) sellClusterMap.delete(token);
   }
 }
 
@@ -251,6 +338,9 @@ function ensureAlertTable() {
 }
 
 function isOnCooldown(token, kind) {
+  // KOL alerts and WHALE_EXIT warnings always fire — different info content
+  // from prior BUY alerts so the 24h dedupe doesn't apply.
+  if (kind === 'kol' || kind === 'exit') return false;
   if (!_db) return false;
   try {
     const row = _db.prepare(`
