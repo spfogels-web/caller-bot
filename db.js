@@ -591,6 +591,20 @@ function runMigrations() {
     // Highest milestone we've already pinged for a given call so we don't
     // re-alert on every tick — only when a bigger tier (2x/5x/10x) is hit.
     `ALTER TABLE calls ADD COLUMN milestone_alerted REAL DEFAULT 0`,
+    // Deep bundle-detector cache — stores funder-trace results per CA so
+    // we don't re-hit Helius every time we see the coin. 24h TTL via the
+    // checked_at timestamp.
+    `CREATE TABLE IF NOT EXISTS bundle_checks (
+       contract_address TEXT PRIMARY KEY,
+       is_bundled       INTEGER NOT NULL DEFAULT 0,
+       buyer_count      INTEGER,
+       funder_overlap   INTEGER,
+       top_funder       TEXT,
+       signals          TEXT,
+       checked_at       TEXT DEFAULT (datetime('now'))
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_bundle_checks_at ON bundle_checks(checked_at DESC)`,
+    `DELETE FROM bundle_checks WHERE checked_at < datetime('now', '-7 days')`,
     // v9: Foundation Signals scoring data
     `ALTER TABLE candidates ADD COLUMN dual_parts TEXT`,
     `ALTER TABLE candidates ADD COLUMN discovery_score INTEGER`,

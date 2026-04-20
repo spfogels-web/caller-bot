@@ -2754,21 +2754,49 @@ async function processCandidate(candidate, isRescan = false) {
       }
     }
 
-    // ── BUNDLE-SETUP VETO ────────────────────────────────────────────────
-    // If the earlier bundle detector flagged this coin, block AUTO_POST
-    // regardless of AI consensus. Cluster / KOL alerts still bypass — the
-    // tradeoff: if a KOL is buying a bundle-launch coin, that's their
-    // conviction call, not ours to veto. Single-wallet signals DO get
-    // blocked here.
+    // ── BUNDLE-SETUP VETO (heuristic + deep trace) ───────────────────────
+    // Two-stage detector:
+    //  Stage 1 (heuristic, already ran above): cheap rule-of-thumb on snipers
+    //         + unique buyer ratio. Sets _bundleSetup flag.
+    //  Stage 2 (deep trace, RIGHT HERE): if we're about to AUTO_POST, spend
+    //         the extra ~6 Helius RPC calls to trace funding sources of the
+    //         first ~8 buyers. If 3+ share a funder → confirmed rug setup.
+    //         Results cached 24h so repeat scans don't re-hit Helius.
+    // Cluster / KOL alerts still bypass — if Cupsey buys a bundle launch,
+    // that's their conviction call.
     if (
       finalDecision === 'AUTO_POST' &&
-      enrichedCandidate._bundleSetup &&
       enrichedCandidate._smartMoney?.kind !== 'cluster' &&
       enrichedCandidate._smartMoney?.kind !== 'kol'
     ) {
-      logEvent('WARN', 'BUNDLE_VETO', `${enrichedCandidate.token ?? ca.slice(0,6)} coordinated bundle detected → WATCHLIST`);
-      console.log(`[auto-caller] 🪤 Bundle-setup veto — $${enrichedCandidate.token ?? ca.slice(0,6)} → WATCHLIST`);
-      finalDecision = 'WATCHLIST';
+      let bundleVetoReason = null;
+      if (enrichedCandidate._bundleSetup) {
+        bundleVetoReason = 'heuristic (snipers + low unique)';
+      } else {
+        // Only run the deep trace on coins young enough for it to matter.
+        // Above 2h, the launch window is gone and we're just burning RPC.
+        const ageHours = enrichedCandidate.pairAgeHours ?? 99;
+        if (ageHours <= 2) {
+          try {
+            const { detectBundleLaunch } = await import('./bundle-detector.js');
+            const deep = await detectBundleLaunch(ca, dbInstance);
+            if (deep?.isBundled) {
+              bundleVetoReason = `deep trace · ${deep.funderOverlap}/${deep.buyerCount} buyers funded by ${deep.topFunder?.slice(0,8)}…`;
+              enrichedCandidate._bundleSetup = true;
+              enrichedCandidate._bundleDeep = deep;
+            } else if (deep && !deep.skipped) {
+              console.log(`[auto-caller] ✓ Bundle deep-trace clean — $${enrichedCandidate.token ?? ca.slice(0,6)} (${deep.signals?.[0] ?? ''})`);
+            }
+          } catch (err) {
+            console.warn('[bundle-detector] deep trace failed:', err.message);
+          }
+        }
+      }
+      if (bundleVetoReason) {
+        logEvent('WARN', 'BUNDLE_VETO', `${enrichedCandidate.token ?? ca.slice(0,6)} ${bundleVetoReason} → WATCHLIST`);
+        console.log(`[auto-caller] 🪤 Bundle veto — $${enrichedCandidate.token ?? ca.slice(0,6)} (${bundleVetoReason}) → WATCHLIST`);
+        finalDecision = 'WATCHLIST';
+      }
     }
 
     // ── MOMENTUM GATE: never buy a coin that's currently bleeding ───────────
