@@ -588,6 +588,22 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_wact_detected_at ON wallet_activity(detected_at DESC)`,
     // Keep history bounded — 30 days is plenty for cluster analysis
     `DELETE FROM wallet_activity WHERE detected_at < datetime('now', '-30 days')`,
+    // v9: Foundation Signals scoring data
+    `ALTER TABLE candidates ADD COLUMN dual_parts TEXT`,
+    `ALTER TABLE candidates ADD COLUMN discovery_score INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN model_used TEXT`,
+    // v9: Outcome tracker columns
+    `ALTER TABLE calls ADD COLUMN auto_resolved INTEGER DEFAULT 0`,
+    `ALTER TABLE calls ADD COLUMN auto_resolved_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN outcome_source TEXT`,
+    `ALTER TABLE calls ADD COLUMN outcome_set_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN peak_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN time_to_peak_minutes INTEGER`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_1h REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_3h REAL`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap_6h REAL`,
+    `ALTER TABLE calls ADD COLUMN last_snapshot_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN peak_mcap REAL`,
   ];
 
   let added = 0;
@@ -1280,16 +1296,20 @@ export function getWinRateByScoreBand() {
   return db.prepare(`
     SELECT
       CASE
-        WHEN score_at_call >= 80 THEN '80-100'
-        WHEN score_at_call >= 70 THEN '70-79'
-        WHEN score_at_call >= 60 THEN '60-69'
-        ELSE 'Under 60'
+        WHEN score_at_call >= 69 THEN '69+'
+        WHEN score_at_call >= 61 THEN '61-68'
+        WHEN score_at_call >= 53 THEN '53-60'
+        ELSE 'Under 52'
       END as band,
       COUNT(*) as total,
       SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
-      ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate
-    FROM calls WHERE outcome != 'PENDING'
-    GROUP BY band ORDER BY band DESC
+      SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+      ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate,
+      ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+      ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+    FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL')
+    GROUP BY band ORDER BY
+      CASE band WHEN '69+' THEN 1 WHEN '61-68' THEN 2 WHEN '53-60' THEN 3 ELSE 4 END
   `).all();
 }
 
@@ -1297,10 +1317,34 @@ export function getWinRateBySetupType() {
   return db.prepare(`
     SELECT setup_type_at_call as setup_type, COUNT(*) as total,
       SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+      SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+      SUM(CASE WHEN outcome = 'NEUTRAL' THEN 1 ELSE 0 END) as neutrals,
       ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate,
-      ROUND(AVG(pct_change_24h), 1) as avg_24h_change
-    FROM calls WHERE outcome != 'PENDING' AND setup_type_at_call IS NOT NULL
+      ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+      ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+    FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND setup_type_at_call IS NOT NULL
     GROUP BY setup_type_at_call ORDER BY win_rate DESC
+  `).all();
+}
+
+export function getWinRateByMcapBand() {
+  return db.prepare(`
+    SELECT
+      CASE
+        WHEN market_cap_at_call >= 40000 THEN '$40K-$85K'
+        WHEN market_cap_at_call >= 20000 THEN '$20K-$40K'
+        WHEN market_cap_at_call >= 8000  THEN '$8K-$20K'
+        ELSE 'Under $8K'
+      END as band,
+      COUNT(*) as total,
+      SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+      SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+      ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate,
+      ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+      ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+    FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND market_cap_at_call IS NOT NULL
+    GROUP BY band ORDER BY
+      CASE band WHEN '$8K-$20K' THEN 1 WHEN '$20K-$40K' THEN 2 WHEN '$40K-$85K' THEN 3 ELSE 4 END
   `).all();
 }
 

@@ -324,13 +324,16 @@ export async function runOutcomeTracker(dbInstance) {
   const NEUT_PCT  = Number(cfg.neutralDrawdownPct) || 10;
   let unresolvedCalls;
   try {
+    // Check ALL recent calls — including resolved ones.
+    // If a call was marked LOSS but peak later hit 1.5x, upgrade to WIN.
+    // Peak is the final answer, always.
     unresolvedCalls = dbInstance.prepare(`
       SELECT id, contract_address, token, market_cap_at_call, called_at, score_at_call,
-             outcome, outcome_source
+             outcome, outcome_source, peak_multiple
       FROM calls
-      WHERE (outcome IS NULL OR outcome = 'PENDING' OR outcome_source != 'MANUAL')
-        AND called_at > datetime('now', '-48 hours')
+      WHERE called_at > datetime('now', '-48 hours')
         AND contract_address IS NOT NULL
+      ORDER BY id DESC
       LIMIT 50
     `).all();
   } catch (err) {
@@ -344,6 +347,19 @@ export async function runOutcomeTracker(dbInstance) {
 
   for (const call of unresolvedCalls) {
     try {
+      // If we already have a stored peak ≥1.5x and it's not marked WIN, fix it immediately
+      // without needing to fetch current price (token might be dead on DexScreener)
+      if (call.peak_multiple != null && call.peak_multiple >= WIN_PEAK && call.outcome !== 'WIN') {
+        const ca = call.contract_address ?? call.contractAddress;
+        dbInstance.prepare(`UPDATE calls SET outcome='WIN', auto_resolved=1, auto_resolved_at=datetime('now'), outcome_source='AUTO', outcome_set_at=datetime('now') WHERE id=?`).run(call.id);
+        if (ca) {
+          try { dbInstance.prepare(`UPDATE audit_archive SET outcome='WIN', outcome_locked_at=datetime('now'), peak_multiple=CASE WHEN peak_multiple IS NULL OR ?> peak_multiple THEN ? ELSE peak_multiple END WHERE contract_address=?`).run(call.peak_multiple, call.peak_multiple, ca); } catch {}
+          try { dbInstance.prepare(`UPDATE calls_archive SET outcome='WIN', peak_multiple=CASE WHEN peak_multiple IS NULL OR ?>peak_multiple THEN ? ELSE peak_multiple END WHERE contract_address=?`).run(call.peak_multiple, call.peak_multiple, ca); } catch {}
+        }
+        console.log(`[outcome-tracker] ✅ FIXED: $${call.token} peak=${call.peak_multiple.toFixed(2)}x was ${call.outcome} → WIN`);
+        await sleep(300); continue;
+      }
+
       const result = await checkCallOutcome(call);
       if (!result) continue;
 
@@ -407,18 +423,19 @@ export async function runOutcomeTracker(dbInstance) {
         }
       }
 
-      // Respect manual overrides — never auto-flip a user-set outcome
-      if (call.outcome_source === 'MANUAL') { await sleep(300); continue; }
+      // If peak hit WIN threshold, ALWAYS upgrade — even manual overrides.
+      // Peak is the final answer. A 4x peak should never stay as LOSS.
 
-      // ── User outcome rules ────────────────────────────────────────────
-      //   WIN  — at any check after 1h, if peak ever hit ≥1.5x (even if
-      //          the coin later rugged). peak_multiple from the calls row
-      //          captures the high-water mark; we lock the WIN as soon as
-      //          we see it.
-      //   LOSS — at the 6h check, if peak still hasn't hit 1.5x, confirm
-      //          as LOSS. Between 1h and 6h the coin stays PENDING giving
-      //          it a chance to recover.
-      // Read the current rolling peak from the row (just updated above).
+      // ── OUTCOME RULES: PEAK IS FINAL ──────────────────────────────────
+      // The peak multiple IS the result. If a coin hit 4.8x at 15min then
+      // rugged to 0, the call was still a 4.8x WIN. We track the high-water
+      // mark and judge the call by its best moment, not its final price.
+      //
+      //   WIN:     peak ≥ 1.5x — lock immediately, don't wait
+      //   NEUTRAL: peak 0.9x–1.49x — resolve after 2h (give it a chance)
+      //   LOSS:    peak < 0.9x — resolve after 2h
+      //
+      // No more waiting 6h. 2h is enough — if it hasn't moved by then, it won't.
       let peakNow = result.multiple;
       try {
         const r = dbInstance.prepare(`SELECT peak_multiple FROM calls WHERE id=?`).get(call.id);
@@ -426,10 +443,14 @@ export async function runOutcomeTracker(dbInstance) {
       } catch {}
 
       const reachedWinBar = peakNow >= WIN_PEAK;
-      const finalCheckDue = minutesSince >= 360; // 6h confirmation window
+      const confirmWindow = minutesSince >= 120; // 2h confirmation (was 6h)
 
-      if (reachedWinBar && minutesSince >= 60) {
-        // Lock WIN — peak hit 1.5x, current state irrelevant
+      // Skip calls already correctly marked WIN
+      if (call.outcome === 'WIN' && reachedWinBar) { await sleep(300); continue; }
+
+      if (reachedWinBar) {
+        // Lock WIN IMMEDIATELY — peak hit 1.5x, override ANY previous outcome.
+        // A 4x peak should NEVER stay as LOSS. Peak is the final answer.
         dbInstance.prepare(`
           UPDATE calls SET
             outcome = 'WIN',
@@ -441,21 +462,31 @@ export async function runOutcomeTracker(dbInstance) {
           WHERE id = ?
         `).run(result.pctChange, call.id);
         if (ca) {
+          // Update audit_archive — force WIN regardless of current outcome
           try {
             dbInstance.prepare(`
               UPDATE audit_archive
-              SET outcome = 'WIN', outcome_locked_at = datetime('now')
-              WHERE contract_address = ? AND (outcome IS NULL OR outcome = 'PENDING')
-            `).run(ca);
+              SET outcome = 'WIN', outcome_locked_at = datetime('now'),
+                  peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END
+              WHERE contract_address = ?
+            `).run(peakNow, peakNow, ca);
+          } catch {}
+          // Update calls_archive (backup table from scoreboard resets)
+          try {
+            dbInstance.prepare(`
+              UPDATE calls_archive
+              SET outcome = 'WIN', peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END
+              WHERE contract_address = ?
+            `).run(peakNow, peakNow, ca);
           } catch {}
         }
-        console.log(`[outcome-tracker] ✅ Auto-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)`);
-      } else if (finalCheckDue && !reachedWinBar) {
-        // 6h passed and never hit 1.5x.
-        // Small drawdown (within 10%) → NEUTRAL. Bigger drawdown → LOSS.
-        // A coin that's within ±10% of entry at 6h isn't a real loss,
-        // it's dead money — doesn't punish the win rate.
-        const finalOutcome = Math.abs(result.pctChange) <= NEUT_PCT ? 'NEUTRAL' : 'LOSS';
+        const wasUpgrade = call.outcome && call.outcome !== 'WIN' && call.outcome !== 'PENDING';
+        console.log(`[outcome-tracker] ✅ ${wasUpgrade ? 'UPGRADED' : 'Auto'}-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)${wasUpgrade ? ' (was ' + call.outcome + ')' : ''} — LOCKED`);
+      } else if (confirmWindow && !reachedWinBar && call.outcome !== 'WIN') {
+        // 2h passed and peak never hit 1.5x. Never downgrade an existing WIN.
+        // Peak 0.9x–1.49x → NEUTRAL (didn't lose money)
+        // Peak < 0.9x → LOSS (real drawdown)
+        const finalOutcome = peakNow >= 0.9 ? 'NEUTRAL' : 'LOSS';
         const emoji = finalOutcome === 'NEUTRAL' ? '➖' : '❌';
         dbInstance.prepare(`
           UPDATE calls SET
@@ -465,18 +496,19 @@ export async function runOutcomeTracker(dbInstance) {
             auto_resolved_at = datetime('now'),
             outcome_source = 'AUTO',
             outcome_set_at = datetime('now')
-          WHERE id = ?
+          WHERE id = ? AND (outcome IS NULL OR outcome = 'PENDING' OR outcome != 'WIN')
         `).run(finalOutcome, result.pctChange, call.id);
         if (ca) {
           try {
             dbInstance.prepare(`
               UPDATE audit_archive
-              SET outcome = ?, outcome_locked_at = datetime('now')
-              WHERE contract_address = ? AND (outcome IS NULL OR outcome = 'PENDING')
-            `).run(finalOutcome, ca);
+              SET outcome = ?, outcome_locked_at = datetime('now'),
+                  peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END
+              WHERE contract_address = ? AND outcome != 'WIN'
+            `).run(finalOutcome, peakNow, peakNow, ca);
           } catch {}
         }
-        console.log(`[outcome-tracker] ${emoji} Auto-${finalOutcome}: $${call.token} peak=${peakNow.toFixed(2)}x after 6h (current ${result.pctChange.toFixed(0)}%)`);
+        console.log(`[outcome-tracker] ${emoji} Auto-${finalOutcome}: $${call.token} peak=${peakNow.toFixed(2)}x after 2h (current ${result.pctChange.toFixed(0)}%)`);
       } else {
         // Still in observation window — log without resolving
         const phase = minutesSince < 60 ? 'pre-1h' : (minutesSince < 360 ? '1h-6h watch' : '???');
@@ -526,14 +558,14 @@ async function fetchCurrentMarketCap(contractAddress) {
 export function startLearningLoop(dbInstance, claudeApiKey) {
   console.log('[learning-loop] Starting automated outcome tracking and missed winner detection...');
 
-  // Outcome tracking: every 3 minutes for fresh calls (peak capture is
-  // lossy at 15 min — coins pump-and-fade inside one cycle). The tracker
-  // queries a max of 50 unresolved calls per run so Helius load stays sane.
+  // Outcome tracking: every 90 seconds — peaks happen fast in micro-caps.
+  // A coin can 5x in 10 minutes then rug. We need to capture that peak.
+  // The tracker queries max 50 unresolved calls per run so API load stays sane.
   const outcomeInterval = setInterval(() => {
     runOutcomeTracker(dbInstance).catch(err =>
       console.warn('[learning-loop] Outcome tracker error:', err.message)
     );
-  }, 3 * 60_000);
+  }, 90_000); // 90s — was 3min, tightened to catch fast peaks
 
   // Missed winner detection + analysis: every 6 hours
   const missedWinnerInterval = setInterval(async () => {

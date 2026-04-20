@@ -657,21 +657,22 @@ export function getDynamicThreshold(structureGrade, stage, candidate) {
   let adjustment = 0;
   const reasons = [];
 
+  // v6: Structure grade influence REDUCED — Foundation Signals already covers
+  // dev wallet, top10 holders, bundles, snipers, BubbleMap, mint/freeze.
+  // Legacy threshold adjustments are now minimal context signals, not gatekeepers.
   switch (structureGrade) {
     case 'ELITE':
-      adjustment -= 10; reasons.push('Elite wallet structure'); break;
+      adjustment -= 3; reasons.push('Elite structure (minor discount — Foundation Signals primary)'); break;
     case 'CLEAN':
-      adjustment -= 5;  reasons.push('Clean wallet structure'); break;
+      adjustment -= 2; reasons.push('Clean structure (minor discount)'); break;
     case 'AVERAGE':
       /* no adjustment */ break;
     case 'UNVERIFIED':
-      // v5: UNVERIFIED gets NO threshold discount. Unknown structure is neutral.
-      // Route protection is handled in computeDecision() instead.
-      reasons.push('Unverified structure — no discount (routing protected)'); break;
+      reasons.push('Unverified structure — neutral'); break;
     case 'MIXED':
-      adjustment += 5;  reasons.push('Mixed signals'); break;
+      adjustment += 2; reasons.push('Mixed signals (minor penalty)'); break;
     case 'DIRTY':
-      adjustment += 6;  reasons.push('Dirty structure'); break;
+      adjustment += 3; reasons.push('Dirty structure (minor penalty — Foundation Signals already penalized)'); break;
   }
 
   // v5: Stage discounts significantly reduced — freshness is not a free pass
@@ -727,7 +728,7 @@ export function getDynamicThreshold(structureGrade, stage, candidate) {
 // ─── Composite Scorer ─────────────────────────────────────────────────────────
 // v5: Integrates trap confidence penalty and stealth accumulation.
 
-export function computeFullScore(candidate) {
+export function computeFullScore(candidate, discoveryWeights = null) {
   const stage = getStage(candidate.pairAgeHours);
 
   const launchResult = scoreLaunchQuality(candidate);
@@ -777,7 +778,7 @@ export function computeFullScore(candidate) {
   // the existing sub-scores / signals / penalties / structureGrade / etc.
   // stay intact so every downstream consumer (UI, Claude prompts, DB) keeps
   // working unchanged. `composite` remains exposed as `legacyScore`.
-  const dual = runDualModel(candidate);
+  const dual = runDualModel(candidate, discoveryWeights);
   const legacyScore = composite;
   const finalScore  = dual.finalScore ?? composite;
 

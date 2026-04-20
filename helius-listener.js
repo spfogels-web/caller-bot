@@ -47,6 +47,7 @@ const WebSocketImpl = _WS;
 
 const HELIUS_WS_URL = (apiKey) => `wss://mainnet.helius-rpc.com/?api-key=${apiKey}`;
 const HELIUS_RPC    = (apiKey) => `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
+const SOLANA_PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
 
 // Program IDs we care about
 const PUMP_FUN_PROGRAM    = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
@@ -128,7 +129,8 @@ export class HeliusListener extends EventEmitter {
     };
 
     this.ws.onerror = (err) => {
-      console.warn('[helius] WebSocket error:', err.message || 'unknown');
+      const msg = err?.message || err?.error?.message || 'unknown';
+      console.error('[helius] WebSocket error:', msg, err?.error?.code || '');
     };
 
     this.ws.onclose = (code) => {
@@ -749,24 +751,49 @@ export async function getTokenMetadata(mint, apiKey) {
  * Get top token holders using Helius.
  */
 export async function getTopHolders(mint, apiKey, limit = 20) {
+  let holders = [];
+
+  // 1. Free Solana RPC — getTokenLargestAccounts (max 20, free)
   try {
-    const res = await fetch(
-      `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
-      {
+    const res = await fetch(SOLANA_PUBLIC_RPC, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenLargestAccounts', params: [mint] }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      holders = data.result?.value ?? [];
+    }
+  } catch {}
+
+  // 2. If we need more than 20 AND have Helius key, use DAS getTokenAccounts (costs 1 credit)
+  if (limit > 20 && apiKey && holders.length >= 19) {
+    try {
+      const res = await fetch(`https://mainnet.helius-rpc.com/?api-key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jsonrpc: '2.0', id: 1,
-          method: 'getTokenLargestAccounts',
-          params: [mint],
+          method: 'getTokenAccounts',
+          params: { mint, limit: Math.min(limit, 100), options: { showZeroBalance: false } },
         }),
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const dasHolders = (data.result?.token_accounts ?? []).map(a => ({
+          address: a.address,
+          amount: a.amount,
+          owner: a.owner,
+        }));
+        if (dasHolders.length > holders.length) {
+          console.log(`[helius] DAS getTokenAccounts: ${dasHolders.length} holders (upgraded from ${holders.length})`);
+          holders = dasHolders;
+        }
       }
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.result?.value?.slice(0, limit) ?? [];
-  } catch {
-    return [];
+    } catch {}
   }
+
+  return holders.slice(0, limit);
 }

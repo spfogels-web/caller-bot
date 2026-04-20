@@ -1,34 +1,32 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// scorer-dual.js
+// scorer-dual.js  v3 — FOUNDATION SIGNALS architecture
 //
-// Dual scoring overlay for the Solana caller bot.
+// 5 FOUNDATION SIGNALS (100% weight) — movement + intent over static structure:
 //
-// Routes coins to one of two models based on age:
+//   1. Volume Velocity      (35 pts) — buys/min acceleration, early explosion
+//   2. Buy vs Sell Pressure (25 pts) — frequency + size analysis, demand vs manip
+//   3. Wallet Quality       (20 pts) — profitable wallets entering, conviction
+//   4. Holder Distribution  (12 pts) — dev wallet (8) + top10 holders (4)
+//   5. Liquidity Health     ( 8 pts) — liq:mcap ratio, LP lock, stability
 //
-//   DISCOVERY  (0–60 min)  — softer, surfaces early gems for 10x potential
-//   RUNNER     (60 min–4h) — stricter, confirms continuation for 3x–5x
+// Late-pump penalty applies as final deduction.
 //
-// This module exposes pure helpers only. The legacy 4-dimension scorer in
-// scorer.js stays in place to populate sub-scores / signals / penalties /
-// structureGrade that the rest of the system (UI, Claude prompts, AI reviews)
-// depends on. computeFullScore() calls runDualModel() at the end and uses
-// the new model's normalized 0-100 as the canonical `score`, while also
-// attaching the new fields (modelUsed / confidence / action / reasons /
-// risks / ageMinutes / discoveryScore / runnerScore) to the return shape.
+// Key insight: This is about MOVEMENT and INTENT, not static structure.
+// Volume Velocity is the foundation. Real sends show acceleration patterns.
+// A clean launch with flat velocity is a red flag.
 //
-// Backwards-compatible: every existing field on scoreResult is preserved.
+// Weights are dynamic — read from TUNING_CONFIG passed at runtime.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── Tunable weights ─────────────────────────────────────────────────────────
+'use strict';
+
+// ── Default weights ─────────────────────────────────────────────────────────
 export const DISCOVERY_WEIGHTS = {
-  buyVelocity:       20,
-  uniqueBuyerGrowth: 15,
-  liquidityHealth:   15,
-  devRisk:           15,   // scored inverted (low risk = high points)
-  holderConcentration: 10, // inverted + softened very-early
-  sellPressure:      10,   // inverted
-  walletBehavior:    10,   // inverted (clustering / coordination penalty)
-  momentumAccel:      5,
+  volumeVelocity:      35,
+  buyPressure:         25,
+  walletQuality:       20,
+  holderDistribution:  12,  // dev wallet (8) + top10 (4) inside
+  liquidityHealth:      8,
 };
 
 export const RUNNER_WEIGHTS = {
@@ -42,41 +40,31 @@ export const RUNNER_WEIGHTS = {
   attentionSignal:    5,
 };
 
-// ── Threshold bands (per model) ─────────────────────────────────────────────
+// ── Threshold bands ─────────────────────────────────────────────────────────
 export const DISCOVERY_THRESHOLDS = { alert: 75, watchlist: 65, monitor: 55 };
 export const RUNNER_THRESHOLDS    = { alert: 80, watchlist: 70, monitor: 60 };
 
 // ── Utility ─────────────────────────────────────────────────────────────────
 function clamp(v, lo = 0, hi = 100) { return Math.max(lo, Math.min(hi, v)); }
-function pct(n, d) { return d > 0 ? n / d : 0; }
 function safeNum(v, fallback = null) {
   if (v == null || Number.isNaN(+v)) return fallback;
   return +v;
 }
 
 // ── Public: age + model routing ─────────────────────────────────────────────
-
 export function getCoinAgeMinutes(candidate) {
   const hours = safeNum(candidate?.pairAgeHours);
   if (hours == null) return null;
   return hours * 60;
 }
 
-/**
- * Decide which model to use. Always returns a string — never throws.
- *   <= 60 min  → 'discovery'
- *   > 60 min   → 'runner'
- *   null (missing age) → 'discovery' (with reduced confidence elsewhere)
- */
 export function selectScoringModel(ageMinutes) {
-  if (ageMinutes == null)          return 'discovery'; // safe default
-  if (ageMinutes <= 60)            return 'discovery';
+  if (ageMinutes == null) return 'discovery';
+  if (ageMinutes <= 60)   return 'discovery';
   return 'runner';
 }
 
-// ── Public: shared behavior metrics ─────────────────────────────────────────
-// Collects the raw numbers each model needs, gracefully degrading on missing
-// data. Returns normalized 0-1 where appropriate.
+// ── Shared behavior metrics ─────────────────────────────────────────────────
 export function calculateBehaviorMetrics(candidate) {
   const c = candidate || {};
   return {
@@ -115,129 +103,310 @@ export function calculateBehaviorMetrics(candidate) {
     telegram:             !!c.telegram,
     deployerHistoryRisk:  c.deployerHistoryRisk ?? c.deployer_history_risk ?? null,
     liqMcapRatio:         (c.liquidity && c.marketCap) ? c.liquidity / c.marketCap : null,
+    // Momentum metrics — rate of change
+    priceVelocity5m:      (() => { const p5=safeNum(c.priceChange5m??c.price_change_5m); return p5!=null?p5/5:null; })(), // %/min
+    priceVelocity1h:      (() => { const p1=safeNum(c.priceChange1h??c.price_change_1h); return p1!=null?p1/60:null; })(), // %/min
+    momentumShift:        (() => { // 5m velocity vs 1h velocity — positive = accelerating
+      const p5=safeNum(c.priceChange5m??c.price_change_5m);
+      const p1=safeNum(c.priceChange1h??c.price_change_1h);
+      if(p5==null||p1==null)return null;
+      return (p5/5)-(p1/60); // difference in %/min
+    })(),
+    volumeAcceleration:   (() => { // volume1h vs volume6h rate — >1 = accelerating
+      const v1=safeNum(c.volume1h??c.volume_1h);
+      const v6=safeNum(c.volume6h??c.volume_6h);
+      if(!v1||!v6)return null;
+      return (v1/1)/(v6/6); // normalize to per-hour
+    })(),
+    holderGrowthRate:     safeNum(c.holderGrowth24h ?? c.holder_growth_24h),
+    // LunarCrush social data
+    socialScore:          safeNum(c.socialScore ?? c.galaxyScore),
+    socialVolume24h:      safeNum(c.socialVolume24h),
+    socialSentiment:      safeNum(c.socialSentiment),
+    twitterMentions:      safeNum(c.twitterMentions),
+    socialSpike:          !!(c.socialSpike),
+    lunarCrushOk:         !!(c.lunarCrushOk),
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DISCOVERY MODEL (0–60 min) — softer, permissive, optimized for recall
+// DISCOVERY MODEL v3 — 5 FOUNDATION SIGNALS (100 points)
+// Focus on MOVEMENT and INTENT over static structure
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function scoreDiscoveryCoin(candidate, metricsIn = null) {
+export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) {
   const m = metricsIn || calculateBehaviorMetrics(candidate);
+  const w = weights || DISCOVERY_WEIGHTS;
   const reasons = [];
   const risks = [];
   const parts = {};
-
-  // 1. Buy Velocity (20)
-  const bv = m.buyVelocity ?? m.volumeVelocity;
-  let p = 0;
-  if (bv == null)              { p = 6; risks.push('Buy velocity unknown (very early)'); }
-  else if (bv >= 0.5)          { p = 20; reasons.push(`Strong buy velocity (${bv.toFixed(2)})`); }
-  else if (bv >= 0.3)          { p = 15; reasons.push(`Healthy buy velocity (${bv.toFixed(2)})`); }
-  else if (bv >= 0.15)         { p = 10; reasons.push(`Modest buy velocity (${bv.toFixed(2)})`); }
-  else if (bv >= 0.05)         { p = 5; }
-  else                         { p = 0; risks.push('Very weak buy activity'); }
-  parts.buyVelocity = p;
-
-  // 2. Unique Buyer Growth (15)
-  p = 0;
-  const ubr = m.launchUbr;
   const veryEarly = (m.ageMinutes ?? 0) < 15;
-  if (ubr == null) { p = 5; }
-  else if (ubr >= 0.75) { p = 15; reasons.push(`Excellent buyer diversity (${(ubr*100).toFixed(0)}%)`); }
-  else if (ubr >= 0.55) { p = 11; reasons.push(`Good buyer diversity (${(ubr*100).toFixed(0)}%)`); }
-  else if (ubr >= 0.40) { p = 7; }
-  else if (veryEarly)   { p = 5; } // softened — too early to judge
-  else                  { p = 0; risks.push(`Low unique buyer ratio (${(ubr*100).toFixed(0)}%)`); }
-  parts.uniqueBuyerGrowth = p;
 
-  // 3. Liquidity Health (15)
-  p = 0;
-  const lr = m.liqMcapRatio;
-  if (lr == null) { p = 5; }
-  else if (lr >= 0.15) { p = 15; reasons.push(`Strong liquidity ratio (${(lr*100).toFixed(0)}%)`); }
-  else if (lr >= 0.10) { p = 11; reasons.push(`Healthy liq:mcap (${(lr*100).toFixed(0)}%)`); }
-  else if (lr >= 0.05) { p = 7; }
-  else if (lr >= 0.02) { p = 3; risks.push(`Thin liquidity (${(lr*100).toFixed(0)}%)`); }
-  else                 { p = 0; risks.push('Extremely poor liquidity — rug risk'); }
-  parts.liquidityHealth = p;
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 1. VOLUME VELOCITY (max: w.volumeVelocity, default 35)
+  //    Buys/minute acceleration in first 5-15 min.
+  //    Rapid volume increase vs baseline. Consistent buy pressure (not spikes).
+  //    THIS IS THE FOUNDATION. Real sends show acceleration patterns.
+  // ═══════════════════════════════════════════════════════════════════════════
+  let p = 0;
+  const maxVV = w.volumeVelocity || 35;
+  const bv = m.buyVelocity ?? m.volumeVelocity;
 
-  // 4. Dev Risk (15, inverted: low risk = high points)
+  if (bv == null) {
+    p = Math.round(maxVV * 0.20);
+    risks.push('Volume velocity unknown — very early');
+  } else if (bv >= 1.0)  { p = maxVV;                    reasons.push(`Explosive velocity (${bv.toFixed(2)}/min) — STRONG BUY SIGNAL`); }
+  else if (bv >= 0.7)    { p = Math.round(maxVV * 0.90);  reasons.push(`Very strong velocity (${bv.toFixed(2)}/min)`); }
+  else if (bv >= 0.5)    { p = Math.round(maxVV * 0.78);  reasons.push(`Strong buy velocity (${bv.toFixed(2)}/min)`); }
+  else if (bv >= 0.3)    { p = Math.round(maxVV * 0.60);  reasons.push(`Healthy buy velocity (${bv.toFixed(2)}/min)`); }
+  else if (bv >= 0.15)   { p = Math.round(maxVV * 0.40);  reasons.push(`Modest velocity (${bv.toFixed(2)}/min)`); }
+  else if (bv >= 0.05)   { p = Math.round(maxVV * 0.20);  risks.push(`Weak velocity (${bv.toFixed(2)}/min)`); }
+  else                   { p = 0;                         risks.push('Flat/dead volume — no acceleration'); }
+
+  // Acceleration bonus: 5m run-rate exceeding 1h average = momentum building
+  if (m.priceChange5m != null && m.priceChange1h != null) {
+    const runRate5m = m.priceChange5m;
+    const avgRate1h = m.priceChange1h / 12;
+    if (runRate5m > avgRate1h * 1.5 && runRate5m > 0) {
+      p = Math.min(maxVV, p + Math.round(maxVV * 0.10));
+      reasons.push('Accelerating — 5m run-rate exceeds 1h avg');
+    }
+  }
+
+  // Momentum shift bonus — price is accelerating RIGHT NOW
+  if (m.momentumShift != null && m.momentumShift > 0.5) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.08));
+    reasons.push(`Momentum shift +${m.momentumShift.toFixed(2)}%/min — breakout forming`);
+  } else if (m.momentumShift != null && m.momentumShift < -1.0) {
+    p = Math.max(0, p - Math.round(maxVV * 0.06));
+    risks.push(`Momentum fading ${m.momentumShift.toFixed(2)}%/min — deceleration`);
+  }
+
+  // Volume acceleration — volume1h outpacing volume6h rate
+  if (m.volumeAcceleration != null && m.volumeAcceleration > 2.0) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.06));
+    reasons.push(`Volume accelerating ${m.volumeAcceleration.toFixed(1)}x vs 6h avg`);
+  }
+
+  // Consistency check: high buys count = sustained, not just a spike
+  if (m.buys1h >= 80 && bv != null && bv >= 0.3) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.06));
+    reasons.push(`Sustained pressure: ${m.buys1h} buys in 1h`);
+  }
+
+  // Social spike bonus — Twitter buzz amplifies momentum
+  if (m.socialSpike) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.08));
+    reasons.push('Social spike detected — Twitter volume 2x+ above average');
+  } else if (m.twitterMentions > 20) {
+    p = Math.min(maxVV, p + Math.round(maxVV * 0.04));
+    reasons.push(`Active Twitter presence (${m.twitterMentions} mentions)`);
+  }
+  parts.volumeVelocity = p;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 2. BUY vs SELL PRESSURE (max: w.buyPressure, default 25)
+  //    More buys than sells (frequency). Larger buy sizes vs sell sizes (value).
+  //    RED FLAG: Micro buys + large sells = exit liquidity setup.
+  // ═══════════════════════════════════════════════════════════════════════════
   p = 0;
+  const maxBP = w.buyPressure || 25;
+  const br = m.buySellRatio1h;
+  const totalTxns = m.buys1h + m.sells1h;
+
+  if (br == null) {
+    p = Math.round(maxBP * 0.30);
+  } else if (br >= 0.85) { p = maxBP;                    reasons.push(`Overwhelming buy dominance (${(br*100).toFixed(0)}% buys)`); }
+  else if (br >= 0.75)   { p = Math.round(maxBP * 0.88); reasons.push(`Strong buy pressure (${(br*100).toFixed(0)}% buys)`); }
+  else if (br >= 0.65)   { p = Math.round(maxBP * 0.72); reasons.push(`Healthy buy ratio (${(br*100).toFixed(0)}% buys)`); }
+  else if (br >= 0.55)   { p = Math.round(maxBP * 0.52); reasons.push(`Slight buy edge (${(br*100).toFixed(0)}% buys)`); }
+  else if (br >= 0.45)   { p = Math.round(maxBP * 0.28); }
+  else if (br >= 0.35)   { p = Math.round(maxBP * 0.10); risks.push(`Sell pressure building (${(br*100).toFixed(0)}% buys)`); }
+  else                   { p = 0;                        risks.push(`Sellers dominating (${(br*100).toFixed(0)}% buys) — EXIT LIQUIDITY RISK`); }
+
+  // Volume depth: high txn count = real activity, not just a few wallets
+  if (totalTxns >= 150)     { p = Math.min(maxBP, p + 3); reasons.push(`Very active: ${totalTxns} transactions/1h`); }
+  else if (totalTxns >= 80) { p = Math.min(maxBP, p + 2); }
+  else if (totalTxns >= 40) { p = Math.min(maxBP, p + 1); }
+
+  // Red flag: lots of micro buys + fewer but larger sells = exit liquidity trap
+  if (m.buys1h > 50 && m.sells1h > 0 && m.buys1h / m.sells1h > 10 && br != null && br < 0.60) {
+    p = Math.max(0, p - 5);
+    risks.push('Micro buys + large sells pattern — possible exit liquidity');
+  }
+  parts.buyPressure = p;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 3. WALLET QUALITY (max: w.walletQuality, default 20)
+  //    Known profitable wallets entering early. 2-5 strong wallets buying and
+  //    holding (not instant flipping). Smart money behavior patterns.
+  //    Measures: Conviction from experienced traders.
+  // ═══════════════════════════════════════════════════════════════════════════
+  p = 0;
+  const maxWQ = w.walletQuality || 20;
+  const winners = m.knownWinnerCount ?? 0;
+  const clusters = m.clusterWalletCount ?? 0;
+  const coord = m.coordinationIntensity ?? 0;
+
+  // Winner wallets are the strongest conviction signal
+  if (winners >= 5)       { p = maxWQ;                     reasons.push(`${winners} winner wallets in early — HIGHEST CONVICTION`); }
+  else if (winners >= 3)  { p = Math.round(maxWQ * 0.85);  reasons.push(`${winners} winner wallets — strong conviction signal`); }
+  else if (winners >= 2)  { p = Math.round(maxWQ * 0.70);  reasons.push(`${winners} winner wallets entering`); }
+  else if (winners >= 1)  { p = Math.round(maxWQ * 0.50);  reasons.push(`${winners} winner wallet early`); }
+  else {
+    // No known winners — fall back to behavioral signals
+    if (clusters === 0 && coord < 0.2)      { p = Math.round(maxWQ * 0.35); reasons.push('Clean wallet behavior — no coordination'); }
+    else if (clusters <= 2)                  { p = Math.round(maxWQ * 0.25); }
+    else if (clusters <= 5)                  { p = Math.round(maxWQ * 0.10); risks.push(`${clusters} cluster wallets — coordination concern`); }
+    else                                     { p = 0;                        risks.push(`Heavy coordination: ${clusters} cluster wallets`); }
+  }
+
+  // Smart money overlay
+  if (m.smartMoneyScore != null && m.smartMoneyScore >= 60) {
+    p = Math.min(maxWQ, p + 3);
+    reasons.push('Smart money signal detected');
+  }
+
+  // Bundle cross-reference: bundles with bad wallet quality = coordinated dump
+  if ((m.bundleRisk === 'SEVERE' || m.bundleRisk === 'HIGH') && winners < 2) {
+    p = Math.max(0, p - Math.round(maxWQ * 0.40));
+    risks.push(`Bundle ${m.bundleRisk} + weak wallets — coordinated dump risk`);
+  }
+
+  // Sniper penalty — high sniper count = frontrun, dump incoming
+  const snipers = m.sniperWalletCount ?? 0;
+  if (snipers > 20)       { p = Math.max(0, p - 6); risks.push(`${snipers} sniper wallets — heavily frontrun`); }
+  else if (snipers > 10)  { p = Math.max(0, p - 3); risks.push(`${snipers} snipers detected`); }
+  else if (snipers <= 3 && snipers >= 0) { /* clean — no penalty */ }
+
+  // BubbleMap risk — clustered/coordinated wallets
+  if (m.bubbleMapRisk === 'SEVERE')      { p = Math.max(0, p - 8); risks.push('BubbleMap SEVERE — coordinated wallet cluster'); }
+  else if (m.bubbleMapRisk === 'HIGH')   { p = Math.max(0, p - 4); risks.push('BubbleMap HIGH — suspicious wallet patterns'); }
+
+  parts.walletQuality = p;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 4. HOLDER DISTRIBUTION (max: w.holderDistribution, default 12)
+  //    Split: Dev Wallet (8 pts) + Top 10 Holders (4 pts)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const maxHD = w.holderDistribution || 12;
+  const devMax = Math.round(maxHD * 0.667);  // ~8 of 12
+  const top10Max = maxHD - devMax;            // ~4 of 12
+
+  // ── Dev Wallet (8 pts) ──
+  let devPts = 0;
   const dev = m.devWalletPct;
   const mintRevoked = m.mintAuthority === 0;
   if (dev == null) {
-    p = veryEarly ? 10 : 6;
-  } else if (dev < 3 && mintRevoked)  { p = 15; reasons.push(`Clean dev: ${dev.toFixed(1)}%, mint revoked`); }
-  else if (dev < 5 && mintRevoked)    { p = 12; reasons.push(`Low dev allocation ${dev.toFixed(1)}%`); }
-  else if (dev < 10)                  { p = 8; }
-  else if (dev < 15)                  { p = 3;  risks.push(`Dev holds ${dev.toFixed(1)}% — concerning`); }
-  else                                { p = 0;  risks.push(`Dev wallet ${dev.toFixed(1)}% — HIGH RISK`); }
-  if (m.lpLocked === 1 && p > 0) p = Math.min(15, p + 2);
-  if (m.deployerHistoryRisk === 'SERIAL_RUGGER') { p = 0; risks.push('Serial rugger deployer'); }
-  parts.devRisk = p;
+    devPts = veryEarly ? Math.round(devMax * 0.60) : Math.round(devMax * 0.35);
+  } else if (dev <= 2)  { devPts = devMax;                   reasons.push(`Clean dev: ${dev.toFixed(1)}%${mintRevoked ? ', mint revoked' : ''}`); }
+  else if (dev <= 5)    { devPts = Math.round(devMax * 0.75); reasons.push(`Low dev allocation (${dev.toFixed(1)}%)`); }
+  else if (dev <= 10)   { devPts = Math.round(devMax * 0.50); }
+  else if (dev <= 15)   { devPts = Math.round(devMax * 0.25); risks.push(`Dev holds ${dev.toFixed(1)}% — heavy allocation`); }
+  else                  { devPts = 0;                         risks.push(`Dev wallet ${dev.toFixed(1)}% — INSTANT DISQUALIFIER`); }
+  if (m.deployerHistoryRisk === 'SERIAL_RUGGER') { devPts = 0; risks.push('Serial rugger deployer — AVOID'); }
 
-  // 5. Holder Concentration (10, inverted, softened very-early)
-  p = 0;
+  // ── Top 10 Holders (4 pts) ──
+  let top10Pts = 0;
   const top10 = m.top10HolderPct;
-  if (top10 == null) { p = veryEarly ? 6 : 4; }
-  else if (top10 < 30) { p = 10; reasons.push(`Spread holders (top10 ${top10.toFixed(0)}%)`); }
-  else if (top10 < 50) { p = 7; }
-  else if (top10 < 65) { p = 4; }
-  else if (top10 < 80) { p = 1; risks.push(`Concentrated holders (top10 ${top10.toFixed(0)}%)`); }
-  else                 { p = 0; risks.push(`Whale dominated (top10 ${top10.toFixed(0)}%)`); }
-  if (veryEarly && p < 3) p = 3; // softener floor
-  parts.holderConcentration = p;
+  if (top10 == null) {
+    top10Pts = veryEarly ? Math.round(top10Max * 0.60) : Math.round(top10Max * 0.40);
+  } else if (top10 < 30)  { top10Pts = top10Max;                    reasons.push(`Healthy distribution (top10: ${top10.toFixed(0)}%)`); }
+  else if (top10 < 50)    { top10Pts = Math.round(top10Max * 0.75); }
+  else if (top10 < 70)    { top10Pts = Math.round(top10Max * 0.50); risks.push(`Concentrated (top10: ${top10.toFixed(0)}%)`); }
+  else                    { top10Pts = Math.round(top10Max * 0.25); risks.push(`Whale-dominated (top10: ${top10.toFixed(0)}%)`); }
 
-  // 6. Sell Pressure (10, inverted)
-  p = 0;
-  const br = m.buySellRatio1h;
-  if (br == null) { p = 5; }
-  else if (br >= 0.70) { p = 10; reasons.push(`Buys dominate (${(br*100).toFixed(0)}%)`); }
-  else if (br >= 0.55) { p = 7; }
-  else if (br >= 0.45) { p = 4; }
-  else if (br < 0.35)  { p = 0; risks.push(`Heavy early selling (${(br*100).toFixed(0)}% buys)`); }
-  else                 { p = 2; }
-  parts.sellPressure = p;
+  parts.holderDistribution = devPts + top10Pts;
+  parts._devWallet = devPts;
+  parts._top10Holders = top10Pts;
 
-  // 7. Wallet Behavior (10, inverted)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 5. LIQUIDITY HEALTH (max: w.liquidityHealth, default 8)
+  //    Optimal liq = 15-40% of mcap. <10% = easy rug. LP locked = premium.
+  // ═══════════════════════════════════════════════════════════════════════════
   p = 0;
-  const clusters = m.clusterWalletCount ?? 0;
-  const coord    = m.coordinationIntensity ?? 0;
-  if (clusters === 0 && coord < 0.25) { p = 10; reasons.push('Clean wallet behavior — no coordination'); }
-  else if (clusters <= 2)             { p = 6; }
-  else if (clusters <= 5)             { p = 3; risks.push(`${clusters} cluster wallets detected`); }
-  else                                { p = 0; risks.push(`Heavy coordination: ${clusters} cluster wallets`); }
-  if (m.knownWinnerCount >= 1) {
-    const bonus = Math.min(3, m.knownWinnerCount);
-    p = Math.min(10, p + bonus);
-    reasons.push(`${m.knownWinnerCount} known winner wallet(s) early`);
+  const maxLH = w.liquidityHealth || 8;
+  const lr = m.liqMcapRatio;
+
+  if (lr == null) {
+    p = Math.round(maxLH * 0.30);
+  } else if (lr >= 0.15 && lr <= 0.40) { p = maxLH;                    reasons.push(`Optimal liquidity ratio (${(lr*100).toFixed(0)}%)`); }
+  else if (lr >= 0.10)                 { p = Math.round(maxLH * 0.80); reasons.push(`Healthy liquidity (${(lr*100).toFixed(0)}%)`); }
+  else if (lr > 0.40)                  { p = Math.round(maxLH * 0.70); reasons.push(`High liquidity ratio (${(lr*100).toFixed(0)}%)`); }
+  else if (lr >= 0.05)                 { p = Math.round(maxLH * 0.45); risks.push(`Below-average liquidity (${(lr*100).toFixed(0)}%)`); }
+  else if (lr >= 0.02)                 { p = Math.round(maxLH * 0.15); risks.push(`Thin liquidity (${(lr*100).toFixed(0)}%) — rug risk`); }
+  else                                 { p = 0;                        risks.push('Dangerously low liquidity — easy rug'); }
+
+  // LP locked = safety premium
+  if (m.lpLocked === 1) {
+    p = Math.min(maxLH, p + Math.round(maxLH * 0.20));
+    reasons.push('LP locked');
   }
-  if (m.bundleRisk === 'SEVERE' || m.bundleRisk === 'HIGH') { p = 0; risks.push(`Bundle risk ${m.bundleRisk}`); }
-  parts.walletBehavior = p;
 
-  // 8. Momentum Acceleration (5)
-  p = 0;
-  const accel = (m.priceChange5m != null && m.priceChange1h != null)
-    ? (m.priceChange5m > (m.priceChange1h / 12) * 1.5) // 5m run-rate exceeds 1h avg
-    : null;
-  if (m.volumeVelocity != null && m.volumeVelocity >= 0.4)      { p = 5; reasons.push(`Accelerating volume (${m.volumeVelocity.toFixed(2)})`); }
-  else if (accel === true)                                       { p = 5; reasons.push('Accelerating price (5m > 1h trend)'); }
-  else if (m.volumeVelocity != null && m.volumeVelocity >= 0.2) { p = 3; }
-  else                                                           { p = 0; }
-  parts.momentumAccel = p;
+  // Mint authority — if still active, dev can print tokens (rug vector)
+  if (m.mintAuthority === 1) {
+    p = Math.max(0, p - 2);
+    risks.push('Mint authority ACTIVE — dev can inflate supply');
+  } else if (m.mintAuthority === 0) {
+    reasons.push('Mint revoked');
+  }
 
-  // 9. Late-pump penalty — if the token already ran 300%+ we're chasing, not discovering
+  // Freeze authority — dev can freeze your tokens
+  if (m.freezeAuthority === 1) {
+    p = Math.max(0, p - 1);
+    risks.push('Freeze authority ACTIVE — tokens can be frozen');
+  }
+
+  parts.liquidityHealth = p;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LATE-PUMP PENALTY — final deduction (unchanged)
+  // ═══════════════════════════════════════════════════════════════════════════
   const p1h  = m.priceChange1h;
   const p24h = m.priceChange24h;
   let latePumpPenalty = 0;
-  if (p1h != null && p1h > 500)       { latePumpPenalty = 40; risks.push(`Already pumped +${p1h.toFixed(0)}% in 1h — missed the entry`); }
-  else if (p1h != null && p1h > 300)  { latePumpPenalty = 25; risks.push(`Up +${p1h.toFixed(0)}% in 1h — late entry risk`); }
-  else if (p24h != null && p24h > 500) { latePumpPenalty = 20; risks.push(`Up +${p24h.toFixed(0)}% in 24h — extended`); }
+  if (p1h != null && p1h > 500)        { latePumpPenalty = 40; risks.push(`Already pumped +${p1h.toFixed(0)}% 1h — missed entry`); }
+  else if (p1h != null && p1h > 300)   { latePumpPenalty = 25; risks.push(`Up +${p1h.toFixed(0)}% 1h — late entry risk`); }
+  else if (p24h != null && p24h > 500) { latePumpPenalty = 20; risks.push(`Up +${p24h.toFixed(0)}% 24h — extended`); }
   parts.latePumpPenalty = -latePumpPenalty;
 
-  const total = Object.values(parts).reduce((a, b) => a + b, 0);
-  return { score: clamp(total), parts, reasons, risks, model: 'discovery' };
+  // ── DATA CONFIDENCE — how much of this score is based on real data ──────
+  // Counts how many key fields have real values vs null/defaults.
+  // HIGH = most fields present, score is reliable
+  // MEDIUM = some gaps, score is estimated
+  // LOW = mostly defaults, score is speculative
+  const keyFields = [
+    m.buyVelocity, m.buySellRatio1h, m.devWalletPct, m.top10HolderPct,
+    m.liqMcapRatio, m.holders, m.sniperWalletCount, m.bundleRisk,
+    m.mintAuthority, m.priceChange1h,
+  ];
+  const knownCount = keyFields.filter(v => v != null).length;
+  const dataConfidence = knownCount >= 8 ? 'HIGH' : knownCount >= 5 ? 'MEDIUM' : 'LOW';
+  const dataCompleteness = Math.round((knownCount / keyFields.length) * 100);
+
+  if (dataConfidence === 'LOW') {
+    risks.push(`Data confidence LOW (${dataCompleteness}% fields available) — score is speculative`);
+  } else if (dataConfidence === 'MEDIUM') {
+    risks.push(`Data confidence MEDIUM (${dataCompleteness}% fields) — some estimates in score`);
+  }
+
+  // ── FINAL SCORE ───────────────────────────────────────────────────────────
+  const foundationTotal = parts.volumeVelocity + parts.buyPressure +
+                          parts.walletQuality + parts.holderDistribution +
+                          parts.liquidityHealth;
+  const total = foundationTotal - latePumpPenalty;
+
+  return {
+    score: clamp(total),
+    parts,
+    reasons,
+    risks,
+    model: 'discovery',
+    foundationTotal,
+    latePumpPenalty,
+    dataConfidence,
+    dataCompleteness,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,14 +446,14 @@ export function scoreRunnerCoin(candidate, metricsIn = null) {
   p = 0;
   const v24 = m.volume24h;
   if (p1 != null) {
-    if (p1 > 10 && v24 >= 50_000)  { p = 15; reasons.push(`Breakout: +${p1.toFixed(0)}% 1h on ${Math.round(v24/1000)}K vol`); }
+    if (p1 > 10 && v24 >= 50_000)     { p = 15; reasons.push(`Breakout: +${p1.toFixed(0)}% 1h on ${Math.round(v24/1000)}K vol`); }
     else if (p1 > 5 && v24 >= 20_000) { p = 10; reasons.push(`Strength: +${p1.toFixed(0)}% 1h`); }
     else if (p1 > 0) { p = 5; }
     else             { p = 0; risks.push(`No 1h momentum (${p1.toFixed(0)}%)`); }
   }
   parts.breakoutSetup = p;
 
-  // 4. Volume Consistency (15) — prefer distributed volume over spikes
+  // 4. Volume Consistency (15)
   p = 0;
   if (m.volume1h > 0 && m.volume24h > 0) {
     const ratio = m.volume1h / m.volume24h;
@@ -314,7 +483,7 @@ export function scoreRunnerCoin(candidate, metricsIn = null) {
   if (m.smartMoneyScore != null && m.smartMoneyScore >= 50) p = Math.min(10, p + 2);
   parts.whaleAdds = p;
 
-  // 7. Seller Absorption (10) — buyers still dominate DESPITE sell activity
+  // 7. Seller Absorption (10)
   p = 0;
   if (m.buySellRatio1h != null) {
     if (m.buySellRatio1h >= 0.6 && m.sells1h >= 50) { p = 10; reasons.push(`Absorbing sells (${(m.buySellRatio1h*100).toFixed(0)}% buys on ${m.sells1h} sellers)`); }
@@ -332,13 +501,13 @@ export function scoreRunnerCoin(candidate, metricsIn = null) {
   if (p > 0) reasons.push(`${socials} social channel(s) active`);
   parts.attentionSignal = p;
 
-  // 9. Late-pump penalty — runners that already extended 300%+ are chasing
+  // 9. Late-pump penalty
   const rp1h  = m.priceChange1h;
   const rp24h = m.priceChange24h;
   let runnerLatePenalty = 0;
-  if (rp1h != null && rp1h > 500)       { runnerLatePenalty = 40; risks.push(`Already +${rp1h.toFixed(0)}% in 1h — parabolic top risk`); }
-  else if (rp1h != null && rp1h > 300)  { runnerLatePenalty = 25; risks.push(`Up +${rp1h.toFixed(0)}% in 1h — extended runner`); }
-  else if (rp24h != null && rp24h > 500) { runnerLatePenalty = 20; risks.push(`Up +${rp24h.toFixed(0)}% in 24h — late continuation`); }
+  if (rp1h != null && rp1h > 500)       { runnerLatePenalty = 40; risks.push(`Already +${rp1h.toFixed(0)}% 1h — parabolic top risk`); }
+  else if (rp1h != null && rp1h > 300)  { runnerLatePenalty = 25; risks.push(`Up +${rp1h.toFixed(0)}% 1h — extended runner`); }
+  else if (rp24h != null && rp24h > 500) { runnerLatePenalty = 20; risks.push(`Up +${rp24h.toFixed(0)}% 24h — late continuation`); }
   parts.latePumpPenalty = -runnerLatePenalty;
 
   const total = Object.values(parts).reduce((a, b) => a + b, 0);
@@ -346,7 +515,7 @@ export function scoreRunnerCoin(candidate, metricsIn = null) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Action mapping per model
+// Action mapping
 // ─────────────────────────────────────────────────────────────────────────────
 export function mapScoreToAction(score, model) {
   const t = model === 'runner' ? RUNNER_THRESHOLDS : DISCOVERY_THRESHOLDS;
@@ -357,7 +526,7 @@ export function mapScoreToAction(score, model) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Confidence level — based on data completeness + signal alignment
+// Confidence level
 // ─────────────────────────────────────────────────────────────────────────────
 export function buildConfidence(candidate, metrics, result) {
   const m = metrics || calculateBehaviorMetrics(candidate);
@@ -381,16 +550,14 @@ export function buildConfidence(candidate, metrics, result) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main entry: runs the dual model and returns the overlay shape
+// Main entry: runs the dual model
 // ─────────────────────────────────────────────────────────────────────────────
-export function runDualModel(candidate) {
+export function runDualModel(candidate, discoveryWeights = null) {
   const metrics    = calculateBehaviorMetrics(candidate);
   const ageMinutes = metrics.ageMinutes;
   const modelUsed  = selectScoringModel(ageMinutes);
 
-  // Always compute BOTH so UI/analysis can see them, but the `finalScore`
-  // uses only the routed model
-  const discovery = scoreDiscoveryCoin(candidate, metrics);
+  const discovery = scoreDiscoveryCoin(candidate, metrics, discoveryWeights);
   const runner    = (ageMinutes == null || ageMinutes > 0)
     ? scoreRunnerCoin(candidate, metrics)
     : { score: 0, parts: {}, reasons: [], risks: [], model: 'runner' };
@@ -412,5 +579,8 @@ export function runDualModel(candidate) {
     runnerScore:     runner.score,
     parts:           primary.parts,
     thresholds:      modelUsed === 'runner' ? RUNNER_THRESHOLDS : DISCOVERY_THRESHOLDS,
+    foundationTotal: discovery.foundationTotal,
+    dataConfidence:   discovery.dataConfidence,
+    dataCompleteness: discovery.dataCompleteness,
   };
 }

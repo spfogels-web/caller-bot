@@ -21,50 +21,45 @@ import { logEvent } from './db.js';
 
 const CHAIN = 'solana';
 
-const MAX_PROMOTED_CANDIDATES = Number(process.env.MAX_CANDIDATES      ?? 30);
-const MAX_TOKENS_TO_FETCH     = Number(process.env.MAX_TOKENS_TO_FETCH ?? 200);
+const MAX_PROMOTED_CANDIDATES = Number(process.env.MAX_CANDIDATES      ?? 50);  // was 30
+const MAX_TOKENS_TO_FETCH     = Number(process.env.MAX_TOKENS_TO_FETCH ?? 300); // was 200
 const DEX_BATCH_SIZE          = Number(process.env.DEX_BATCH_SIZE      ?? 30);
 
-const RESCAN_SCHEDULE_MINUTES = [2, 5, 10, 20];
+const RESCAN_SCHEDULE_MINUTES = [1, 3, 7, 15];
 const MAX_RESCANS             = RESCAN_SCHEDULE_MINUTES.length;
 
-// CHANGED: Lowered all thresholds to get more coins promoted and called
-const QUICK_SCORE_AUTO_PROMOTE = Number(process.env.QUICK_SCORE_AUTO_PROMOTE ?? 40);
-const QUICK_SCORE_WATCHLIST    = Number(process.env.QUICK_SCORE_WATCHLIST    ?? 28);
-const QUICK_SCORE_DROP         = Number(process.env.QUICK_SCORE_DROP         ?? 20);
+// v7: Widened net — scan more, let Foundation Signals + Claude filter quality
+const QUICK_SCORE_AUTO_PROMOTE = Number(process.env.QUICK_SCORE_AUTO_PROMOTE ?? 35); // was 40
+const QUICK_SCORE_WATCHLIST    = Number(process.env.QUICK_SCORE_WATCHLIST    ?? 22); // was 28
+const QUICK_SCORE_DROP         = Number(process.env.QUICK_SCORE_DROP         ?? 15); // was 20
 
 // CHANGED: 0 minimum age — allow brand new coins from the moment they appear
 const MIN_PAIR_AGE_MINUTES = 0;
 const MAX_PAIR_AGE_HOURS   = Number(process.env.MAX_PAIR_AGE_HOURS ?? 4);
 
 const DEFAULT_FILTERS = {
-  // CHANGED: Early stage filters significantly lowered to catch brand new coins
-  early: {
-    minLiquidity: 3_000,     // was 8_000
-    minVolume1h:  500,       // was 2_000
-    minBuys1h:    5,         // was 10
-    minTxns1h:    8,         // was 20
-    minMarketCap: 1_000,     // was 5_000
-    maxMarketCap: 5_000_000,
-    maxAgeHours:  0.5,
+  // v7: RECENCY > ACTIVITY for fresh launches
+  // Fresh tokens (0-2h) only need mcap in range — stealth launches have no volume yet
+  // Older tokens (2-4h) need proven activity to justify evaluation
+  fresh: {
+    // PRIMARY SCAN: all tokens 0-2h in mcap range, regardless of volume
+    // Stealth launches with organic intent won't have volume yet — that's the point
+    minLiquidity: 3_000,     // just needs a pool
+    minVolume1h:  0,         // no volume requirement — recency is the signal
+    minBuys1h:    0,         // no buys requirement
+    minTxns1h:    0,         // no txn requirement
+    minMarketCap: 7_000,     // slightly below $8K to catch coins approaching sweet spot
+    maxMarketCap: 60_000,    // primary gem range
+    maxAgeHours:  2,         // 0-2h window
   },
-  // CHANGED: Mid stage filters lowered
-  mid: {
-    minLiquidity: 5_000,     // was 12_000
-    minVolume1h:  2_000,     // was 5_000
-    minBuys1h:    10,        // was 20
-    minTxns1h:    20,        // was 40
-    minMarketCap: 3_000,     // was 8_000
-    maxMarketCap: 10_000_000,
-    maxAgeHours:  2,
-  },
-  late: {
-    minLiquidity: 15_000,
-    minVolume24h: 20_000,
-    minBuys24h:   50,
-    minTxns24h:   100,
-    minMarketCap: 20_000,
-    maxMarketCap: 20_000_000,
+  active: {
+    // SECONDARY SCAN: older tokens only if showing activity (volume spikes, fresh wallets)
+    minLiquidity: 8_000,
+    minVolume1h:  2_000,     // must have real trading activity
+    minBuys1h:    10,
+    minTxns1h:    20,
+    minMarketCap: 8_000,
+    maxMarketCap: 85_000,
     maxAgeHours:  4,
   },
 };
@@ -405,49 +400,41 @@ function applyAdaptivePreFilters(candidate, modeConfig = {}) {
     return { pass: false, reason: `mcap $${(mcap / 1e6).toFixed(1)}M > $${(maxMcap / 1e6).toFixed(1)}M` };
   }
 
-  const E = DEFAULT_FILTERS.early;
-  const M = DEFAULT_FILTERS.mid;
-  const L = DEFAULT_FILTERS.late;
+  const F = DEFAULT_FILTERS.fresh;
+  const A = DEFAULT_FILTERS.active;
 
-  if (age != null && age <= E.maxAgeHours) {
-    if (liq   < E.minLiquidity) return { pass: false, reason: `early liq $${liq.toFixed(0)} < $${E.minLiquidity}` };
-    if (vol1h < E.minVolume1h)  return { pass: false, reason: `early 1h vol $${vol1h.toFixed(0)} < $${E.minVolume1h}` };
-    if (b1h   < E.minBuys1h)   return { pass: false, reason: `early buys1h ${b1h} < ${E.minBuys1h}` };
-    if (t1h   < E.minTxns1h)   return { pass: false, reason: `early txns1h ${t1h} < ${E.minTxns1h}` };
-    if (mcap  > 0 && mcap < E.minMarketCap) return { pass: false, reason: `early mcap too low` };
-    if (mcap  > E.maxMarketCap) return { pass: false, reason: `early mcap too high` };
-    return { pass: true, reason: 'passed early-stage filters' };
+  // ── PRIMARY: Fresh launches (0-2h) — recency > activity ────────────────
+  // Stealth launches won't have volume yet. If it's in our mcap range and
+  // has a pool, let it through for full scoring. The Foundation Signals
+  // engine will catch fake/dead tokens.
+  if (age != null && age <= F.maxAgeHours) {
+    if (liq   < F.minLiquidity) return { pass: false, reason: `fresh liq $${liq.toFixed(0)} < $${F.minLiquidity}` };
+    if (mcap  > 0 && mcap < F.minMarketCap) return { pass: false, reason: `fresh mcap $${mcap.toFixed(0)} < $${F.minMarketCap}` };
+    if (mcap  > F.maxMarketCap) return { pass: false, reason: `fresh mcap $${(mcap/1000).toFixed(0)}K > $${F.maxMarketCap/1000}K` };
+    return { pass: true, reason: `fresh launch (${age!=null?(age*60).toFixed(0)+'min':'?'}) — recency priority` };
   }
 
-  if (age != null && age <= M.maxAgeHours) {
-    if (liq   < M.minLiquidity) return { pass: false, reason: `mid liq $${liq.toFixed(0)} < $${M.minLiquidity}` };
-    if (vol1h < M.minVolume1h)  return { pass: false, reason: `mid 1h vol $${vol1h.toFixed(0)}` };
-    if (b1h   < M.minBuys1h)   return { pass: false, reason: `mid buys1h ${b1h}` };
-    if (t1h   < M.minTxns1h)   return { pass: false, reason: `mid txns1h ${t1h}` };
-    if (mcap  > 0 && mcap < M.minMarketCap) return { pass: false, reason: `mid mcap too low` };
-    if (mcap  > M.maxMarketCap) return { pass: false, reason: `mid mcap too high` };
-    return { pass: true, reason: 'passed mid-stage filters' };
-  }
-
-  const maxPairAge = maxAge ?? L.maxAgeHours;
+  // ── SECONDARY: Older tokens (2-4h) — need proven activity ──────────────
+  // After 2h, a token should have trading activity. No activity = dead.
+  const maxPairAge = maxAge ?? A.maxAgeHours;
   if (age != null && age > maxPairAge) {
     return { pass: false, reason: `too old: ${age.toFixed(1)}h > ${maxPairAge}h` };
   }
 
-  if (liq   < (minLiq  ?? L.minLiquidity)) return { pass: false, reason: `late liq $${liq.toFixed(0)}` };
-  if (vol24h < L.minVolume24h)             return { pass: false, reason: `late 24h vol $${vol24h.toFixed(0)}` };
-  if (b24h   < (minB24h ?? L.minBuys24h)) return { pass: false, reason: `late buys24h ${b24h}` };
-  if (t24h   < (minT24h ?? L.minTxns24h)) return { pass: false, reason: `late txns24h ${t24h}` };
-  if (mcap   > 0 && mcap < (minMcap ?? L.minMarketCap)) return { pass: false, reason: `late mcap too low` };
-  if (mcap   > (maxMcap ?? L.maxMarketCap)) return { pass: false, reason: `late mcap too high` };
+  if (liq   < (minLiq  ?? A.minLiquidity)) return { pass: false, reason: `active liq $${liq.toFixed(0)} < $${A.minLiquidity}` };
+  if (vol1h < A.minVolume1h)               return { pass: false, reason: `active 1h vol $${vol1h.toFixed(0)} < $${A.minVolume1h}` };
+  if (b1h   < A.minBuys1h)                return { pass: false, reason: `active buys1h ${b1h} < ${A.minBuys1h}` };
+  if (t1h   < A.minTxns1h)                return { pass: false, reason: `active txns1h ${t1h} < ${A.minTxns1h}` };
+  if (mcap  > 0 && mcap < (minMcap ?? A.minMarketCap)) return { pass: false, reason: `active mcap too low` };
+  if (mcap  > (maxMcap ?? A.maxMarketCap)) return { pass: false, reason: `active mcap too high` };
 
-  const sellRatio24h = t24h > 0 ? safeNum(candidate.sells24h) / t24h : 0;
-  if (sellRatio24h > 0.80) return { pass: false, reason: `extreme sell pressure` };
+  const sellRatio = t1h > 0 ? safeNum(candidate.sells1h) / t1h : 0;
+  if (sellRatio > 0.80) return { pass: false, reason: `extreme sell pressure (${(sellRatio*100).toFixed(0)}% sells)` };
 
   const pc24h = candidate.priceChange24h ?? null;
   if (pc24h !== null && pc24h < -80) return { pass: false, reason: `massive dump ${pc24h.toFixed(0)}%` };
 
-  return { pass: true, reason: 'passed late-stage filters' };
+  return { pass: true, reason: 'passed active-stage filters' };
 }
 
 // ─── Quick Score ─────────────────────────────────────────────────────────────

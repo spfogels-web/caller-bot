@@ -36,8 +36,14 @@ const getHeliusRpc = () =>
 const getHeliusApi = () =>
   `https://api.helius.xyz/v0`;
 
-const getBirdeyeKey = () => process.env.BIRDEYE_API_KEY ?? '';
-const getHeliusKey  = () => process.env.HELIUS_API_KEY  ?? '';
+// Free Solana public RPC — use for basic calls to save Helius credits
+const SOLANA_PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
+
+const getBirdeyeKey    = () => process.env.BIRDEYE_API_KEY ?? '';
+const getHeliusKey    = () => process.env.HELIUS_API_KEY  ?? '';
+const getLunarCrushKey = () => process.env.LUNARCRUSH_API_KEY ?? '';
+
+const LUNARCRUSH_BASE = 'https://lunarcrush.com/api4/public';
 
 const LP_PROGRAM_IDS = new Set([
   'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',     // Orca Whirlpool
@@ -115,22 +121,28 @@ async function safeFetch(url, options = {}, label = 'fetch', timeoutMs = 12_000)
   }
 }
 
+// Basic RPC methods that can use the FREE Solana public RPC (saves Helius credits)
+const FREE_RPC_METHODS = new Set(['getAccountInfo', 'getTokenSupply', 'getTokenLargestAccounts', 'getMultipleAccounts']);
+
 async function heliusRpc(method, params, label = 'rpc') {
-  const key = getHeliusKey();
-  if (!key) {
-    console.warn('[enricher:helius] No HELIUS_API_KEY');
+  // Use free Solana public RPC for basic calls — saves Helius credits
+  const useFreeRpc = FREE_RPC_METHODS.has(method);
+  const url = useFreeRpc ? SOLANA_PUBLIC_RPC : getHeliusRpc();
+
+  if (!useFreeRpc && !getHeliusKey()) {
+    console.warn('[enricher:helius] No HELIUS_API_KEY for enhanced call');
     return null;
   }
 
   return safeFetch(
-    getHeliusRpc(),
+    url,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: label, method, params }),
     },
-    `helius:${label}`,
-    HELIUS_TIMEOUT
+    useFreeRpc ? `solana:${label}` : `helius:${label}`,
+    useFreeRpc ? 8_000 : HELIUS_TIMEOUT
   );
 }
 
@@ -172,7 +184,10 @@ async function enrichWithBirdeye(ca) {
     result.priceChange6h   = d.priceChange6hPercent  ?? d.priceChange6h  ?? null;
     result.priceChange5m   = d.priceChange5mPercent  ?? d.priceChange5m  ?? null;
 
-    console.log(`[enricher:birdeye] ✓ holders:${result.holders} mcap:${result.marketCap?.toFixed?.(0) ?? '?'}`);
+    // Pull token name/symbol from Birdeye if not already set
+    if (d.symbol)  result.token     = result.token || d.symbol;
+    if (d.name)    result.tokenName = result.tokenName || d.name;
+    console.log(`[enricher:birdeye] ✓ holders:${result.holders} mcap:${result.marketCap?.toFixed?.(0) ?? '?'} symbol:${result.token ?? '?'}`);
   } else {
     console.warn('[enricher:birdeye] ✗ no overview (token may be too new for Birdeye index)');
   }
@@ -230,9 +245,14 @@ async function enrichWithHelius(ca, pairAddress = null) {
     heliusRpc('getAccountInfo', [ca, { encoding: 'jsonParsed' }], 'mintInfo'),
     heliusRpc('getTokenLargestAccounts', [ca, { commitment: 'finalized' }], 'topHolders'),
     heliusRpc('getTokenSupply', [ca], 'supply'),
-    // CRITICAL FIX: Query pair address first — that's where swap txns live
     fetchHeliusTransactions(ca, pairAddress, key),
   ]);
+
+  // Log what Helius returned so we can diagnose data gaps
+  const holdersCount = holdersData?.result?.value?.length ?? 0;
+  const supplyOk = !!supplyData?.result?.value;
+  const txCount = Array.isArray(txData) ? txData.length : 0;
+  console.log(`[enricher:helius] Raw data — holders:${holdersCount} supply:${supplyOk?'✓':'✗'} txns:${txCount} mint:${mintData?.result?.value?'✓':'✗'}`);
 
   // ── Mint / Freeze / Supply ────────────────────────────────────────────────
   const mintInfo = mintData?.result?.value?.data?.parsed?.info;
@@ -378,15 +398,20 @@ async function enrichWithHelius(ca, pairAddress = null) {
     result.launchTopBuyerShare  = totalTxs > 0 ? topBuyerTxs / totalTxs : null;
     result.launchTop3BuyerShare = totalTxs > 0 ? top3BuyerTxs / totalTxs : null;
 
-    if (totalTxs >= 5) {
+    if (totalTxs >= 3) { // lowered from 5 — even 3 txns can reveal bundling
       const bundleRatio = uniqueCount / totalTxs;
 
       if      (bundleRatio < 0.25) result.bundleRisk_helius = 'SEVERE';
       else if (bundleRatio < 0.40) result.bundleRisk_helius = 'HIGH';
       else if (bundleRatio < 0.60) result.bundleRisk_helius = 'MEDIUM';
-      else                         result.bundleRisk_helius = 'LOW';
+      else if (bundleRatio < 0.80) result.bundleRisk_helius = 'LOW';
+      else                         result.bundleRisk_helius = 'NONE';
 
       result.sniperWalletCount = Math.max(0, totalTxs - uniqueCount);
+    } else if (totalTxs > 0) {
+      // Even 1-2 txns — mark as LOW, at least it's not "?"
+      result.bundleRisk_helius = 'LOW';
+      result.sniperWalletCount = 0;
     }
 
     let launchQuality = 50;
@@ -628,12 +653,13 @@ function addPlaceholderHistoryFields(enriched) {
   if (enriched.websiteDomainAge   == null) enriched.websiteDomainAge   = null;
 }
 
-function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData) {
+function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, lunarData = {}) {
   const merged = {
     ...candidate,
     ...birdeyeData,
     ...heliusData,
     ...bubblemapData,
+    ...lunarData,
   };
 
   // FIXED: Comprehensive scanner data fallback
@@ -675,6 +701,54 @@ function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData) 
 
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
+// ─── LunarCrush Social Intelligence ──────────────────────────────────────────
+async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
+  const result = { lunarCrushOk: false };
+  const key = getLunarCrushKey();
+  if (!key) return result;
+
+  // Try by contract address first (most accurate), fall back to symbol
+  const queries = [];
+  if (contractAddress) queries.push(`coins/${contractAddress}/v1`);
+  if (tokenSymbol) queries.push(`coins/${tokenSymbol}/v1`);
+
+  for (const path of queries) {
+    try {
+      const res = await fetch(`${LUNARCRUSH_BASE}/${path}`, {
+        headers: { 'Authorization': `Bearer ${key}` },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const d = data?.data;
+      if (!d) continue;
+
+      result.lunarCrushOk = true;
+      result.socialScore        = d.galaxy_score ?? d.alt_rank_30d ?? null;
+      result.socialVolume       = d.social_volume ?? null;
+      result.socialVolume24h    = d.social_volume_24h ?? d.social_volume ?? null;
+      result.socialDominance    = d.social_dominance ?? null;
+      result.socialSentiment    = d.sentiment ?? null;
+      result.twitterMentions    = d.tweet_mentions ?? d.tweets ?? null;
+      result.twitterEngagement  = d.tweet_interactions ?? null;
+      result.twitterFollowers   = d.twitter_followers ?? null;
+      result.socialContributors = d.social_contributors ?? null;
+      result.galaxyScore        = d.galaxy_score ?? null;
+      result.altRank            = d.alt_rank ?? null;
+      result.newsVolume         = d.news ?? null;
+      result.socialSpike        = (d.social_volume_24h ?? 0) > (d.social_volume ?? 1) * 2;
+
+      console.log(`[enricher:lunarcrush] ✓ galaxy:${result.galaxyScore ?? '?'} sentiment:${result.socialSentiment ?? '?'} tweets:${result.twitterMentions ?? '?'} vol24h:${result.socialVolume24h ?? '?'}`);
+      return result;
+    } catch (e) {
+      // Try next query
+    }
+  }
+
+  console.log(`[enricher:lunarcrush] ✗ no data for ${tokenSymbol ?? contractAddress?.slice(0,8) ?? '?'}`);
+  return result;
+}
+
 export async function enrichCandidate(candidate) {
   const ca          = candidate.contractAddress;
   const pairAddress = candidate.pairAddress ?? null;
@@ -682,23 +756,91 @@ export async function enrichCandidate(candidate) {
 
   if (!ca) return candidate;
 
-  console.log(`[enricher] ━━ Enriching $${candidate.token ?? ca} (${ca.slice(0, 8)}…) age:${ageHours != null ? ageHours.toFixed(1) + 'h' : '?'}`);
+  console.log(`[enricher] ━━ Enriching $${candidate.token ?? ca} (${ca.slice(0, 8)}…) age:${ageHours != null ? ageHours.toFixed(1) + 'h' : '?'} pair:${pairAddress ? pairAddress.slice(0,8) : 'NONE'}`);
 
-  const isVeryNew = ageHours != null && ageHours < BUBBLEMAP_MIN_AGE_HOURS;
+  // ── Pre-flight: if no pairAddress, grab it from DexScreener first ──────
+  // Helius TX fetch needs the pair address to find swap transactions.
+  // Tokens from the Helius WebSocket often have no pair address.
+  if (!pairAddress) {
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+        headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(5000),
+      });
+      if (dexRes.ok) {
+        const dexData = await dexRes.json();
+        const pair = (dexData?.pairs ?? []).filter(p => p.chainId === 'solana').sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        if (pair?.pairAddress) {
+          pairAddress = pair.pairAddress;
+          // Also fill in missing basic data
+          candidate.token      = candidate.token      ?? pair.baseToken?.symbol ?? null;
+          candidate.tokenName  = candidate.tokenName  ?? pair.baseToken?.name ?? null;
+          candidate.buys1h     = candidate.buys1h     ?? pair.txns?.h1?.buys ?? null;
+          candidate.sells1h    = candidate.sells1h    ?? pair.txns?.h1?.sells ?? null;
+          candidate.marketCap  = candidate.marketCap  ?? pair.marketCap ?? pair.fdv ?? null;
+          candidate.liquidity  = candidate.liquidity  ?? pair.liquidity?.usd ?? null;
+          if (pair.pairCreatedAt && candidate.pairAgeHours == null) {
+            candidate.pairAgeHours = (Date.now() - pair.pairCreatedAt) / 3_600_000;
+          }
+          console.log(`[enricher] Pre-flight DexScreener: got pairAddress ${pairAddress.slice(0,8)} + basic data`);
+        }
+      }
+    } catch (e) { console.warn('[enricher] Pre-flight DexScreener failed:', e.message); }
+  }
 
-  // FIXED: Skip BubbleMap for new tokens — it hasn't indexed them yet
-  // Return PENDING instead of null so scorer knows it's expected, not suspicious
+  const isVeryNew = (candidate.pairAgeHours ?? ageHours) != null && (candidate.pairAgeHours ?? ageHours) < BUBBLEMAP_MIN_AGE_HOURS;
+
   const bubblemapPromise = isVeryNew
     ? Promise.resolve({ bubblemapOk: false, bubbleMapRisk: 'PENDING' })
     : enrichWithBubbleMap(ca);
 
-  const [birdeyeData, heliusData, bubblemapData] = await Promise.all([
-    enrichWithBirdeyeWithRetry(ca, ageHours),  // with retry for new tokens
-    enrichWithHelius(ca, pairAddress),          // FIXED: passes pairAddress
+  const [birdeyeData, heliusData, bubblemapData, lunarData] = await Promise.all([
+    enrichWithBirdeyeWithRetry(ca, candidate.pairAgeHours ?? ageHours),
+    enrichWithHelius(ca, pairAddress),
     bubblemapPromise,
+    enrichWithLunarCrush(candidate.token, ca),
   ]);
 
-  const enriched = mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData);
+  // ── DexScreener fallback — fill buys/sells/mcap if scanner didn't provide them ──
+  if (candidate.buys1h == null || candidate.sells1h == null) {
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (dexRes.ok) {
+        const dexData = await dexRes.json();
+        const pair = (dexData?.pairs ?? [])
+          .filter(p => p.chainId === 'solana')
+          .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        if (pair) {
+          candidate.buys1h     = candidate.buys1h     ?? pair.txns?.h1?.buys   ?? null;
+          candidate.sells1h    = candidate.sells1h    ?? pair.txns?.h1?.sells  ?? null;
+          candidate.buys6h     = candidate.buys6h     ?? pair.txns?.h6?.buys   ?? null;
+          candidate.sells6h    = candidate.sells6h    ?? pair.txns?.h6?.sells  ?? null;
+          candidate.buys24h    = candidate.buys24h    ?? pair.txns?.h24?.buys  ?? null;
+          candidate.sells24h   = candidate.sells24h   ?? pair.txns?.h24?.sells ?? null;
+          candidate.marketCap  = candidate.marketCap  ?? pair.marketCap ?? pair.fdv ?? null;
+          candidate.liquidity  = candidate.liquidity  ?? pair.liquidity?.usd ?? null;
+          candidate.volume1h   = candidate.volume1h   ?? pair.volume?.h1  ?? null;
+          candidate.volume24h  = candidate.volume24h  ?? pair.volume?.h24 ?? null;
+          candidate.token      = candidate.token      ?? pair.baseToken?.symbol ?? null;
+          candidate.tokenName  = candidate.tokenName  ?? pair.baseToken?.name ?? null;
+          candidate.priceChange5m  = candidate.priceChange5m  ?? pair.priceChange?.m5  ?? null;
+          candidate.priceChange1h  = candidate.priceChange1h  ?? pair.priceChange?.h1  ?? null;
+          candidate.priceChange6h  = candidate.priceChange6h  ?? pair.priceChange?.h6  ?? null;
+          candidate.priceChange24h = candidate.priceChange24h ?? pair.priceChange?.h24 ?? null;
+          if (pair.pairCreatedAt && candidate.pairAgeHours == null) {
+            candidate.pairAgeHours = (Date.now() - pair.pairCreatedAt) / 3_600_000;
+          }
+          console.log(`[enricher:dexscreener] ✓ fallback — buys1h:${candidate.buys1h} sells1h:${candidate.sells1h} mcap:${candidate.marketCap}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[enricher:dexscreener] fallback failed: ${e.message}`);
+    }
+  }
+
+  const enriched = mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, lunarData);
 
   // Derived tags / flags
   enriched.narrativeTags = uniq([

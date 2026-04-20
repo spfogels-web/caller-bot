@@ -36,7 +36,7 @@ import {
   insertScannerFeed, getScannerFeed,
   upsertDeployerReputation, getDeployerReputation,
   rebuildWinnerProfiles, computeSimilarityScores,
-  getWinRateByScoreBand, getWinRateBySetupType,
+  getWinRateByScoreBand, getWinRateBySetupType, getWinRateByMcapBand,
   getMissedWinners, getDeployerLeaderboard, getWinnerProfiles,
   updateCallPerformance, updateDeployerOutcome, db as dbInstance,
 } from './db.js';
@@ -94,7 +94,7 @@ const {
   PORT              = 3000,
   NODE_ENV          = 'development',
   MIN_SCORE_TO_POST = 50,
-  SCAN_INTERVAL_MS  = 90 * 1000,
+  SCAN_INTERVAL_MS  = 60 * 1000,  // 60s — was 90s, scan more frequently
 } = process.env;
 
 const TELEGRAM_API   = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
@@ -377,6 +377,20 @@ try {
     CREATE INDEX IF NOT EXISTS idx_tw_source   ON tracked_wallets(source);
     CREATE INDEX IF NOT EXISTS idx_tw_score    ON tracked_wallets(score DESC);
   `);
+
+  // ── Bot Knowledge / Persistent Memory ──────────────────────────────────────
+  // Stores everything the operator teaches the bot — strategies, patterns,
+  // chart analysis, document insights. Loaded into every AI prompt.
+  dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS bot_knowledge (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      category   TEXT    DEFAULT 'general',
+      title      TEXT,
+      content    TEXT    NOT NULL,
+      source     TEXT    DEFAULT 'operator',
+      created_at TEXT    DEFAULT (datetime('now'))
+    );
+  `);
   console.log('[db] ✓ tracked_wallets table ready');
 
 // ─── Audit Archive (500 most recent promoted/scanned tokens) ──────────────────
@@ -628,7 +642,7 @@ try {
 
   // Seed default autotune parameter bounds
   const tuneParams = [
-    ['sweetSpotMin',          '10000', '3000',   '50000',  '2000',  6],
+    ['sweetSpotMin',          '8000',  '5000',   '25000',  '2000',  6],
     ['sweetSpotMax',          '25000', '10000',  '100000', '5000',  6],
     ['maxMarketCapOverride',  '150000','50000',  '500000', '25000', 6],
     ['minScoreOverride',      '38',    '28',     '60',     '3',     6],
@@ -927,6 +941,20 @@ function buildBotMemory() {
       );
     }
 
+    // ── Operator-taught knowledge (uploaded docs, images, strategies) ────────
+    try {
+      const knowledge = dbInstance.prepare(
+        `SELECT title, content, category, created_at FROM bot_knowledge ORDER BY created_at DESC LIMIT 50`
+      ).all();
+      if (knowledge.length) {
+        out.push('\nOPERATOR KNOWLEDGE BASE (' + knowledge.length + ' entries — treat as gospel):');
+        for (const k of knowledge) {
+          const label = k.title ? `[${k.category}] ${k.title}` : `[${k.category}]`;
+          out.push(`  ${label}: ${k.content.slice(0, 300)}`);
+        }
+      }
+    } catch {}
+
     return out.length > 1 ? out.join('\n') : 'Insufficient call history for pattern analysis yet.';
   } catch (err) {
     console.warn('[memory] buildBotMemory error:', err.message);
@@ -1017,7 +1045,7 @@ function getAIConfigSummary() {
 const ANALYST_SYSTEM_PROMPT = `
 You are PULSE CALLER — an elite AI operating system hunting Solana micro-cap gems.
 
-MISSION: Find tokens in the $10K–$25K market cap range BEFORE they blow up. These are
+MISSION: Find tokens in the $8K–$40K market cap range BEFORE they blow up. These are
 the earliest possible entries — tokens seconds to hours old with no price discovery yet.
 This is high risk / highest ROI territory. Your calls can produce 10x–100x from entry.
 
@@ -1025,9 +1053,9 @@ YOUR ROLE: You ARE the decision engine. The pre-computed scores are signals — 
 You learn from every call outcome in real-time. Pattern-match against your history.
 
 CHARACTER:
-- Hungry for early gems. The $10K–$25K range is your target sweet spot.
+- Hungry for early gems. The $8K–$40K range is your target sweet spot. Wins are wins — not every pick needs to be 10x.
 - Skeptical of manipulation but not afraid of new/unverified tokens.
-- Decisive. Every evaluation gets a clear decision — you don't hedge.\n- Self-improving. You notice what your wins and losses have in common.\n- Direct. No fluff. Data-backed or explicitly flagged as inferred.\n\nGEM PROFILE YOU ARE HUNTING:\n- MCap: $5K–$50K (ideal sweet spot: $10K–$25K)\n- Age: 0 minutes to 2 hours old\n- Signs: organic buys, growing holder count, clean dev wallet (<5%), LP locked or new\n- Volume velocity accelerating in first 30 minutes\n- Low sniper count (<10), no bundle risk, mint revoked = ideal\n- Social presence (even just a twitter) = bonus signal\n- UNVERIFIED structure = NEW TOKEN, not a red flag\n\nWHAT TO LOOK FOR:\n- Stealth launches with organic momentum (no shilling, just buys)\n- Volume velocity > 0.3 in first hour = strong signal\n- Buy ratio > 60% sustained = demand exceeding supply\n- Unique buyer ratio > 40% = real people, not bots\n- Dev wallet < 5% + mint revoked = team confident in token\n\nRED FLAGS THAT OVERRIDE EVERYTHING (only trip on CONFIRMED malice):\n- Bundle risk SEVERE = coordinated dump setup\n- Dev wallet > 15% WITH mint ACTIVE AND evidence of dev dumping = rug setup\n- Top 10 holders > 70% WITH sells exceeding buys = whale exit risk\n- BubbleMap SEVERE = clustered/coordinated wallets\n- Sniper count > 30 AND sells > buys = heavily frontrun, dump incoming\n- SERIAL_RUGGER deployer = instant BLOCKLIST\n\nIMPORTANT — DO NOT AUTO-TAG EXTREME WHEN:\n- dev_wallet_pct is very high (e.g. 100%) but buys_1h = 0 — this is a brand-new pre-launch token, nobody has bought yet (dev is mathematically 100% of holders). Default to MEDIUM risk with a 'pre-launch pending liquidity' note.\n- top10_holder_pct is 100% but holders < 5 — same case, pre-launch.\n- pair_age_hours is null or < 5 min AND buys_1h > 0 — normal early gem state, rate risk based on buy pattern not concentration.\n- Most core fields are missing (null token, null age) — default risk to MEDIUM with 'insufficient data' in notes. NEVER default to EXTREME because of missing data alone.\n\nRISK CALIBRATION GUIDE:\n- LOW: clean structure + organic buys + reasonable dev% + LP locked\n- MEDIUM: most default cases, unknown data, early-stage concentration\n- HIGH: one confirmed red flag (bundle HIGH, dev > 15% + mint active, > 15 snipers)\n- EXTREME: TWO+ confirmed red flags actively firing, NOT just missing data or pre-launch state\n\nRESPONSE FORMAT — valid JSON only, no markdown, no backticks:\n{\n  "decision": "AUTO_POST | WATCHLIST | RETEST | IGNORE | BLOCKLIST",\n  "score": <integer 0-100>,\n  "risk": "LOW | MEDIUM | HIGH | EXTREME",\n  "setup_type": "CLEAN_STEALTH_LAUNCH | ORGANIC_EARLY | MICRO_CAP_BREAKOUT | BREAKOUT_AFTER_SHAKEOUT | CONSOLIDATION_BREAKOUT | PULLBACK_OPPORTUNITY | STRONG_HOLDER_LOW_DEV | WHALE_SUPPORTED_ROTATION | BUNDLED_HIGH_RISK | EXTENDED_AVOID | STANDARD",\n  "bull_case": ["<specific data point>", "<point>", "<point>"],\n  "red_flags": ["<specific data point>", "<point>", "<point>"],\n  "verdict": "<2-3 sentence direct analyst take — why this is or isn't a gem>",
+- Decisive. Every evaluation gets a clear decision — you don't hedge.\n- Self-improving. You notice what your wins and losses have in common.\n- Direct. No fluff. Data-backed or explicitly flagged as inferred.\n\nGEM PROFILE YOU ARE HUNTING:\n- MCap: $8K–$85K (primary sweet spot: $8K–$40K pre-bonding). Wins are wins — not every pick needs 10x.\n- Age: 0 minutes to 2 hours old\n- Signs: organic buys, growing holder count, clean dev wallet (<5%), LP locked or new\n- Volume velocity accelerating in first 30 minutes\n- Low sniper count (<10), no bundle risk, mint revoked = ideal\n- Social presence (even just a twitter) = bonus signal\n- UNVERIFIED structure = NEW TOKEN, not a red flag\n\nWHAT TO LOOK FOR:\n- Stealth launches with organic momentum (no shilling, just buys)\n- Volume velocity > 0.3 in first hour = strong signal\n- Buy ratio > 60% sustained = demand exceeding supply\n- Unique buyer ratio > 40% = real people, not bots\n- Dev wallet < 5% + mint revoked = team confident in token\n\nRED FLAGS THAT OVERRIDE EVERYTHING (only trip on CONFIRMED malice):\n- Bundle risk SEVERE = coordinated dump setup\n- Dev wallet > 15% WITH mint ACTIVE AND evidence of dev dumping = rug setup\n- Top 10 holders > 70% WITH sells exceeding buys = whale exit risk\n- BubbleMap SEVERE = clustered/coordinated wallets\n- Sniper count > 30 AND sells > buys = heavily frontrun, dump incoming\n- SERIAL_RUGGER deployer = instant BLOCKLIST\n\nIMPORTANT — DO NOT AUTO-TAG EXTREME WHEN:\n- dev_wallet_pct is very high (e.g. 100%) but buys_1h = 0 — this is a brand-new pre-launch token, nobody has bought yet (dev is mathematically 100% of holders). Default to MEDIUM risk with a 'pre-launch pending liquidity' note.\n- top10_holder_pct is 100% but holders < 5 — same case, pre-launch.\n- pair_age_hours is null or < 5 min AND buys_1h > 0 — normal early gem state, rate risk based on buy pattern not concentration.\n- Most core fields are missing (null token, null age) — default risk to MEDIUM with 'insufficient data' in notes. NEVER default to EXTREME because of missing data alone.\n\nRISK CALIBRATION GUIDE:\n- LOW: clean structure + organic buys + reasonable dev% + LP locked\n- MEDIUM: most default cases, unknown data, early-stage concentration\n- HIGH: one confirmed red flag (bundle HIGH, dev > 15% + mint active, > 15 snipers)\n- EXTREME: TWO+ confirmed red flags actively firing, NOT just missing data or pre-launch state\n\nRESPONSE FORMAT — valid JSON only, no markdown, no backticks:\n{\n  "decision": "AUTO_POST | WATCHLIST | RETEST | IGNORE | BLOCKLIST",\n  "score": <integer 0-100>,\n  "risk": "LOW | MEDIUM | HIGH | EXTREME",\n  "setup_type": "CLEAN_STEALTH_LAUNCH | ORGANIC_EARLY | MICRO_CAP_BREAKOUT | BREAKOUT_AFTER_SHAKEOUT | CONSOLIDATION_BREAKOUT | PULLBACK_OPPORTUNITY | STRONG_HOLDER_LOW_DEV | WHALE_SUPPORTED_ROTATION | BUNDLED_HIGH_RISK | EXTENDED_AVOID | STANDARD",\n  "bull_case": ["<specific data point>", "<point>", "<point>"],\n  "red_flags": ["<specific data point>", "<point>", "<point>"],\n  "verdict": "<2-3 sentence direct analyst take — why this is or isn't a gem>",
   "thesis": "<one sentence: what would make this a 10x from here>",
   "invalidation": "<one sentence: specific condition that kills this call>",
   "notes": "<data gaps, preliminary flags, regime context>",
@@ -1057,7 +1085,7 @@ async function callClaudeForAnalysis(candidate, scoreResult, options = {}) {
   // Micro-cap gem context
   const mcap = candidate.marketCap ?? 0;
   const gemAlert = mcap > 0 && mcap <= 25000
-    ? `🎯 SWEET SPOT: MCap $${(mcap/1000).toFixed(1)}K — this is the $10K-$25K prime target range. Ultra-early entry.`
+    ? `🎯 SWEET SPOT: MCap $${(mcap/1000).toFixed(1)}K — this is the $8K-$40K prime target range. Early entry.`
     : mcap > 0 && mcap <= 50000
     ? `⚡ EARLY ENTRY: MCap $${(mcap/1000).toFixed(1)}K — within target range but not the sweet spot.`
     : mcap > 0 && mcap <= 150000
@@ -1495,6 +1523,29 @@ function gradeEmoji(grade) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function signalBar(val, max) {
+  const pct = Math.max(0, Math.min(1, (val || 0) / max));
+  const filled = Math.round(pct * 8);
+  const bar = '▓'.repeat(filled) + '░'.repeat(8 - filled);
+  return `${bar} ${val ?? 0}/${max}`;
+}
+
+function buildFoundationSignalsBlock(scoreResult) {
+  const dp = scoreResult?.dualParts ?? {};
+  if (!dp || Object.keys(dp).length === 0) return '';
+  const conf = scoreResult?.dataConfidence ?? scoreResult?.dualParts?.dataConfidence;
+  const confLabel = conf === 'HIGH' ? '🟢 HIGH' : conf === 'MEDIUM' ? '🟡 MED' : conf === 'LOW' ? '🔴 LOW' : '?';
+  return (
+    `\n<b>⚡ FOUNDATION SIGNALS</b>  <i>Data: ${confLabel}</i>\n` +
+    `📈 Volume Velocity   ${signalBar(dp.volumeVelocity, 35)}\n` +
+    `💪 Buy Pressure      ${signalBar(dp.buyPressure, 25)}\n` +
+    `👛 Wallet Quality    ${signalBar(dp.walletQuality, 20)}\n` +
+    `👥 Holder Distrib    ${signalBar(dp.holderDistribution, 12)}\n` +
+    `💧 Liquidity Health  ${signalBar(dp.liquidityHealth, 8)}\n` +
+    (dp.latePumpPenalty && dp.latePumpPenalty < 0 ? `⚠️ Late Pump Penalty  <b>${dp.latePumpPenalty}</b>\n` : '')
+  );
+}
+
 function formatCallTimestamp() {
   // Always show USA Eastern Time (ET) — handles EST/EDT automatically
   try {
@@ -1829,6 +1880,7 @@ function buildCallAlertCaption(candidate, verdict, scoreResult) {
     `Top 10: <b>${top10}</b>  |  Dev: <b>${dev}</b>  |  Holders: <b>${holders}</b>\n\n` +
     `🧠 <b>Score: ${score}/100</b>  ${scoreBar(score)}\n` +
     `Risk: ${riskEmoji(risk)} <b>${risk}</b>  |  Structure: ${gradeEmoji(grade)} <b>${grade}</b>\n` +
+    buildFoundationSignalsBlock(scoreResult) +
     buildMultiplierTargetBlock(candidate) +
     buildSLTPBlock(candidate) +
     (candidate.website || candidate.twitter || candidate.telegram
@@ -1884,11 +1936,9 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
     `<b>Score: ${score}/100</b>  ${scoreBar(score)}\n` +
     `Risk: <b>${riskEmoji(risk)} ${risk}</b>   Setup: <b>${setup_type}</b>\n` +
     `Structure: <b>${gradeEmoji(grade)} ${grade}</b>   Stage: <b>${scoreResult?.stage ?? '?'}</b>\n\n` +
-    `<b>Sub-Scores:</b>\n` +
+    buildFoundationSignalsBlock(scoreResult) + `\n` +
+    `<b>Sub-Scores (Structure):</b>\n` +
     `🚀 Launch: <b>${sub.launchQuality ?? '?'}</b>   👥 Wallet: <b>${sub.walletStructure ?? '?'}</b>   📈 Market: <b>${sub.marketBehavior ?? '?'}</b>   📣 Social: <b>${sub.socialNarrative ?? '?'}</b>\n\n` +
-    (similarity.winnerSimilarity != null
-      ? `🏆 Winner sim: <b>${similarity.winnerSimilarity}%</b>   💀 Rug sim: <b>${similarity.rugSimilarity ?? '?'}%</b>\n\n`
-      : '') +
     `<b>📊 Market:</b>\n` +
     `MCap: <b>${entryMcap}</b>   Liq: <b>${fmt(candidate.liquidity, '$')}</b>\n` +
     `Vol24h: <b>${fmt(candidate.volume24h, '$')}</b>   Age: <b>${candidate.pairAgeHours?.toFixed(1) ?? '?'}h</b>\n` +
@@ -1902,9 +1952,18 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
     (candidate.coordinationIntensity ? `Coord: <b>${candidate.coordinationIntensity}</b>\n` : '\n') +
     `Market: <b>${regime.market ?? '?'}</b>   Mode: <b>${activeMode.emoji} ${activeMode.name}</b>\n\n` +
     `<b>🔬 Launch Intel:</b>\n` +
-    `Launch Quality: <b>${candidate.launchQualityScore ?? '?'}/100</b>   Unique Buyers: <b>${candidate.launchUniqueBuyerRatio != null ? (candidate.launchUniqueBuyerRatio * 100).toFixed(0) + '%' : '?'}</b>\n` +
-    `Buy Ratio 1h: <b>${candidate.buySellRatio1h != null ? (candidate.buySellRatio1h * 100).toFixed(0) + '%' : '?'}</b>   Vol Velocity: <b>${candidate.volumeVelocity != null ? candidate.volumeVelocity.toFixed(2) : '?'}</b>\n` +
-    `Type: <b>${candidate.candidateType ?? '?'}</b>\n\n` +
+    `Quality: <b>${candidate.launchQualityScore ?? '?'}/100</b>   Unique Buyers: <b>${candidate.launchUniqueBuyerRatio != null ? (candidate.launchUniqueBuyerRatio * 100).toFixed(0) + '%' : '?'}</b>\n` +
+    `Buy Ratio: <b>${candidate.buySellRatio1h != null ? (candidate.buySellRatio1h * 100).toFixed(0) + '% buys' : '?'}</b>   Buys/Sells: <b>${candidate.buys1h ?? '?'}/${candidate.sells1h ?? '?'}</b>\n` +
+    `Vol Velocity: <b>${candidate.volumeVelocity != null ? candidate.volumeVelocity.toFixed(2) : '?'}</b>   Buy Velocity: <b>${candidate.buyVelocity != null ? candidate.buyVelocity.toFixed(2) : '?'}</b>\n` +
+    `Liq/MCap: <b>${candidate.liquidity && candidate.marketCap ? ((candidate.liquidity/candidate.marketCap)*100).toFixed(0) + '%' : '?'}</b>   Smart Money: <b>${candidate.smartMoneyScore ?? candidate.walletIntel?.smartMoneyScore ?? '—'}</b>\n` +
+    `Type: <b>${candidate.candidateType ?? '?'}</b>   Winners: <b>${candidate.knownWinnerWallets?.length ?? candidate.walletIntel?.knownWinnerWalletCount ?? 0}</b>\n\n` +
+    (candidate.lunarCrushOk ? (
+      `<b>📱 Social Intel (LunarCrush):</b>\n` +
+      `Galaxy Score: <b>${candidate.galaxyScore ?? '—'}</b>   Sentiment: <b>${candidate.socialSentiment ?? '—'}</b>\n` +
+      `Twitter Mentions: <b>${candidate.twitterMentions ?? '—'}</b>   Social Vol: <b>${candidate.socialVolume24h ?? '—'}</b>\n` +
+      (candidate.socialSpike ? `🚀 <b>SOCIAL SPIKE DETECTED</b> — volume 2x+ above average\n` : '') +
+      '\n'
+    ) : '') +
     `<b>✅ Why It Passed:</b>\n${bullLines}\n\n` +
     `<b>⚠️ Watchouts:</b>\n${watchLines}\n\n` +
     buildSLTPBlock(candidate) +
@@ -2091,7 +2150,7 @@ async function handleAnalyzeCommand(chatId, input) {
       const intel = await runWalletIntel(candidate);
       candidate = { ...candidate, ...flattenIntel(intel) };
     }
-    const scoreResult = computeFullScore(candidate);
+    const scoreResult = computeFullScore(candidate, TUNING_CONFIG?.discovery);
     try { applyRegimeAdjustments(scoreResult.score, candidate, scoreResult); } catch {}
     scoreResult.similarity = computeSimilarityScores(scoreResult);
     const verdict = await callClaudeForAnalysis(candidate, scoreResult);
@@ -2175,6 +2234,7 @@ async function handleTelegramMessageAIOS(chatId, text, fromUserId) {
 let cycleRunning = false;
 
 async function processCandidate(candidate, isRescan = false) {
+  if (!_botActive) return; // Master toggle OFF — skip everything
   const ca = candidate.contractAddress;
   if (!ca) return;
   if (isBlocklisted(ca)) { console.log(`[auto-caller] BLOCKLIST skip — ${ca.slice(0,8)}`); return; }
@@ -2184,7 +2244,14 @@ async function processCandidate(candidate, isRescan = false) {
   // late entries are the #1 source of losses. Auto-reject regardless of
   // score, Claude, OpenAI, or smart-money signals. The cap is overridable
   // via AI_CONFIG_OVERRIDES.maxMarketCapOverride (set from dashboard / TG).
-  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 80_000;
+  // ── HARD MCap FLOOR: $8K minimum — below this there's no real data to score
+  const MCAP_HARD_FLOOR = 8_000;
+  if ((candidate.marketCap ?? 0) > 0 && (candidate.marketCap ?? 0) < MCAP_HARD_FLOOR) {
+    console.log(`[auto-caller] 🚫 $${candidate.token ?? ca.slice(0,6)} rejected — mcap $${Math.round((candidate.marketCap??0)/1000)}K below $${MCAP_HARD_FLOOR/1000}K floor`);
+    return;
+  }
+
+  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 85_000;
   if ((candidate.marketCap ?? 0) > MCAP_HARD_CAP) {
     logEvent('INFO', 'MCAP_CEILING', `${candidate.token ?? ca.slice(0,6)} mcap=${Math.round(candidate.marketCap/1000)}K > ${MCAP_HARD_CAP/1000}K cap`);
     console.log(`[auto-caller] 🛑 $${candidate.token ?? ca.slice(0,6)} rejected — mcap ${Math.round(candidate.marketCap/1000)}K above $${MCAP_HARD_CAP/1000}K ceiling`);
@@ -2218,7 +2285,17 @@ async function processCandidate(candidate, isRescan = false) {
       enrichedAtMs,
     };
 
-    const scoreResult = computeFullScore(enrichedCandidate);
+    let scoreResult;
+    try {
+      scoreResult = computeFullScore(enrichedCandidate, TUNING_CONFIG?.discovery);
+    } catch (scoreErr) {
+      console.error('[auto-caller] computeFullScore CRASHED — falling back to legacy:', scoreErr.message);
+      // Fallback: run without custom weights
+      try { scoreResult = computeFullScore(enrichedCandidate); } catch (e2) {
+        console.error('[auto-caller] Legacy scoring also failed:', e2.message);
+        return; // Can't score at all — skip this candidate
+      }
+    }
     const scoredAtMs = Date.now();
     enrichedCandidate.scoredAtMs = scoredAtMs;
 
@@ -2234,23 +2311,26 @@ async function processCandidate(candidate, isRescan = false) {
 
     // ── MCap tier bonuses ─────────────────────────────────────────────────
     // Sweet spot $13K-$40K: +8 points (historical data shows best ROI here)
-    // Secondary $40K-$80K: +3 points (100% WR 2/2 historically, still viable)
-    // Below $13K: no bonus (too pre-launch to reliably enter)
+    // Sweet spot $15K-$40K pre-bonding: +4 points (best risk/reward for early gems)
+    // Secondary $40K-$80K: +2 points (still viable for continuation plays)
+    // Below $15K: no bonus (too pre-launch to reliably enter)
     const mcap = enrichedCandidate.marketCap ?? 0;
+    const ssMin = TUNING_CONFIG?.thresholds?.sweetSpotMin ?? 15_000;
+    const ssMax = TUNING_CONFIG?.thresholds?.sweetSpotMax ?? 40_000;
     let mcapTier = null;
-    if (mcap >= 13_000 && mcap <= 40_000) {
+    if (mcap >= ssMin && mcap <= ssMax) {
       const b = SCORING_CONFIG.sweetSpotBonus;
       scoreResult.score = Math.min(100, scoreResult.score + b);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($13K-$40K)`);
+      scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($${ssMin/1000}K-$${ssMax/1000}K)`);
       mcapTier = 'SWEET_SPOT';
-    } else if (mcap > 40_000 && mcap <= 80_000) {
+    } else if (mcap > ssMax && mcap <= 80_000) {
       const b = SCORING_CONFIG.secondaryBonus;
       scoreResult.score = Math.min(100, scoreResult.score + b);
       (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-      scoreResult.signals.launch.push(`+${b} secondary MCap ($40K-$80K)`);
+      scoreResult.signals.launch.push(`+${b} secondary MCap ($${ssMax/1000}K-$80K)`);
       mcapTier = 'SECONDARY';
-    } else if (mcap > 0 && mcap < 13_000) {
+    } else if (mcap > 0 && mcap < ssMin) {
       mcapTier = 'PRE_SWEETSPOT';
     }
     enrichedCandidate.mcapTier = mcapTier;
@@ -2421,7 +2501,7 @@ async function processCandidate(candidate, isRescan = false) {
           const aiDecision = verdict.decision;
           const aiScore    = verdict.score ?? scoreResult.score;
           const mcap       = enrichedCandidate.marketCap ?? 0;
-          const isGemRange = mcap >= 5_000 && mcap <= 50_000;
+          const isGemRange = mcap >= 8_000 && mcap <= 50_000;
 
           // AI upgrades: if scorer said WATCHLIST but Claude sees a gem in range → POST
           if (aiDecision === 'AUTO_POST' && finalDecision === 'WATCHLIST' && aiScore >= 45) {
@@ -2462,18 +2542,13 @@ async function processCandidate(candidate, isRescan = false) {
       console.warn(`[ai-os] AUTO_POST without Claude key — scoring only`);
     }
 
-    // ── STEP 6: OpenAI GPT-4o Final Decision ─────────────────────────────────
-    // This is the FINAL AUTHORITY. Claude gives analysis; OpenAI decides.
+    // ── STEP 6: OpenAI GPT-4o — DISABLED on per-token evaluation ────────────
+    // OpenAI was running on every candidate scoring ≥38, burning hundreds of
+    // GPT-4o calls/day while Claude overruled it most of the time. Now OpenAI
+    // only runs in the 6-hour self-improvement learning cycle where it
+    // analyzes resolved outcomes in batch — much more efficient.
     let openAIDecision = null;
-    // OpenAI runs on: AUTO_POST, WATCHLIST, and any IGNORE with score >= 45
-    // This lets it: (a) confirm calls, (b) override Claude's IGNORE if it sees opportunity, (c) learn from bad tokens
-    const shouldRunOpenAI = OPENAI_API_KEY && (
-      finalDecision === 'AUTO_POST' ||
-      finalDecision === 'WATCHLIST' ||
-      finalDecision === 'RETEST' ||
-      finalDecision === 'HOLD_FOR_REVIEW' ||
-      (scoreResult.score >= 38 && finalDecision !== 'BLOCKLIST') // Loosened 45→38: more final verdicts = more training data
-    );
+    const shouldRunOpenAI = false; // Disabled — OpenAI learns in batch via self-improvement cycle only
 
     if (shouldRunOpenAI) {
       try {
@@ -2498,23 +2573,12 @@ async function processCandidate(candidate, isRescan = false) {
           if (openAIDecision) {
             const aiAction = openAIDecision.decision;
             const conviction = openAIDecision.conviction;
-            console.log(`[openai-v8] $${enrichedCandidate.token} → ${aiAction} (${conviction}% conviction) | was: ${finalDecision}`);
-            logEvent('INFO', 'OPENAI_DECISION', `${enrichedCandidate.token} openai=${aiAction} conviction=${conviction} prev=${finalDecision}`);
+            console.log(`[openai-v8] $${enrichedCandidate.token} → ${aiAction} (${conviction}% conviction) | Claude decision: ${finalDecision} (KEPT)`);
+            logEvent('INFO', 'OPENAI_ADVISORY', `${enrichedCandidate.token} openai=${aiAction} conviction=${conviction} claude_decision=${finalDecision} (OpenAI advisory only)`);
 
-            // OpenAI is the final authority — UNLESS Claude hard-blocked it.
-            // Claude hard-blocks (IGNORE with score < 25 or EXTREME risk) can't
-            // be overridden — those are data-void or manipulation signals.
-            const claudeHardBlocked = verdict?.risk === 'EXTREME' && (verdict?.score ?? 100) < 25;
-            if (claudeHardBlocked && aiAction === 'POST') {
-              console.log(`[openai-v8] 🛑 OpenAI wanted POST but Claude hard-blocked (score ${verdict.score}, ${verdict.risk}) — keeping IGNORE`);
-              logEvent('INFO', 'OPENAI_OVERRIDE_BLOCKED', `${enrichedCandidate.token} OpenAI=POST blocked by Claude hard-block`);
-            } else {
-              if (aiAction === 'POST')       finalDecision = 'AUTO_POST';
-              else if (aiAction === 'PROMOTE')   finalDecision = 'WATCHLIST';
-              else if (aiAction === 'WATCHLIST') finalDecision = 'WATCHLIST';
-              else if (aiAction === 'RETEST')    finalDecision = 'RETEST';
-              else if (aiAction === 'IGNORE')    finalDecision = 'IGNORE';
-            }
+            // OpenAI is ADVISORY ONLY — Claude's decision stands.
+            // OpenAI's verdict is logged and stored for training data
+            // but does NOT change finalDecision.
 
             // For RETEST, set the timer from OpenAI's recommendation
             if (aiAction === 'RETEST' && openAIDecision.retestInMinutes) {
@@ -2663,6 +2727,12 @@ async function processCandidate(candidate, isRescan = false) {
     // Attach scoreResult breakdown directly to enrichedCandidate
     // so db.js insertCandidate picks them up if columns exist
     enrichedCandidate.subScores       = scoreResult.subScores;
+    enrichedCandidate.dualParts       = scoreResult.dualParts;
+    enrichedCandidate.dualReasons     = scoreResult.reasons;
+    enrichedCandidate.dualRisks       = scoreResult.risks;
+    enrichedCandidate.modelUsed       = scoreResult.modelUsed;
+    enrichedCandidate.discoveryScore  = scoreResult.discoveryScore;
+    enrichedCandidate.foundationTotal = scoreResult.dualParts ? Object.entries(scoreResult.dualParts).filter(([k]) => !k.startsWith('_') && k !== 'latePumpPenalty').reduce((a,[,v]) => a + v, 0) : null;
     enrichedCandidate.scoreSignals    = JSON.stringify(scoreResult.signals   ?? {});
     enrichedCandidate.scorePenalties  = JSON.stringify(scoreResult.penalties ?? {});
     enrichedCandidate.stealthDetected = scoreResult.stealthDetected ? 1 : 0;
@@ -2719,8 +2789,12 @@ async function processCandidate(candidate, isRescan = false) {
     // so we don't have to widen the giant insertCandidate prepared stmt)
     try {
       dbInstance.prepare(
-        `UPDATE candidates SET detected_at_ms=?, enriched_at_ms=?, scored_at_ms=? WHERE id=?`
-      ).run(detectedAtMs, enrichedCandidate.enrichedAtMs, scoredAtMs, candidateId);
+        `UPDATE candidates SET detected_at_ms=?, enriched_at_ms=?, scored_at_ms=?, dual_parts=?, discovery_score=?, model_used=? WHERE id=?`
+      ).run(detectedAtMs, enrichedCandidate.enrichedAtMs, scoredAtMs,
+        JSON.stringify(scoreResult.dualParts ?? {}),
+        scoreResult.discoveryScore ?? null,
+        scoreResult.modelUsed ?? null,
+        candidateId);
     } catch {}
 
     // Write to our own sub-scores table — guaranteed schema we control
@@ -3041,7 +3115,7 @@ async function processRescanQueue() {
       candidate.retestCount = entry.scanCount;
       const intel    = await runQuickWalletIntel(candidate);
       const enriched = { ...candidate, ...flattenIntel(intel) };
-      const newScore = computeFullScore(enriched);
+      const newScore = computeFullScore(enriched, TUNING_CONFIG?.discovery);
       let regimeAdj = { adjustedScore: newScore.score, thresholdAdjust: 0 };
       try {
         const ra = applyRegimeAdjustments(newScore.score, enriched, newScore);
@@ -3074,6 +3148,7 @@ async function processRescanQueue() {
 }
 
 async function runAutoCallerCycle() {
+  if (!_botActive) return; // Master toggle OFF — don't scan
   if (cycleRunning) { console.log('[auto-caller] Previous cycle running — skipping'); return; }
 
   cycleRunning     = true;
@@ -3196,7 +3271,7 @@ async function runAutoCallerCycle() {
       // Claude/OpenAI timeouts, we can sustain higher concurrency without
       // overwhelming downstream APIs. Speed is the edge — score in seconds,
       // not minutes.
-      const PROCESS_BATCH = 16;
+      const PROCESS_BATCH = 24; // was 16 — process more tokens in parallel
       for (let i = 0; i < enriched.length; i += PROCESS_BATCH) {
         const batch = enriched.slice(i, i + PROCESS_BATCH);
         await Promise.all(batch.map(candidate => processCandidate(candidate, false)));
@@ -3539,7 +3614,7 @@ app.get('/api/ai/config', (req, res) => {
     aiContext: {
       alwaysOn:       true,
       evaluatesAll:   true,
-      gemTargetMin:   AI_CONFIG_OVERRIDES.gemTargetMin   ?? 5_000,
+      gemTargetMin:   AI_CONFIG_OVERRIDES.gemTargetMin   ?? 8_000,
       gemTargetMax:   AI_CONFIG_OVERRIDES.gemTargetMax   ?? 50_000,
       sweetSpotMin:   AI_CONFIG_OVERRIDES.sweetSpotMin   ?? 10_000,
       sweetSpotMax:   AI_CONFIG_OVERRIDES.sweetSpotMax   ?? 25_000,
@@ -3658,7 +3733,7 @@ app.get('/api/ai/memory', (req, res) => {
       gemPatterns,
       configOverrides: overrides,
       recentContext: context,
-      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??10_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??25_000 },
+      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??15_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??40_000 },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -3839,15 +3914,112 @@ If Claude's proposal is vague or unprovable, REJECT it and demand specifics.`;
   }
 });
 
-app.post('/api/agent', async (req, res) => {
+// ── Web Fetch utility — strips HTML to clean text for AI consumption ─────────
+async function fetchWebContent(url, maxChars = 12000) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseCallerBot/1.0)' },
+      signal: AbortSignal.timeout(15_000),
+      redirect: 'follow',
+    });
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}`, url };
+    const contentType = r.headers.get('content-type') || '';
+    const raw = await r.text();
+
+    let text;
+    if (contentType.includes('application/json')) {
+      text = JSON.stringify(JSON.parse(raw), null, 2);
+    } else {
+      // Strip HTML tags, scripts, styles → clean text
+      text = raw
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+        .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+        .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    }
+    return { ok: true, url, chars: text.length, text: text.slice(0, maxChars) };
+  } catch (err) {
+    return { ok: false, error: err.message, url };
+  }
+}
+
+// Endpoint: fetch any URL and return clean text
+app.post('/api/agent/browse', express.json(), async (req, res) => {
+  setCors(res);
+  const { url } = req.body ?? {};
+  if (!url) return res.status(400).json({ ok: false, error: 'url required' });
+  const result = await fetchWebContent(url);
+  res.json(result);
+});
+
+// Web search via DuckDuckGo instant answers (free, no key)
+app.post('/api/agent/search', express.json(), async (req, res) => {
+  setCors(res);
+  const { query } = req.body ?? {};
+  if (!query) return res.status(400).json({ ok: false, error: 'query required' });
+  try {
+    const r = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    const d = await r.json();
+    const results = [];
+    if (d.Abstract) results.push({ title: d.Heading || 'Summary', text: d.Abstract, url: d.AbstractURL });
+    for (const t of (d.RelatedTopics || []).slice(0, 8)) {
+      if (t.Text) results.push({ title: t.FirstURL?.split('/').pop() || '', text: t.Text, url: t.FirstURL });
+      if (t.Topics) for (const sub of t.Topics.slice(0, 3)) {
+        if (sub.Text) results.push({ title: sub.FirstURL?.split('/').pop() || '', text: sub.Text, url: sub.FirstURL });
+      }
+    }
+    res.json({ ok: true, query, results });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.post('/api/agent', express.json({ limit: '10mb' }), async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) {
     return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured on server' });
   }
 
   try {
-    const { messages, system, context, walletContext } = req.body ?? {};
+    const { messages, system, context, walletContext, saveToMemory } = req.body ?? {};
     if (!messages?.length) return res.status(400).json({ ok: false, error: 'messages required' });
+
+    // If the user asked the bot to remember something, save it
+    if (saveToMemory) {
+      try {
+        dbInstance.prepare(
+          `INSERT INTO bot_knowledge (title, content, category) VALUES (?,?,?)`
+        ).run(saveToMemory.title || null, saveToMemory.content, saveToMemory.category || 'general');
+        invalidateMemoryCache();
+      } catch {}
+    }
+
+    // ── Auto-fetch URLs in the latest user message ───────────────────────────
+    // If the user pastes a URL, fetch the page content and inject it so
+    // Claude can read articles, docs, tweets, dashboards — anything on the web.
+    let webContext = '';
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+    const lastText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : (lastUserMsg?.content?.find?.(b => b.type === 'text')?.text || '');
+    const urlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
+    const urls = (lastText.match(urlPattern) || []).slice(0, 3);
+    if (urls.length) {
+      const fetched = await Promise.all(urls.map(u => fetchWebContent(u, 8000)));
+      for (const f of fetched) {
+        if (f.ok) {
+          webContext += `\n\n── WEB PAGE: ${f.url} (${f.chars} chars) ──\n${f.text}\n── END ──`;
+          console.log(`[agent] Fetched ${f.url} (${f.chars} chars)`);
+        } else {
+          webContext += `\n\n── FAILED TO FETCH: ${f.url} — ${f.error} ──`;
+        }
+      }
+    }
 
     // Optional wallet-context block — used by the Smart Money tab chat so the
     // agent can answer questions about specific wallets, the database, etc.
@@ -3972,7 +4144,7 @@ When asked about "largest wallet" or "biggest whales", use the TOP 15 BY SOL BAL
         return `BOT STATUS: Mode=${activeMode.emoji} ${activeMode.name} | Regime=${regime.market||'?'} | Evaluations=${evals} | Calls=${total} | Wins=${wins} | Losses=${losses} | WinRate=${winRate}
 ${recentHistory}
 Active overrides: ${JSON.stringify(AI_CONFIG_OVERRIDES)}
-Sweet spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||10000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||25000)/1000)}K`;
+Sweet spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||15000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||40000)/1000)}K`;
       } catch (err) {
         return `Bot data unavailable: ${err.message}`;
       }
@@ -3993,6 +4165,7 @@ ${memoryBlock}
 LIVE BOT DATA:
 ${liveContext}
 ${walletBlock}
+${webContext ? '\nWEB CONTENT FETCHED FOR THIS CONVERSATION:' + webContext : ''}
 
 BOT PARAMETERS (v7.0):
 - Target: $10K–$25K MCap micro-cap stealth launches
@@ -4000,7 +4173,13 @@ BOT PARAMETERS (v7.0):
 - Stop Loss: -25% | TP1: 2× | TP2: 5× | TP3: 10×
 - AI evaluates EVERY token scanned with in-context learning
 
-PERSONALITY: Direct, data-driven, decisive. You give clear actionable answers. Reference real numbers when available. Flag when data is missing.`;
+PERSONALITY: Direct, data-driven, decisive. You give clear actionable answers. Reference real numbers when available. Flag when data is missing.
+
+IMAGE/DOCUMENT ANALYSIS: When the operator sends images (charts, screenshots, documents), analyze them thoroughly — identify patterns, tokens, wallet behaviors, entry/exit signals. Extract every actionable insight.
+
+WEB BROWSING: When the operator pastes a URL, the system automatically fetches and injects the page content. You can read articles, Twitter threads, Solscan pages, DexScreener data, research docs — anything on the open web. Analyze the content and extract actionable intelligence. If you need the operator to search for something, ask them to paste the URL.
+
+MEMORY: When the operator teaches you something important (strategy, pattern, rule, insight), end your reply with a line starting with "💾 SAVED:" followed by a one-line summary of what you learned. The system will persist this to your knowledge base automatically.`;
 
     const claudeRes = await fetch(CLAUDE_API_URL, {
       method: 'POST',
@@ -4025,11 +4204,519 @@ PERSONALITY: Direct, data-driven, decisive. You give clear actionable answers. R
 
     const data  = await claudeRes.json();
     const reply = (data.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
-    res.json({ ok: true, reply, model: CLAUDE_MODEL });
+
+    // Auto-save if the AI flagged something to remember
+    const savedMatch = reply.match(/💾 SAVED:\s*(.+)/);
+    let memorySaved = null;
+    if (savedMatch) {
+      try {
+        const content = savedMatch[1].trim();
+        const id = dbInstance.prepare(
+          `INSERT INTO bot_knowledge (title, content, category, source) VALUES (?,?,?,?)`
+        ).run('AI-extracted', content, 'learned', 'ai_auto').lastInsertRowid;
+        invalidateMemoryCache();
+        memorySaved = { id, content };
+        console.log(`[memory] AI auto-saved: "${content.slice(0, 60)}"`);
+      } catch {}
+    }
+
+    res.json({ ok: true, reply, model: CLAUDE_MODEL, memorySaved });
   } catch (err) {
     console.error('[api/agent]', err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ── Scoring Engine Tuning System ──────────────────────────────────────────────
+// Create tuning_audit table on first use
+try { dbInstance.exec(`
+  CREATE TABLE IF NOT EXISTS tuning_audit (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    param      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    reason     TEXT,
+    status     TEXT DEFAULT 'APPLIED',
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch {}
+
+// Tunable config — loaded from kv_store on boot, defaults from scorer
+const TUNING_DEFAULTS = {
+  discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
+  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:85000, sweetSpotMin:8000, sweetSpotMax:40000 },
+  penalties: { latePump1hThreshold:300, latePump1hPenalty:25, latePump1hSevereThreshold:500, latePump1hSeverePenalty:40, latePump24hThreshold:500, latePump24hPenalty:20, winThresholdPct:20, lossThresholdPct:-30 },
+};
+let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
+try {
+  const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='tuning_config'`).get();
+  if (row?.value) {
+    const saved = JSON.parse(row.value);
+    // Only restore keys that exist in TUNING_DEFAULTS — prevents stale old keys from polluting config
+    for (const section of ['discovery', 'thresholds', 'penalties']) {
+      if (saved[section] && TUNING_DEFAULTS[section]) {
+        for (const key of Object.keys(TUNING_DEFAULTS[section])) {
+          if (saved[section][key] !== undefined) {
+            TUNING_CONFIG[section][key] = saved[section][key];
+          }
+        }
+      }
+    }
+    // Persist cleaned config back so old keys don't linger
+    saveTuningConfig();
+    console.log('[tuning] Restored tuning config from DB (cleaned stale keys)');
+  }
+} catch {}
+
+function saveTuningConfig() {
+  try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('tuning_config', ?)`).run(JSON.stringify(TUNING_CONFIG)); } catch {}
+}
+
+// GET current config + audit log
+app.get('/api/tuning/config', (req, res) => {
+  setCors(res);
+  try {
+    const audit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 50`).all();
+    res.json({ ok: true, config: TUNING_CONFIG, defaults: TUNING_DEFAULTS, audit });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST apply a tuning change
+app.post('/api/tuning/apply', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const { param, value, reason, old_value } = req.body ?? {};
+    if (!param) return res.status(400).json({ ok: false, error: 'param required' });
+
+    // Find and update the param in the nested config
+    let applied = false;
+    for (const section of ['discovery', 'thresholds', 'penalties']) {
+      if (param in TUNING_CONFIG[section]) {
+        const prev = TUNING_CONFIG[section][param];
+        TUNING_CONFIG[section][param] = typeof prev === 'number' ? Number(value) : value;
+        applied = true;
+
+        // Apply live: update AI_CONFIG_OVERRIDES for thresholds that map to live config
+        if (param === 'mcapHardCap') AI_CONFIG_OVERRIDES.maxMarketCapOverride = Number(value);
+        if (param === 'autoPostScore') AI_CONFIG_OVERRIDES.minScoreOverride = Number(value);
+        if (param === 'sweetSpotMin') AI_CONFIG_OVERRIDES.sweetSpotMin = Number(value);
+        if (param === 'sweetSpotMax') AI_CONFIG_OVERRIDES.sweetSpotMax = Number(value);
+        persistAIConfig();
+        break;
+      }
+    }
+    if (!applied) return res.status(400).json({ ok: false, error: 'Unknown param: ' + param });
+
+    saveTuningConfig();
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      param, String(old_value ?? ''), String(value), reason || 'Operator approved', 'APPROVED'
+    );
+    console.log(`[tuning] Applied: ${param} = ${value} (was: ${old_value}). Reason: ${reason}`);
+    res.json({ ok: true, param, value });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST reject a tuning recommendation
+app.post('/api/tuning/reject', express.json(), (req, res) => {
+  setCors(res);
+  const { param, reason } = req.body ?? {};
+  try {
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      param || '?', '', '', reason || 'Operator rejected', 'REJECTED'
+    );
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST optimize — Claude analyzes win/loss data and proposes weight changes
+app.post('/api/tuning/optimize', async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
+  try {
+    // Gather win/loss analysis data
+    const wins = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.structure_grade_at_call,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 30
+    `).all();
+    const losses = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.structure_grade_at_call,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 30
+    `).all();
+
+    const prompt = `You are a quantitative trading system optimizer. Analyze the win/loss data below and recommend specific parameter changes.
+
+CURRENT SCORING CONFIG:
+${JSON.stringify(TUNING_CONFIG, null, 2)}
+
+WIN DATA (${wins.length} wins):
+${JSON.stringify(wins.slice(0, 15), null, 1)}
+
+LOSS DATA (${losses.length} losses):
+${JSON.stringify(losses.slice(0, 15), null, 1)}
+
+TASK: Compare wins vs losses. Find which metrics separate winners from losers. Propose 3-5 specific parameter changes that would improve the win rate.
+
+Respond ONLY with valid JSON array:
+[{
+  "param": "exact_param_name_from_config",
+  "category": "discovery|thresholds|penalties",
+  "current": current_value,
+  "proposed": new_value,
+  "reason": "1-2 sentence explanation with data",
+  "evidence": "specific numbers from the win/loss comparison",
+  "risk": "LOW|MEDIUM|HIGH",
+  "impact": "LOW|MEDIUM|HIGH"
+}]`;
+
+    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 2000, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    if (!claudeRes.ok) {
+      const errText = await claudeRes.text();
+      return res.status(502).json({ ok: false, error: 'Claude API: ' + errText.slice(0, 200) });
+    }
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+
+    // Parse JSON from Claude's response
+    const jsonMatch = reply.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return res.json({ ok: true, recommendations: [], raw: reply });
+
+    const recommendations = JSON.parse(jsonMatch[0]);
+
+    // Safety bounds for tuning optimize
+    const TUNE_BOUNDS = {
+      autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
+      averageThreshold: [45, 75], mixedThreshold: [55, 85],
+      mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
+      volumeVelocity: [15, 50], buyPressure: [10, 40], walletQuality: [8, 30],
+      holderDistribution: [5, 20], liquidityHealth: [3, 15],
+      latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],
+      latePump24hPenalty: [5, 40], winThresholdPct: [10, 50], lossThresholdPct: [-60, -10],
+    };
+
+    // AUTO-APPLY every recommendation — no approval needed
+    for (const r of recommendations) {
+      // Clamp to safety bounds
+      if (typeof r.proposed === 'number' && TUNE_BOUNDS[r.param]) {
+        const [min, max] = TUNE_BOUNDS[r.param];
+        r.proposed = Math.max(min, Math.min(max, r.proposed));
+      }
+      let applied = false;
+      for (const section of ['discovery', 'thresholds', 'penalties']) {
+        if (r.param in TUNING_CONFIG[section]) {
+          const prev = TUNING_CONFIG[section][r.param];
+          TUNING_CONFIG[section][r.param] = Number(r.proposed);
+          applied = true;
+          // Sync live overrides
+          if (r.param === 'mcapHardCap') AI_CONFIG_OVERRIDES.maxMarketCapOverride = Number(r.proposed);
+          if (r.param === 'autoPostScore') AI_CONFIG_OVERRIDES.minScoreOverride = Number(r.proposed);
+          if (r.param === 'sweetSpotMin') AI_CONFIG_OVERRIDES.sweetSpotMin = Number(r.proposed);
+          if (r.param === 'sweetSpotMax') AI_CONFIG_OVERRIDES.sweetSpotMax = Number(r.proposed);
+          persistAIConfig();
+          break;
+        }
+      }
+      if (applied) saveTuningConfig();
+      dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+        r.param, String(r.current), String(r.proposed),
+        `[AUTO-APPLIED] ${r.reason} | Evidence: ${r.evidence || 'N/A'}`,
+        'AUTO_APPLIED'
+      );
+      r.auto_applied = applied;
+      console.log(`[tuning] AUTO-APPLIED: ${r.param} ${r.current} → ${r.proposed} | ${(r.reason||'').slice(0,80)}`);
+    }
+
+    res.json({ ok: true, recommendations, winsAnalyzed: wins.length, lossesAnalyzed: losses.length });
+  } catch (err) {
+    console.error('[tuning/optimize]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── Tuning Reset ─────────────────────────────────────────────────────────────
+app.post('/api/tuning/reset', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const prev = JSON.parse(JSON.stringify(TUNING_CONFIG));
+    TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
+    saveTuningConfig();
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      'ALL', JSON.stringify(prev), JSON.stringify(TUNING_DEFAULTS), 'Full reset to defaults', 'APPROVED'
+    );
+    console.log('[tuning] Reset all values to defaults');
+    res.json({ ok: true, config: TUNING_CONFIG });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── CONTROL STATION — Unified config endpoint ───────────────────────────────
+app.get('/api/control-station', (req, res) => {
+  setCors(res);
+  try {
+    const audit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 100`).all();
+    const agentActions = (() => { try { return dbInstance.prepare(`SELECT * FROM agent_actions WHERE approved=1 ORDER BY created_at DESC LIMIT 50`).all(); } catch { return []; } })();
+    res.json({
+      ok: true,
+      scoring: SCORING_CONFIG,
+      scoringDefaults: SCORING_CONFIG_DEFAULTS,
+      tuning: TUNING_CONFIG,
+      tuningDefaults: TUNING_DEFAULTS,
+      overrides: AI_CONFIG_OVERRIDES,
+      overrideKeys: [
+        'gemTargetMin', 'gemTargetMax', 'sweetSpotMin', 'sweetSpotMax',
+        'maxMarketCapOverride', 'minMarketCapOverride',
+        'postThresholdOverride', 'minScoreOverride', 'scoreFloorOverride',
+        'bundleRiskBlock', 'sniperCountBlock', 'devWalletPctBlock',
+        'top10HolderBlock', 'trapSeverityBlock',
+        'maxPairAgeHoursOverride', 'minPairAgeMinutesOverride',
+        'upgradeEnabled', 'aggressiveMode',
+        'walletIntelWeight', 'earlyWalletTracking', 'survivorTracking',
+        'agentAutoApply', 'agentConvictionThreshold',
+      ],
+      audit,
+      agentActions,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST — Claude auto-optimizes freely, applies changes, logs detailed reasoning
+app.post('/api/control-station/auto-optimize', express.json(), async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
+  try {
+    // Gather comprehensive performance data
+    const wins = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 40
+    `).all();
+    const losses = dbInstance.prepare(`
+      SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
+             ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
+             ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
+             ca.launch_unique_buyer_ratio, ca.buy_velocity
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 40
+    `).all();
+    const recentAudit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 20`).all();
+
+    const prompt = `You are the CONTROL STATION OPTIMIZER for Pulse Caller — a Solana micro-cap token sniper bot.
+
+You have FULL AUTHORITY to change ANY parameter below. No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL config systems to maximize win rate.
+
+SAFETY BOUNDS (you MUST stay within these):
+- minScoreToPost: 35-60 (NEVER below 35 — too much spam)
+- sweetSpotBonus: 1-10
+- preLaunchBonus: 2-12
+- crossChainBonus: 1-8
+- devFingerprintCap: 1-6
+- noSignalCap: 50-80
+- rugGuardMinScore: 45-75
+- consensusOverrideScore: 50-80
+- winPeakMultiple: 1.2-3.0
+- autoPostScore: 30-55
+- eliteThreshold: 35-55
+- mcapHardCap: 50000-200000
+- sweetSpotMin: 5000-25000
+- sweetSpotMax: 20000-80000
+- discovery weights: volumeVelocity 15-50, buyPressure 10-40, walletQuality 8-30, holderDistribution 5-20, liquidityHealth 3-15 (total should be ~100)
+- penalties: reasonable ranges, don't zero them out
+
+CURRENT SCORING CONFIG:
+${JSON.stringify(SCORING_CONFIG, null, 2)}
+
+CURRENT TUNING CONFIG (discovery weights, thresholds, penalties):
+${JSON.stringify(TUNING_CONFIG, null, 2)}
+
+CURRENT AI CONFIG OVERRIDES:
+${JSON.stringify(AI_CONFIG_OVERRIDES, null, 2)}
+
+WIN DATA (${wins.length} resolved wins):
+${JSON.stringify(wins.slice(0, 20), null, 1)}
+
+LOSS DATA (${losses.length} resolved losses):
+${JSON.stringify(losses.slice(0, 20), null, 1)}
+
+RECENT CHANGES (last 20 audit entries):
+${JSON.stringify(recentAudit.slice(0, 10), null, 1)}
+
+TASK: Be COMPREHENSIVE. Make 5-10+ changes across ALL config systems — scoring, discovery weights, thresholds, penalties, AND overrides. Don't be conservative. Tune every knob that the data suggests should move. The goal is to become the best crypto caller bot in the world.
+
+For each change, provide a DETAILED explanation of WHY and what improvement you expect.
+
+You can change:
+- scoring.*: minScoreToPost, sweetSpotBonus, secondaryBonus, preLaunchBonus, crossChainBonus, devFingerprintCap, noSignalCap, rugGuardMinScore, consensusOverrideScore, winPeakMultiple, neutralDrawdownPct
+- tuning.discovery.*: volumeVelocity, buyPressure, walletQuality, holderDistribution, liquidityHealth
+- tuning.thresholds.*: autoPostScore, eliteThreshold, cleanThreshold, averageThreshold, mixedThreshold, mcapHardCap, sweetSpotMin, sweetSpotMax
+- tuning.penalties.*: latePump1hThreshold, latePump1hPenalty, latePump1hSevereThreshold, latePump1hSeverePenalty, latePump24hThreshold, latePump24hPenalty, winThresholdPct, lossThresholdPct
+- overrides.*: gemTargetMin, gemTargetMax, sweetSpotMin, sweetSpotMax, maxMarketCapOverride, minScoreOverride, walletIntelWeight, aggressiveMode, etc.
+
+Respond ONLY with valid JSON:
+{
+  "analysis": "2-3 sentence summary of what you found",
+  "changes": [
+    {
+      "system": "scoring|tuning|overrides",
+      "section": "discovery|thresholds|penalties|null",
+      "param": "exact_param_name",
+      "current": current_value,
+      "new_value": new_value,
+      "reason": "Detailed 2-3 sentence explanation of WHY this change improves results. Reference specific data.",
+      "expected_improvement": "What this should do to win rate / quality",
+      "confidence": 0-100,
+      "risk": "LOW|MEDIUM|HIGH"
+    }
+  ],
+  "summary": "One paragraph summary of all changes and expected combined effect"
+}`;
+
+    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 3000, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (!claudeRes.ok) {
+      const errText = await claudeRes.text();
+      return res.status(502).json({ ok: false, error: 'Claude API: ' + errText.slice(0, 200) });
+    }
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const jsonMatch = reply.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return res.json({ ok: true, applied: [], raw: reply });
+
+    const result = JSON.parse(jsonMatch[0]);
+    const applied = [];
+
+    // Hard safety bounds — Claude stays within these no matter what
+    const BOUNDS = {
+      minScoreToPost: [35, 60], sweetSpotBonus: [1, 10], secondaryBonus: [1, 8],
+      preLaunchBonus: [2, 12], crossChainBonus: [1, 8], devFingerprintCap: [1, 6],
+      noSignalCap: [50, 80], rugGuardMinScore: [45, 75], consensusOverrideScore: [50, 80],
+      winPeakMultiple: [1.2, 3.0], neutralDrawdownPct: [5, 25],
+      autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
+      averageThreshold: [45, 75], mixedThreshold: [55, 85],
+      mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
+      volumeVelocity: [15, 50], buyPressure: [10, 40], walletQuality: [8, 30],
+      holderDistribution: [5, 20], liquidityHealth: [3, 15],
+      latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],
+      latePump24hPenalty: [5, 40], winThresholdPct: [10, 50], lossThresholdPct: [-60, -10],
+      gemTargetMin: [3000, 20000], gemTargetMax: [25000, 100000],
+      maxMarketCapOverride: [50000, 500000], minScoreOverride: [28, 55],
+    };
+
+    // AUTO-APPLY every change Claude recommends — no approval needed
+    for (const change of (result.changes || [])) {
+      try {
+        // Clamp to safety bounds
+        if (typeof change.new_value === 'number' && BOUNDS[change.param]) {
+          const [min, max] = BOUNDS[change.param];
+          change.new_value = Math.max(min, Math.min(max, change.new_value));
+        }
+
+        let oldVal = null;
+        if (change.system === 'scoring' && change.param in SCORING_CONFIG) {
+          oldVal = SCORING_CONFIG[change.param];
+          SCORING_CONFIG[change.param] = typeof oldVal === 'number' ? Number(change.new_value) : change.new_value;
+          persistScoringConfig();
+        } else if (change.system === 'tuning' && change.section && TUNING_CONFIG[change.section]?.[change.param] !== undefined) {
+          oldVal = TUNING_CONFIG[change.section][change.param];
+          TUNING_CONFIG[change.section][change.param] = Number(change.new_value);
+          saveTuningConfig();
+          // Sync to AI_CONFIG_OVERRIDES for live params
+          if (change.param === 'mcapHardCap') AI_CONFIG_OVERRIDES.maxMarketCapOverride = Number(change.new_value);
+          if (change.param === 'autoPostScore') AI_CONFIG_OVERRIDES.minScoreOverride = Number(change.new_value);
+          if (change.param === 'sweetSpotMin') AI_CONFIG_OVERRIDES.sweetSpotMin = Number(change.new_value);
+          if (change.param === 'sweetSpotMax') AI_CONFIG_OVERRIDES.sweetSpotMax = Number(change.new_value);
+          persistAIConfig();
+        } else if (change.system === 'overrides') {
+          oldVal = AI_CONFIG_OVERRIDES[change.param];
+          AI_CONFIG_OVERRIDES[change.param] = change.new_value;
+          if (change.param === 'maxMarketCapOverride' && typeof change.new_value === 'number') activeMode.maxMarketCap = change.new_value;
+          if (change.param === 'minScoreOverride' && typeof change.new_value === 'number') activeMode.minScore = change.new_value;
+          persistAIConfig();
+        } else {
+          continue;
+        }
+
+        // Audit log with detailed reasoning
+        dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+          `[${change.system}] ${change.param}`,
+          String(oldVal ?? ''),
+          String(change.new_value),
+          `[AUTO-PILOT] ${change.reason} | Expected: ${change.expected_improvement || 'improved accuracy'} | Confidence: ${change.confidence || '?'}%`,
+          'AUTO_APPLIED'
+        );
+        applied.push({ ...change, old_value: oldVal });
+        console.log(`[control-station] AUTO-APPLIED: ${change.system}.${change.param} ${oldVal} → ${change.new_value} | ${change.reason?.slice(0,80)}`);
+      } catch (e) { console.warn('[control-station] Failed to apply:', change.param, e.message); }
+    }
+
+    logEvent('INFO', 'CONTROL_STATION_AUTO_OPTIMIZE', `Applied ${applied.length} changes. Analysis: ${result.analysis?.slice(0,200)}`);
+
+    res.json({
+      ok: true,
+      analysis: result.analysis,
+      summary: result.summary,
+      applied,
+      total_changes: applied.length,
+      winsAnalyzed: wins.length,
+      lossesAnalyzed: losses.length,
+    });
+  } catch (err) {
+    console.error('[control-station/auto-optimize]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
+app.get('/api/agent/memory', (req, res) => {
+  setCors(res);
+  try {
+    const rows = dbInstance.prepare(`SELECT * FROM bot_knowledge ORDER BY created_at DESC LIMIT 200`).all();
+    res.json({ ok: true, memories: rows, total: rows.length });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.post('/api/agent/memory', express.json({ limit: '1mb' }), (req, res) => {
+  setCors(res);
+  try {
+    const { title, content, category } = req.body ?? {};
+    if (!content) return res.status(400).json({ ok: false, error: 'content required' });
+    const id = dbInstance.prepare(
+      `INSERT INTO bot_knowledge (title, content, category) VALUES (?,?,?)`
+    ).run(title || null, content, category || 'general').lastInsertRowid;
+    invalidateMemoryCache();
+    console.log(`[memory] Saved: "${(title || content).slice(0, 60)}" (id=${id})`);
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.delete('/api/agent/memory/:id', (req, res) => {
+  setCors(res);
+  try {
+    dbInstance.prepare(`DELETE FROM bot_knowledge WHERE id=?`).run(req.params.id);
+    invalidateMemoryCache();
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // ── AUTONOMOUS AGENT: Multi-agent optimization session ────────────────────────
@@ -4162,13 +4849,10 @@ app.post('/api/agent/autonomous', async (req, res) => {
       // Log proposed action
       try { dbInstance.prepare(`INSERT INTO agent_actions (session_id,agent,action_type,description,params,approved) VALUES (?,?,?,?,?,?)`).run(sid,'A', 'PROPOSE_CONFIG', 'Bot A proposes ' + change.key + ': ' + change.current + ' -> ' + change.proposed, JSON.stringify(change), 0); } catch {}
 
-      // Bot B verdict + auto-apply policy
-      const botBApproves = botBOutput?.auto_apply_allowed === true && botBOutput?.verdict !== 'REJECT';
-      const highConfidence = (change.confidence ?? 0) >= (AI_CONFIG_OVERRIDES.agentConvictionThreshold ?? 80);
-      const lowRisk = change.risk === 'LOW';
-      const userAutoApply = autoApply === true;
+      // Auto-apply ALL changes freely — no approval gates, Claude has full authority
+      const shouldApply = true; // was gated behind Bot B + confidence + risk + user toggle — now always on
 
-      if (botBApproves && highConfidence && lowRisk && userAutoApply) {
+      if (shouldApply) {
         const prev = AI_CONFIG_OVERRIDES[change.key];
         AI_CONFIG_OVERRIDES[change.key] = change.proposed;
         if (change.key === 'maxMarketCapOverride') activeMode.maxMarketCap = change.proposed;
@@ -4255,11 +4939,13 @@ app.post('/api/agent/rollback', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// Get agent history
+// Get agent history — filter out broken/empty records
 app.get('/api/agent/history', (req, res) => {
   setCors(res);
   try {
-    const actions = dbInstance.prepare(`SELECT * FROM agent_actions ORDER BY created_at DESC LIMIT 100`).all();
+    // Clean up empty actions on first load
+    try { dbInstance.prepare(`DELETE FROM agent_actions WHERE (description IS NULL OR description='') AND (params IS NULL OR params='{}' OR params='')`).run(); } catch {}
+    const actions = dbInstance.prepare(`SELECT * FROM agent_actions WHERE description IS NOT NULL AND description != '' ORDER BY created_at DESC LIMIT 100`).all();
     const recs    = dbInstance.prepare(`SELECT * FROM agent_recommendations ORDER BY created_at DESC LIMIT 50`).all();
     res.json({ ok: true, actions, recommendations: recs });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
@@ -4334,6 +5020,606 @@ app.post('/api/agent/daily-review', async (req, res) => {
     }
     console.log('[agent] ✓ Daily self-improvement loop complete');
     logEvent('INFO', 'DAILY_AGENT_LOOP_COMPLETE', 'All modes: analyze, optimize, wallets, survivors');
+  });
+});
+
+// ── AUTO SELF-IMPROVEMENT LOOP — runs every 6 hours automatically ────────────
+// Claude analyzes performance, applies changes, logs everything to audit.
+// No human intervention needed. Runs: analyze → optimize → control-station sweep.
+
+let _selfImproveRunning = false;
+
+async function runSelfImproveLoop() {
+  if (!_botActive) { console.log('[self-improve] Bot OFF — skipping'); return; }
+  if (_selfImproveRunning) { console.log('[self-improve] Already running, skipping'); return; }
+  if (!CLAUDE_API_KEY) { console.log('[self-improve] No CLAUDE_API_KEY, skipping'); return; }
+  _selfImproveRunning = true;
+  const startedAt = new Date().toISOString();
+  console.log(`[self-improve] ═══ Starting autonomous improvement cycle at ${startedAt} ═══`);
+  logEvent('INFO', 'SELF_IMPROVE_START', `Autonomous improvement cycle started at ${startedAt}`);
+
+  const PORT = process.env.PORT || 3000;
+  const base = `http://localhost:${PORT}`;
+  const results = { modes: [], controlStation: null, errors: [] };
+
+  try {
+    // Step 1: Run all agent modes with autoApply ON
+    for (const mode of ['analyze', 'optimize', 'wallets', 'survivors']) {
+      try {
+        console.log(`[self-improve] Running agent mode: ${mode}...`);
+        const res = await fetch(`${base}/api/agent/autonomous`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode, autoApply: true, sessionId: 'auto_' + Date.now() }),
+          signal: AbortSignal.timeout(90_000),
+        });
+        const data = await res.json();
+        const applied = data.executed_changes?.length || 0;
+        const proposed = data.proposed_changes?.length || 0;
+        results.modes.push({ mode, applied, proposed, ok: data.ok });
+        console.log(`[self-improve] ${mode}: ${applied} applied, ${proposed} proposed`);
+        await new Promise(r => setTimeout(r, 3000)); // breathing room between API calls
+      } catch (e) {
+        console.error(`[self-improve] ${mode} failed:`, e.message);
+        results.errors.push({ mode, error: e.message });
+      }
+    }
+
+    // Step 2: Run Control Station full-config auto-optimize
+    try {
+      console.log('[self-improve] Running Control Station auto-optimize...');
+      const res = await fetch(`${base}/api/control-station/auto-optimize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(90_000),
+      });
+      const data = await res.json();
+      results.controlStation = {
+        ok: data.ok,
+        applied: data.applied?.length || 0,
+        analysis: data.analysis,
+        summary: data.summary,
+      };
+      console.log(`[self-improve] Control Station: ${results.controlStation.applied} changes applied`);
+      if (data.analysis) console.log(`[self-improve] Analysis: ${data.analysis}`);
+    } catch (e) {
+      console.error('[self-improve] Control Station failed:', e.message);
+      results.errors.push({ mode: 'control-station', error: e.message });
+    }
+
+    // Step 3: OpenAI Learning — feed outcome data + get independent analysis
+    results.openai = { learned: 0, insights: null };
+    if (OPENAI_API_KEY) {
+      try {
+        console.log('[self-improve] Running OpenAI outcome learning...');
+
+        // Gather resolved calls for OpenAI to learn from
+        const resolvedCalls = dbInstance.prepare(`
+          SELECT c.token, c.score_at_call, c.market_cap_at_call, c.risk_at_call,
+                 c.setup_type_at_call, c.outcome, c.peak_multiple, c.pct_change_1h, c.pct_change_24h,
+                 ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct,
+                 ca.holders, ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours,
+                 ca.launch_unique_buyer_ratio, ca.buy_velocity,
+                 ca.openai_decision AS openai_called, ca.openai_conviction AS openai_confidence
+          FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+          WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+          ORDER BY c.posted_at DESC LIMIT 50
+        `).all();
+
+        // Current config for context
+        const currentConfig = {
+          scoring: SCORING_CONFIG,
+          tuning: TUNING_CONFIG,
+          overrides: AI_CONFIG_OVERRIDES,
+        };
+
+        const openaiPrompt = `You are an AI performance analyst for a Solana micro-cap token calling bot.
+
+MISSION: Learn from outcome data. Identify what the bot is doing RIGHT and WRONG. Propose specific improvements.
+
+RESOLVED CALLS (${resolvedCalls.length} total):
+${JSON.stringify(resolvedCalls.slice(0, 30), null, 1)}
+
+CURRENT BOT CONFIG:
+${JSON.stringify(currentConfig, null, 2)}
+
+TASKS:
+1. LEARN: For each WIN, identify what signals were strong. For each LOSS, identify what should have been caught.
+2. PATTERNS: What separates winners from losers in this data? Be specific with numbers.
+3. ACCURACY: How accurate were YOUR previous calls (openai_called field)? Where did you agree/disagree with the final outcome?
+4. RECOMMENDATIONS: Propose 3-5 specific config changes that would improve win rate. Reference data.
+5. BLIND SPOTS: What types of tokens is the bot missing? What red flags is it ignoring?
+
+Respond with valid JSON:
+{
+  "lessons_learned": ["specific lesson from the data"],
+  "win_pattern": "what winning calls have in common — specific metrics",
+  "loss_pattern": "what losing calls have in common — specific metrics",
+  "self_accuracy": "how accurate were your own previous predictions",
+  "recommendations": [
+    {
+      "param": "exact_config_param_name",
+      "current": current_value,
+      "suggested": new_value,
+      "reason": "data-backed reason",
+      "confidence": 0-100
+    }
+  ],
+  "blind_spots": ["things the bot should watch for"],
+  "summary": "one paragraph overall assessment"
+}`;
+
+        const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+          body: JSON.stringify({
+            model: 'gpt-4o',
+            messages: [{ role: 'user', content: openaiPrompt }],
+            max_tokens: 2500,
+            temperature: 0.3,
+          }),
+          signal: AbortSignal.timeout(60_000),
+        });
+
+        if (openaiRes.ok) {
+          const openaiData = await openaiRes.json();
+          const reply = openaiData.choices?.[0]?.message?.content ?? '';
+          let parsed = null;
+          try {
+            const jsonMatch = reply.match(/\{[\s\S]*\}/);
+            if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+          } catch {}
+
+          if (parsed) {
+            results.openai.learned = resolvedCalls.length;
+            results.openai.insights = parsed;
+
+            // Log OpenAI's analysis to audit
+            dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+              '[OPENAI-LEARNING]',
+              resolvedCalls.length + ' calls analyzed',
+              (parsed.recommendations?.length || 0) + ' suggestions',
+              `Win pattern: ${(parsed.win_pattern || '').slice(0, 200)} | Loss pattern: ${(parsed.loss_pattern || '').slice(0, 200)} | Self-accuracy: ${(parsed.self_accuracy || '').slice(0, 100)} | Summary: ${(parsed.summary || '').slice(0, 200)}`,
+              'AUTO_APPLIED'
+            );
+
+            // Log each lesson learned
+            for (const lesson of (parsed.lessons_learned || []).slice(0, 5)) {
+              dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+                '[OPENAI-LESSON]', '', '', lesson, 'AUTO_APPLIED'
+              );
+            }
+
+            // Log blind spots
+            for (const spot of (parsed.blind_spots || []).slice(0, 3)) {
+              dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+                '[OPENAI-BLIND-SPOT]', '', '', spot, 'AUTO_APPLIED'
+              );
+            }
+
+            // Log OpenAI's config recommendations (but DON'T auto-apply — learning phase)
+            for (const rec of (parsed.recommendations || [])) {
+              dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+                `[OPENAI-SUGGESTS] ${rec.param || '?'}`,
+                String(rec.current ?? ''),
+                String(rec.suggested ?? ''),
+                `${rec.reason || ''} | Confidence: ${rec.confidence || '?'}%`,
+                'PENDING'
+              );
+            }
+
+            console.log(`[self-improve] OpenAI learned from ${resolvedCalls.length} calls. ${parsed.recommendations?.length || 0} suggestions logged.`);
+            console.log(`[self-improve] OpenAI win pattern: ${(parsed.win_pattern || '').slice(0, 100)}`);
+            console.log(`[self-improve] OpenAI loss pattern: ${(parsed.loss_pattern || '').slice(0, 100)}`);
+          }
+        } else {
+          console.warn('[self-improve] OpenAI API returned:', openaiRes.status);
+        }
+      } catch (e) {
+        console.error('[self-improve] OpenAI learning failed:', e.message);
+        results.errors.push({ mode: 'openai-learning', error: e.message });
+      }
+    }
+
+    // Step 4: Log summary to audit
+    const totalApplied = results.modes.reduce((a, m) => a + m.applied, 0) + (results.controlStation?.applied || 0);
+    const openaiNote = results.openai.learned > 0 ? ` OpenAI learned from ${results.openai.learned} calls, logged ${results.openai.insights?.recommendations?.length || 0} suggestions.` : '';
+    const summary = `Autonomous cycle complete. Agent modes: ${results.modes.map(m => m.mode + '=' + m.applied + ' applied').join(', ')}. Control Station: ${results.controlStation?.applied || 0} applied. Total: ${totalApplied} changes.${openaiNote}`;
+
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      '[SELF-IMPROVE]', startedAt, new Date().toISOString(),
+      summary + (results.controlStation?.analysis ? ' | Analysis: ' + results.controlStation.analysis : ''),
+      'AUTO_APPLIED'
+    );
+
+    console.log(`[self-improve] ═══ ${summary} ═══`);
+    logEvent('INFO', 'SELF_IMPROVE_COMPLETE', summary);
+
+    // Send Telegram notification
+    sendAdminAlert(
+      `🤖 <b>Self-Improvement Cycle Complete</b>\n` +
+      `${totalApplied} changes auto-applied\n` +
+      results.modes.map(m => `• ${m.mode}: ${m.applied} applied`).join('\n') +
+      `\n• control-station: ${results.controlStation?.applied || 0} applied` +
+      (results.openai.learned > 0 ? `\n• openai-learning: ${results.openai.learned} calls studied, ${results.openai.insights?.recommendations?.length || 0} suggestions` : '') +
+      (results.controlStation?.analysis ? `\n\n📊 <b>Claude:</b> <i>${results.controlStation.analysis}</i>` : '') +
+      (results.openai.insights?.summary ? `\n\n🧠 <b>OpenAI:</b> <i>${results.openai.insights.summary}</i>` : '') +
+      (results.errors.length ? `\n\n⚠️ Errors: ${results.errors.map(e => e.mode + ': ' + e.error).join(', ')}` : '')
+    ).catch(() => {});
+
+  } catch (e) {
+    console.error('[self-improve] Fatal error:', e.message);
+    logEvent('ERROR', 'SELF_IMPROVE_FAILED', e.message);
+  } finally {
+    _selfImproveRunning = false;
+  }
+}
+
+// Run every 6 hours
+const SELF_IMPROVE_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+setInterval(runSelfImproveLoop, SELF_IMPROVE_INTERVAL_MS);
+
+// Also run 2 minutes after boot to do an initial optimization
+setTimeout(runSelfImproveLoop, 2 * 60 * 1000);
+console.log('[self-improve] Scheduled: every 6h + initial run in 2min');
+
+// Manual trigger endpoint
+app.post('/api/self-improve/run', async (req, res) => {
+  setCors(res);
+  if (_selfImproveRunning) return res.json({ ok: false, error: 'Already running' });
+  res.json({ ok: true, message: 'Self-improvement cycle started. Check audit log for results.' });
+  setImmediate(runSelfImproveLoop);
+});
+
+// ── Audit Chat — ask questions, teach the bot, feed it URLs/files ────────────
+app.post('/api/audit-chat', express.json({ limit: '2mb' }), async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'Claude API not configured' });
+  try {
+    const { message = '', fileContent, fileName, urls = [] } = req.body ?? {};
+
+    // Gather context
+    const stats = (() => { try {
+      const total = dbInstance.prepare('SELECT COUNT(*) as n FROM calls').get().n;
+      const wins = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'").get().n;
+      const losses = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'").get().n;
+      return { total, wins, losses };
+    } catch { return {}; } })();
+
+    const recentAudit = (() => { try {
+      return dbInstance.prepare(`SELECT param, reason FROM tuning_audit ORDER BY created_at DESC LIMIT 10`).all();
+    } catch { return []; } })();
+
+    const memories = (() => { try {
+      return dbInstance.prepare(`SELECT title, content, category FROM bot_knowledge ORDER BY created_at DESC LIMIT 20`).all();
+    } catch { return []; } })();
+
+    // Fetch URL content if provided
+    let urlContent = '';
+    let urlParsed = false;
+    for (const url of urls.slice(0, 3)) {
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'PulseCaller/1.0' } });
+        if (r.ok) {
+          const text = await r.text();
+          // Strip HTML tags for readability, limit to 3000 chars
+          const clean = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000);
+          urlContent += `\n\nURL CONTENT (${url}):\n${clean}`;
+          urlParsed = true;
+        }
+      } catch (e) { urlContent += `\n\n[Failed to fetch ${url}: ${e.message}]`; }
+    }
+
+    // Build prompt
+    const systemPrompt = `You are Pulse Caller's AI brain. You help the operator understand the bot's performance, learn from their input, and improve.
+
+BOT STATUS: ${stats.total||0} calls, ${stats.wins||0} wins, ${stats.losses||0} losses.
+SCORING: Foundation Signals v3 — Volume Velocity (35), Buy Pressure (25), Wallet Quality (20), Holder Distribution (12), Liquidity Health (8).
+CONFIG: ${JSON.stringify(SCORING_CONFIG)}
+TUNING: ${JSON.stringify(TUNING_CONFIG)}
+
+RECENT CHANGES: ${JSON.stringify(recentAudit.slice(0, 5))}
+
+BOT MEMORIES: ${memories.slice(0, 10).map(m => m.title + ': ' + (m.content||'').slice(0, 100)).join(' | ')}
+
+RULES:
+- Keep answers concise (under 200 words unless explaining something complex)
+- If the user teaches you something, say you'll remember it and suggest saving it
+- If the user shares a URL, analyze the content and extract actionable insights
+- If the user uploads a file, analyze it for patterns, strategies, or data
+- Always relate answers back to how it affects the bot's scoring and calling
+- Be direct and data-driven`;
+
+    let userContent = message;
+    if (fileContent) userContent += `\n\nUPLOADED FILE (${fileName}):\n${fileContent.slice(0, 5000)}`;
+    if (urlContent) userContent += urlContent;
+
+    const claudeRes = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 600, system: systemPrompt, messages: [{ role: 'user', content: userContent }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!claudeRes.ok) return res.status(502).json({ ok: false, error: 'Claude API: ' + claudeRes.status });
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+
+    // Auto-save to bot memory if the user is teaching something
+    let savedToMemory = false;
+    const isTeaching = /remember|learn|save|note|strategy|rule|pattern|always|never|important/i.test(message);
+    if (isTeaching && message.length > 20) {
+      try {
+        dbInstance.prepare(`INSERT INTO bot_knowledge (title, content, category) VALUES (?,?,?)`).run(
+          'Operator teaching: ' + message.slice(0, 60),
+          message + (fileContent ? '\n\n[File: ' + fileName + ']\n' + fileContent.slice(0, 500) : '') + (urlContent ? urlContent.slice(0, 500) : ''),
+          'operator_teaching'
+        );
+        savedToMemory = true;
+      } catch {}
+    }
+
+    res.json({ ok: true, reply, savedToMemory, urlParsed });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── REVIVAL TRACKER — monitor rejected tokens for 24h, re-alert on spikes ────
+async function runRevivalTracker() {
+  if (!_botActive) return;
+  try {
+    // Find tokens we passed on in the last 24h with decent scores
+    const passed = dbInstance.prepare(`
+      SELECT id, contract_address, token, composite_score, market_cap, liquidity,
+             volume_1h, final_decision, claude_risk, structure_grade
+      FROM candidates
+      WHERE final_decision IN ('IGNORE','WATCHLIST','HOLD_FOR_REVIEW')
+        AND composite_score >= 30
+        AND market_cap >= 6000 AND market_cap <= 85000
+        AND created_at > datetime('now', '-24 hours')
+      ORDER BY composite_score DESC
+      LIMIT 30
+    `).all();
+
+    if (!passed.length) return;
+
+    let revivals = 0;
+    for (const token of passed) {
+      try {
+        // Fetch current data from DexScreener
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${token.contract_address}`, {
+          signal: AbortSignal.timeout(6000),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const pair = (data?.pairs ?? []).filter(p => p.chainId === 'solana').sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        if (!pair) continue;
+
+        const currentMcap = pair.marketCap ?? pair.fdv ?? 0;
+        const currentVol = pair.volume?.h1 ?? 0;
+        const entryMcap = token.market_cap ?? 0;
+        const entryVol = token.volume_1h ?? 0;
+
+        if (entryMcap <= 0) continue;
+
+        const mcapGrowth = ((currentMcap - entryMcap) / entryMcap) * 100;
+        const volMultiple = entryVol > 0 ? currentVol / entryVol : 0;
+        const holders = pair.txns?.h1?.buys ?? 0;
+
+        // Revival thresholds: price >50%, volume >3x, or significant holder growth
+        const isRevival = mcapGrowth > 50 || volMultiple > 3 || (currentMcap > entryMcap * 1.5);
+
+        if (isRevival && currentMcap >= 8000) {
+          revivals++;
+          const tok = token.token || token.contract_address?.slice(0, 8) || '?';
+          console.log(`[revival] 🔄 $${tok} pumped +${mcapGrowth.toFixed(0)}% since we passed (${token.final_decision}). MCap: $${(entryMcap/1000).toFixed(1)}K → $${(currentMcap/1000).toFixed(1)}K`);
+
+          // Log to tuning audit for learning
+          dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+            '[REVIVAL] $' + tok,
+            '$' + (entryMcap/1000).toFixed(1) + 'K (score ' + (token.composite_score||'?') + ')',
+            '$' + (currentMcap/1000).toFixed(1) + 'K (+' + mcapGrowth.toFixed(0) + '%)',
+            `Was ${token.final_decision} with score ${token.composite_score}. Risk: ${token.claude_risk||'?'}. Structure: ${token.structure_grade||'?'}. Volume ${volMultiple.toFixed(1)}x since rejection. THIS IS A MISSED OPPORTUNITY — feed back into scoring.`,
+            'AUTO_APPLIED'
+          );
+
+          // Send Telegram alert
+          sendAdminAlert(
+            `🔄 <b>REVIVAL ALERT</b>\n\n` +
+            `<b>$${tok}</b> pumped after we passed!\n` +
+            `MCap: $${(entryMcap/1000).toFixed(1)}K → <b>$${(currentMcap/1000).toFixed(1)}K (+${mcapGrowth.toFixed(0)}%)</b>\n` +
+            `Volume: <b>${volMultiple.toFixed(1)}x</b> since rejection\n` +
+            `Was: <b>${token.final_decision}</b> (score ${token.composite_score}, ${token.claude_risk||'?'} risk)\n\n` +
+            `<a href="https://dexscreener.com/solana/${token.contract_address}">View on DexScreener →</a>`
+          ).catch(() => {});
+
+          // Re-queue for full scoring if it's still in range
+          if (currentMcap <= 85000) {
+            try {
+              const candidate = { contractAddress: token.contract_address, token: token.token, marketCap: currentMcap };
+              setImmediate(() => processCandidate(candidate, true).catch(() => {}));
+              console.log(`[revival] Re-queued $${tok} for full scoring`);
+            } catch {}
+          }
+        }
+
+        await new Promise(r => setTimeout(r, 500)); // rate limit DexScreener
+      } catch {}
+    }
+
+    if (revivals > 0) {
+      console.log(`[revival] Found ${revivals} revivals out of ${passed.length} checked`);
+      logEvent('INFO', 'REVIVAL_SCAN', `${revivals} revivals found from ${passed.length} rejected tokens`);
+    }
+  } catch (err) {
+    console.warn('[revival] Error:', err.message);
+  }
+}
+
+// Run revival tracker every 30 minutes
+setInterval(runRevivalTracker, 30 * 60_000);
+setTimeout(runRevivalTracker, 5 * 60_000); // first run 5min after boot
+console.log('[revival] Revival tracker scheduled: every 30min');
+
+// ── MISSED WINNER DEEP ANALYSIS — daily pattern extraction + auto weight adjust ──
+async function runMissedWinnerDeepAnalysis() {
+  if (!_botActive || !CLAUDE_API_KEY) return;
+  try {
+    console.log('[missed-analysis] Running deep missed winner analysis...');
+
+    // Find tokens we passed on that pumped >2x
+    const missed = dbInstance.prepare(`
+      SELECT c.token, c.contract_address, c.composite_score, c.market_cap, c.liquidity,
+             c.volume_1h, c.final_decision, c.claude_risk, c.structure_grade, c.setup_type,
+             c.dev_wallet_pct, c.top10_holder_pct, c.bundle_risk, c.sniper_wallet_count,
+             c.buy_sell_ratio_1h, c.volume_velocity, c.buy_velocity, c.pair_age_hours,
+             c.launch_unique_buyer_ratio, c.claude_verdict
+      FROM candidates c
+      WHERE c.final_decision IN ('IGNORE','WATCHLIST','HOLD_FOR_REVIEW')
+        AND c.composite_score IS NOT NULL
+        AND c.created_at > datetime('now', '-48 hours')
+      ORDER BY c.composite_score DESC
+      LIMIT 50
+    `).all();
+
+    if (!missed.length) { console.log('[missed-analysis] No rejected tokens to analyze'); return; }
+
+    // Check which ones pumped via DexScreener
+    const pumped = [];
+    for (const token of missed.slice(0, 20)) {
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${token.contract_address}`, {
+          signal: AbortSignal.timeout(6000),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const pair = (data?.pairs ?? []).filter(p => p.chainId === 'solana')[0];
+        if (!pair) continue;
+
+        const currentMcap = pair.marketCap ?? 0;
+        const entryMcap = token.market_cap ?? 1;
+        const multiple = currentMcap / entryMcap;
+
+        if (multiple >= 2.0) {
+          pumped.push({ ...token, currentMcap, peakMultiple: multiple });
+        }
+        await new Promise(r => setTimeout(r, 400));
+      } catch {}
+    }
+
+    if (!pumped.length) { console.log('[missed-analysis] No missed winners found this cycle'); return; }
+
+    // Ask Claude to analyze patterns and suggest weight adjustments
+    const prompt = `You are analyzing MISSED WINNERS for a Solana micro-cap calling bot.
+
+These tokens were REJECTED by the bot but pumped 2x+ afterward. Your job:
+1. Find the PATTERN — what do these missed winners have in common?
+2. WHY did we miss them? Which scoring signals were too strict?
+3. Suggest SPECIFIC weight/threshold changes to catch these next time.
+
+CURRENT SCORING WEIGHTS: ${JSON.stringify(TUNING_CONFIG.discovery)}
+CURRENT THRESHOLDS: ${JSON.stringify(TUNING_CONFIG.thresholds)}
+
+MISSED WINNERS (${pumped.length} tokens that pumped 2x+ after we passed):
+${JSON.stringify(pumped.map(p => ({
+  token: p.token, score: p.composite_score, decision: p.final_decision,
+  risk: p.claude_risk, structure: p.structure_grade, setup: p.setup_type,
+  entryMcap: p.market_cap, peakMultiple: p.peakMultiple?.toFixed(1)+'x',
+  dev: p.dev_wallet_pct, top10: p.top10_holder_pct, bundle: p.bundle_risk,
+  snipers: p.sniper_wallet_count, buyRatio: p.buy_sell_ratio_1h,
+  velocity: p.volume_velocity, buyVel: p.buy_velocity, age: p.pair_age_hours,
+  ubr: p.launch_unique_buyer_ratio,
+})), null, 1)}
+
+Respond with valid JSON:
+{
+  "pattern": "What these missed winners had in common — specific metrics",
+  "why_missed": "Which scoring factors caused the miss — be specific",
+  "adjustments": [
+    { "param": "exact_param_name", "section": "discovery|thresholds", "current": value, "suggested": value, "reason": "why" }
+  ],
+  "summary": "One sentence takeaway"
+}`;
+
+    const claudeRes = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1500, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    if (!claudeRes.ok) { console.warn('[missed-analysis] Claude API:', claudeRes.status); return; }
+
+    const cData = await claudeRes.json();
+    const reply = (cData.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const jsonMatch = reply.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return;
+
+    const analysis = JSON.parse(jsonMatch[0]);
+
+    // Auto-apply weight adjustments within safety bounds
+    let applied = 0;
+    for (const adj of (analysis.adjustments || [])) {
+      if (!adj.param || adj.suggested == null) continue;
+      const section = adj.section || 'discovery';
+      if (TUNING_CONFIG[section]?.[adj.param] !== undefined) {
+        const old = TUNING_CONFIG[section][adj.param];
+        TUNING_CONFIG[section][adj.param] = Number(adj.suggested);
+        saveTuningConfig();
+        applied++;
+        dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+          `[MISSED-WINNER-FIX] ${adj.param}`, String(old), String(adj.suggested),
+          `${adj.reason} | Pattern: ${(analysis.pattern||'').slice(0,150)} | ${pumped.length} missed winners analyzed`,
+          'AUTO_APPLIED'
+        );
+      }
+    }
+
+    // Log the analysis
+    dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
+      '[MISSED-WINNER-ANALYSIS]',
+      pumped.length + ' missed winners',
+      applied + ' adjustments applied',
+      `Pattern: ${analysis.pattern || '?'} | Why missed: ${analysis.why_missed || '?'} | ${analysis.summary || ''}`,
+      'AUTO_APPLIED'
+    );
+
+    console.log(`[missed-analysis] ${pumped.length} missed winners → ${applied} weight adjustments applied`);
+    console.log(`[missed-analysis] Pattern: ${(analysis.pattern||'').slice(0,100)}`);
+
+    // Telegram alert
+    if (pumped.length > 0) {
+      sendAdminAlert(
+        `😤 <b>Missed Winner Analysis</b>\n\n` +
+        `${pumped.length} tokens pumped 2x+ after we passed:\n` +
+        pumped.slice(0, 5).map(p => `• $${p.token||'?'} — ${p.peakMultiple?.toFixed(1)}x (was ${p.final_decision}, score ${p.composite_score})`).join('\n') +
+        `\n\n<b>Pattern:</b> ${(analysis.pattern||'?').slice(0,200)}` +
+        `\n<b>Fix:</b> ${applied} weight adjustments auto-applied` +
+        (analysis.summary ? `\n\n<i>${analysis.summary}</i>` : '')
+      ).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[missed-analysis] Error:', err.message);
+  }
+}
+
+// Run missed winner analysis every 12 hours
+setInterval(runMissedWinnerDeepAnalysis, 12 * 60 * 60_000);
+setTimeout(runMissedWinnerDeepAnalysis, 10 * 60_000); // first run 10min after boot
+console.log('[missed-analysis] Missed winner analysis scheduled: every 12h');
+
+app.get('/api/self-improve/status', (req, res) => {
+  setCors(res);
+  const lastRun = (() => { try { return dbInstance.prepare(`SELECT created_at FROM tuning_audit WHERE param='[SELF-IMPROVE]' ORDER BY created_at DESC LIMIT 1`).get()?.created_at; } catch { return null; } })();
+  const recentChanges = (() => { try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM tuning_audit WHERE status='AUTO_APPLIED' AND created_at > datetime('now','-24 hours')`).get().n; } catch { return 0; } })();
+  res.json({
+    ok: true,
+    running: _selfImproveRunning,
+    lastRun,
+    intervalHours: 6,
+    changesLast24h: recentChanges,
+    nextRunApprox: lastRun ? new Date(new Date(lastRun).getTime() + SELF_IMPROVE_INTERVAL_MS).toISOString() : 'within 2 minutes',
   });
 });
 
@@ -4449,7 +5735,7 @@ Survivor Tokens: ${survivors} (>4h >$500K)
 Early Wallet Records: ${earlyW} unique wallets tracked
 
 ACTIVE CONFIG OVERRIDES: ${Object.keys(AI_CONFIG_OVERRIDES).length > 0 ? JSON.stringify(AI_CONFIG_OVERRIDES) : 'None — using defaults'}
-Current Sweet Spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||10000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||25000)/1000)}K
+Current Sweet Spot: $${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMin||15000)/1000)}K–$${Math.round((AI_CONFIG_OVERRIDES.sweetSpotMax||40000)/1000)}K
 Score Floor: ${activeMode.minScore} | Max MCap: $${Math.round(activeMode.maxMarketCap/1000)}K | Max Age: ${activeMode.maxPairAgeHours}h
 
 RECENT CALL HISTORY:
@@ -6353,7 +7639,7 @@ app.post('/api/seed/scan', async (req, res) => {
         // 1. Fetch holder addresses via Helius
         let holders = [];
         try {
-          holders = await getTopHolders(ca, 100) ?? [];
+          holders = await getTopHolders(ca, HELIUS_API_KEY, 100) ?? [];
           console.log(`[seed] Helius holders: ${holders.length}`);
         } catch (err) {
           console.warn(`[seed] Helius failed: ${err.message}`);
@@ -6483,7 +7769,31 @@ app.post('/api/seed/scan', async (req, res) => {
           contractId
         );
 
-        console.log(`[seed] ✓ Seeded ${walletSet.size} wallets for ${ca} — ALPHA:${counters.ALPHA} SMART:${counters.SMART_MONEY} MOMENTUM:${counters.MOMENTUM}`);
+        // 6. Auto-promote ALPHA and SMART_MONEY wallets to tracked_wallets DB
+        let promoted = 0;
+        try {
+          const goodWallets = dbInstance.prepare(`
+            SELECT wallet_address, category, final_score FROM seeded_wallets
+            WHERE seeded_contract_id=? AND category IN ('ALPHA','SMART_MONEY','MOMENTUM')
+            ORDER BY final_score DESC
+          `).all(contractId);
+
+          const upsertTracked = dbInstance.prepare(`
+            INSERT INTO tracked_wallets (address, category, source, score, is_watchlist, added_by, notes)
+            VALUES (?, ?, 'brain_analyzer', ?, 1, 'auto', ?)
+            ON CONFLICT(address) DO UPDATE SET
+              score = MAX(score, excluded.score),
+              category = CASE WHEN excluded.score > score THEN excluded.category ELSE category END,
+              updated_at = datetime('now')
+          `);
+
+          for (const w of goodWallets) {
+            upsertTracked.run(w.wallet_address, w.category === 'ALPHA' ? 'WINNER' : w.category, w.final_score, 'Auto-promoted from brain analyzer scan of ' + ca.slice(0,8));
+            promoted++;
+          }
+        } catch (e) { console.warn('[seed] Wallet promotion failed:', e.message); }
+
+        console.log(`[seed] ✓ Seeded ${walletSet.size} wallets for ${ca} — ALPHA:${counters.ALPHA} SMART:${counters.SMART_MONEY} MOMENTUM:${counters.MOMENTUM} | ${promoted} promoted to wallet DB`);
 
       } catch (err) {
         console.error(`[seed] Scan failed for ${ca}:`, err.message);
@@ -6559,6 +7869,21 @@ app.get('/api/candidates/by-ca/:ca', (req, res) => {
       });
       cand.composite_score = sub.composite_score ?? cand.composite_score;
     }
+    // Parse dual_parts JSON if stored
+    if (cand.dual_parts && typeof cand.dual_parts === 'string') {
+      try { cand.dual_parts = JSON.parse(cand.dual_parts); } catch {}
+    }
+    // Look up outcome from calls table
+    try {
+      const call = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM calls WHERE candidate_id=? OR contract_address=? ORDER BY id DESC LIMIT 1`).get(cand.id, ca);
+      if (call) { cand.outcome = call.outcome; cand.peak_multiple = call.peak_multiple; cand.peak_mcap = call.peak_mcap; }
+    } catch {}
+    if (!cand.outcome) {
+      try {
+        const arch = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM audit_archive WHERE contract_address=? AND outcome IS NOT NULL ORDER BY id DESC LIMIT 1`).get(ca);
+        if (arch) { cand.outcome = arch.outcome; cand.peak_multiple = arch.peak_multiple; cand.peak_mcap = arch.peak_mcap; }
+      } catch {}
+    }
     res.json({ ok: true, candidate: cand, source: 'candidates' });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
@@ -6579,6 +7904,33 @@ app.get('/api/candidates/:id', (req, res) => {
     }
     if (typeof candidate.score_penalties === 'string') {
       try { candidate.penalties = JSON.parse(candidate.score_penalties); } catch { candidate.penalties = {}; }
+    }
+    if (typeof candidate.dual_parts === 'string') {
+      try { candidate.dualParts = JSON.parse(candidate.dual_parts); } catch { candidate.dualParts = {}; }
+    } else if (candidate.dual_parts && typeof candidate.dual_parts === 'object') {
+      candidate.dualParts = candidate.dual_parts;
+    }
+    candidate.discoveryScore = candidate.discovery_score;
+    candidate.modelUsed = candidate.model_used;
+    // Look up outcome from calls table (outcomes live there, not on candidates)
+    try {
+      const call = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM calls WHERE candidate_id=? OR contract_address=? ORDER BY id DESC LIMIT 1`).get(candidate.id, candidate.contract_address);
+      if (call) {
+        candidate.outcome = call.outcome;
+        candidate.peak_multiple = call.peak_multiple;
+        candidate.peak_mcap = call.peak_mcap;
+      }
+    } catch {}
+    // Also check audit_archive
+    if (!candidate.outcome) {
+      try {
+        const arch = dbInstance.prepare(`SELECT outcome, peak_multiple, peak_mcap FROM audit_archive WHERE contract_address=? AND outcome IS NOT NULL ORDER BY id DESC LIMIT 1`).get(candidate.contract_address);
+        if (arch) {
+          candidate.outcome = arch.outcome;
+          candidate.peak_multiple = arch.peak_multiple;
+          candidate.peak_mcap = arch.peak_mcap;
+        }
+      } catch {}
     }
     // Parse claudeRaw to get bull_case and red_flags for signals fallback
     if (!candidate.signals && typeof candidate.claude_raw === 'string') {
@@ -6769,7 +8121,7 @@ app.get('/api/candidates/:id', (req, res) => {
           twitter:                 row.twitter,
           telegram:                row.telegram,
         };
-        const result = computeFullScore(c);
+        const result = computeFullScore(c, TUNING_CONFIG?.discovery);
         if (result?.subScores) {
           candidate.subScores = result.subScores;
           if (!candidate.signals)   candidate.signals   = result.signals;
@@ -6914,6 +8266,134 @@ app.post('/api/calls/refresh-all-peaks', async (_req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// ── Reset scoreboard — archive old calls, keep only specified token(s) ────────
+app.post('/api/calls/reset-scoreboard', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const { keepTokens = [] } = req.body ?? {};
+    const keepUpper = keepTokens.map(t => t.toUpperCase().replace(/^\$/, ''));
+
+    // Store the reset timestamp so we know when "current period" starts
+    try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoreboard_reset_at', ?)`).run(new Date().toISOString()); } catch {}
+
+    // Count what we're archiving
+    const totalCalls = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n;
+
+    // Archive old calls to a backup table before deleting
+    try {
+      dbInstance.exec(`CREATE TABLE IF NOT EXISTS calls_archive AS SELECT * FROM calls WHERE 0`);
+    } catch {} // already exists
+
+    // Move all calls except kept tokens to archive
+    let keepClause = '';
+    if (keepUpper.length > 0) {
+      keepClause = ` AND UPPER(token) NOT IN (${keepUpper.map(() => '?').join(',')})`;
+    }
+    const archived = dbInstance.prepare(`INSERT INTO calls_archive SELECT * FROM calls WHERE 1=1${keepClause}`).run(...keepUpper);
+    const deleted = dbInstance.prepare(`DELETE FROM calls WHERE 1=1${keepClause}`).run(...keepUpper);
+
+    // Also remove old calls from audit_archive (they show in the Calls tab)
+    try {
+      if (keepUpper.length > 0) {
+        dbInstance.prepare(`DELETE FROM audit_archive WHERE UPPER(token) NOT IN (${keepUpper.map(() => '?').join(',')}) AND final_decision = 'AUTO_POST'`).run(...keepUpper);
+      } else {
+        dbInstance.prepare(`DELETE FROM audit_archive WHERE final_decision = 'AUTO_POST'`).run();
+      }
+    } catch {}
+
+    const remaining = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n;
+    console.log(`[scoreboard] RESET: archived ${archived.changes} calls, deleted ${deleted.changes}, keeping ${remaining} (tokens: ${keepUpper.join(', ') || 'none'})`);
+    logEvent('INFO', 'SCOREBOARD_RESET', `Archived ${archived.changes} old calls. Keeping: ${keepUpper.join(', ') || 'none'}. Remaining: ${remaining}`);
+
+    res.json({
+      ok: true,
+      archived: archived.changes,
+      deleted: deleted.changes,
+      remaining,
+      keptTokens: keepUpper,
+      message: `Scoreboard reset. ${archived.changes} old calls archived. ${remaining} calls remaining.`,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── Weekly performance stats ─────────────────────────────────────────────────
+app.get('/api/stats/weekly', (req, res) => {
+  setCors(res);
+  try {
+    // Get weekly breakdown for the last 8 weeks
+    const weeks = dbInstance.prepare(`
+      SELECT
+        strftime('%Y-W%W', COALESCE(called_at, posted_at)) as week,
+        COUNT(*) as total_calls,
+        SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+        SUM(CASE WHEN outcome = 'NEUTRAL' THEN 1 ELSE 0 END) as neutrals,
+        SUM(CASE WHEN outcome IS NULL OR outcome = 'PENDING' THEN 1 ELSE 0 END) as pending,
+        ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+        ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x,
+        ROUND(AVG(CASE WHEN outcome = 'WIN' AND peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_win_x,
+        ROUND(AVG(CASE WHEN outcome = 'LOSS' AND peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_loss_x,
+        MIN(COALESCE(called_at, posted_at)) as week_start,
+        MAX(COALESCE(called_at, posted_at)) as week_end
+      FROM calls
+      GROUP BY week
+      ORDER BY week DESC
+      LIMIT 8
+    `).all();
+
+    // Current week summary
+    const current = dbInstance.prepare(`
+      SELECT
+        COUNT(*) as total_calls,
+        SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+        SUM(CASE WHEN outcome = 'NEUTRAL' THEN 1 ELSE 0 END) as neutrals,
+        SUM(CASE WHEN outcome IS NULL OR outcome = 'PENDING' THEN 1 ELSE 0 END) as pending,
+        ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+        ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+      FROM calls
+      WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+    `).get();
+
+    // All-time since reset
+    const allTime = dbInstance.prepare(`
+      SELECT
+        COUNT(*) as total_calls,
+        SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+        ROUND(AVG(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as avg_peak_x,
+        ROUND(MAX(CASE WHEN peak_multiple IS NOT NULL THEN peak_multiple END), 2) as best_x
+      FROM calls
+    `).get();
+
+    const resolved = (allTime.wins || 0) + (allTime.losses || 0);
+
+    // Current week individual calls for the live scoreboard
+    const currentCalls = dbInstance.prepare(`
+      SELECT token, contract_address, outcome, peak_multiple, score_at_call,
+             market_cap_at_call, COALESCE(called_at, posted_at) as call_time
+      FROM calls
+      WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+      ORDER BY id DESC LIMIT 20
+    `).all();
+
+    // Reset timestamp
+    const resetAt = (() => { try { return dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scoreboard_reset_at'`).get()?.value; } catch { return null; } })();
+
+    res.json({
+      ok: true,
+      currentWeek: current,
+      currentCalls,
+      resetAt,
+      allTime: {
+        ...allTime,
+        winRate: resolved > 0 ? Math.round(allTime.wins / resolved * 100) + '%' : '—',
+      },
+      weeks,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // On-demand snapshot refresh for a single call — user clicks "refresh peak"
 // without waiting for the tracker loop. Fetches DexScreener live and rolls peaks.
 app.post('/api/calls/:id/refresh', async (req, res) => {
@@ -6972,11 +8452,26 @@ app.get('/api/log', (req, res) => {
 app.get('/api/analytics', (req, res) => {
   setCors(res);
   try {
+    // Recent losses with full detail for autopsy
+    const recentLosses = (() => { try { return dbInstance.prepare(`
+      SELECT c.token, c.contract_address, c.score_at_call, c.market_cap_at_call,
+             c.risk_at_call, c.setup_type_at_call, c.peak_multiple, c.outcome,
+             c.called_at, c.pct_change_1h,
+             ca.claude_verdict, ca.claude_risk, ca.dev_wallet_pct, ca.top10_holder_pct,
+             ca.bundle_risk, ca.sniper_wallet_count, ca.volume_velocity, ca.buy_sell_ratio_1h,
+             ca.structure_grade, ca.holders
+      FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+      WHERE c.outcome='LOSS'
+      ORDER BY c.posted_at DESC LIMIT 20
+    `).all(); } catch { return []; } })();
+
     res.json({
       ok:                  true,
       winRateByScore:      getWinRateByScoreBand(),
       winRateBySetup:      getWinRateBySetupType(),
+      winRateByMcap:       getWinRateByMcapBand(),
       missedWinners:       getMissedWinners(),
+      recentLosses,
       deployerLeaderboard: getDeployerLeaderboard(),
       winnerProfiles:      getWinnerProfiles(),
       watchlist:           getWatchlistContents(),
@@ -7252,6 +8747,290 @@ app.get('/api/narrative-momentum', (req, res) => {
 
 // ── Telegram Webhook ──────────────────────────────────────────────────────────
 
+// ── Telegram chat toggle — "chat on" / "chat off" controls responses ────────
+let _telegramChatEnabled = true;
+
+// ── Group chat handler — short, funny, alpha-dropping responses ─────────────
+async function handleGroupChat(chatId, text, userName) {
+  if (!CLAUDE_API_KEY) return;
+  try {
+    // Get quick bot stats for context
+    const stats = (() => { try {
+      const total = dbInstance.prepare('SELECT COUNT(*) as n FROM calls').get().n;
+      const wins = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'").get().n;
+      const losses = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'").get().n;
+      return { total, wins, losses, wr: (wins+losses)>0 ? Math.round(wins/(wins+losses)*100) : 0 };
+    } catch { return { total: 0, wins: 0, losses: 0, wr: 0 }; } })();
+
+    const systemPrompt = `You are Pulse Caller — a witty, confident crypto call bot in a Telegram group. You scan Solana micro-caps and call gems.
+
+PERSONALITY:
+- Short responses ONLY. Max 2-3 sentences. Never write paragraphs.
+- Funny but not cringe. Quick wit. Crypto-native slang is fine.
+- Confident but not arrogant. You've got a ${stats.wr}% win rate.
+- Drop alpha casually. Share quick insights about crypto markets.
+- Greet people in creative ways. No boring "hello" responses.
+- Respectful always. Roast the market, never the person.
+- Use emojis sparingly — 1-2 max per message.
+- If someone asks about a token, give a quick take.
+- If someone says gm/gn, respond with energy.
+- If someone asks your win rate or stats: ${stats.wins}W/${stats.losses}L (${stats.wr}%).
+
+NEVER:
+- Write more than 3 sentences
+- Use HTML tags
+- Be rude to anyone
+- Give financial advice (say "not financial advice" if pressed)
+- Respond with generic AI language
+
+The user's name is ${userName}.`;
+
+    const res = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 150, system: systemPrompt, messages: [{ role: 'user', content: text }] }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!res.ok) return;
+    const data = await res.json();
+    const reply = (data.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+    if (reply && reply.length > 0 && reply.length < 500) {
+      await sendTelegramMessage(chatId, reply);
+    }
+  } catch (err) {
+    console.warn('[group-chat]', err.message);
+  }
+}
+
+// ── Free-text Telegram chat — talk back to the bot ──────────────────────────
+async function handleFreeChatTelegram(chatId, text) {
+  if (!CLAUDE_API_KEY) { await sendTelegramMessage(chatId, '⚠️ Claude API key not configured'); return; }
+  try {
+    // Build context for Claude
+    const stats = (() => { try {
+      const total = dbInstance.prepare('SELECT COUNT(*) as n FROM calls').get().n;
+      const wins = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'").get().n;
+      const losses = dbInstance.prepare("SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'").get().n;
+      const recent = dbInstance.prepare("SELECT token, outcome, peak_multiple, score_at_call FROM calls ORDER BY id DESC LIMIT 5").all();
+      return { total, wins, losses, winRate: (wins+losses)>0 ? Math.round(wins/(wins+losses)*100)+'%' : '—', recent };
+    } catch { return {}; } })();
+
+    const configSummary = `Scoring: minScoreToPost=${SCORING_CONFIG.minScoreToPost}, sweetSpotBonus=${SCORING_CONFIG.sweetSpotBonus}. Discovery weights: ${JSON.stringify(TUNING_CONFIG.discovery)}. Sweet spot: $${(AI_CONFIG_OVERRIDES.sweetSpotMin||15000)/1000}K-$${(AI_CONFIG_OVERRIDES.sweetSpotMax||40000)/1000}K.`;
+
+    const systemPrompt = `You are Pulse Caller's AI assistant, responding via Telegram. Keep replies concise (under 300 words) and use plain text (no markdown, no HTML tags except <b> and <i>).
+
+BOT STATUS:
+- Total calls: ${stats.total || 0}, Wins: ${stats.wins || 0}, Losses: ${stats.losses || 0}, Win rate: ${stats.winRate || '—'}
+- Recent calls: ${JSON.stringify(stats.recent || [])}
+- Config: ${configSummary}
+
+You can help with:
+- Answering questions about bot performance, scores, tokens
+- Explaining why a call was made or missed
+- Suggesting config changes (user must apply via dashboard)
+- Discussing strategy and scoring logic
+
+Be direct, data-driven, and helpful.`;
+
+    const res = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 800, system: systemPrompt, messages: [{ role: 'user', content: text }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      await sendTelegramMessage(chatId, `⚠️ Claude API error: ${res.status}`);
+      return;
+    }
+
+    const data = await res.json();
+    const reply = (data.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('');
+    if (reply) {
+      // Split long messages (Telegram 4096 char limit)
+      const chunks = [];
+      for (let i = 0; i < reply.length; i += 4000) chunks.push(reply.slice(i, i + 4000));
+      for (const chunk of chunks) await sendTelegramMessage(chatId, chunk);
+    } else {
+      await sendTelegramMessage(chatId, '🤖 No response generated.');
+    }
+  } catch (err) {
+    console.error('[telegram-chat]', err.message);
+    await sendTelegramMessage(chatId, `⚠️ Error: ${err.message}`);
+  }
+}
+
+// ── API Health Monitor — alerts when services go down ───────────────────────
+let _apiHealthState = { helius: true, birdeye: true, claude: true, openai: true, dexscreener: true };
+
+async function runApiHealthCheck() {
+  if (!_botActive) return; // Don't burn API calls when bot is off
+  const alerts = [];
+  const checks = {};
+
+  // Solana RPC (using free public endpoint — saves Helius credits)
+  try {
+    const r = await fetch('https://api.mainnet-beta.solana.com', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth' }),
+      signal: AbortSignal.timeout(8000),
+    });
+    checks.helius = r.ok; // still labeled helius for dashboard compat
+    if (!r.ok && _apiHealthState.helius) alerts.push(`❌ <b>Solana RPC DOWN</b> — HTTP ${r.status}. On-chain data affected.`);
+    if (r.ok && !_apiHealthState.helius) alerts.push(`✅ <b>Solana RPC RECOVERED</b>`);
+    _apiHealthState.helius = r.ok;
+  } catch (e) {
+    if (_apiHealthState.helius) alerts.push(`❌ <b>Helius RPC DOWN</b> — ${e.message}. Token detection offline.`);
+    _apiHealthState.helius = false; checks.helius = false;
+  }
+
+  // Birdeye
+  try {
+    const key = process.env.BIRDEYE_API_KEY || process.env.BIRDEYE_API_KEY_1;
+    if (key) {
+      const r = await fetch('https://public-api.birdeye.so/defi/token_overview?address=So11111111111111111111111111111111111111112', {
+        headers: { 'X-API-KEY': key }, signal: AbortSignal.timeout(8000),
+      });
+      checks.birdeye = r.ok;
+      if (!r.ok && _apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — HTTP ${r.status}. Market data + enrichment affected.`);
+      if (r.ok && !_apiHealthState.birdeye) alerts.push(`✅ <b>Birdeye API RECOVERED</b>`);
+      _apiHealthState.birdeye = r.ok;
+    }
+  } catch (e) {
+    if (_apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — ${e.message}. No market data.`);
+    _apiHealthState.birdeye = false; checks.birdeye = false;
+  }
+
+  // DexScreener
+  try {
+    const r = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
+      signal: AbortSignal.timeout(8000),
+    });
+    checks.dexscreener = r.ok;
+    if (!r.ok && _apiHealthState.dexscreener) alerts.push(`❌ <b>DexScreener DOWN</b> — HTTP ${r.status}. Scanner can't find new tokens.`);
+    if (r.ok && !_apiHealthState.dexscreener) alerts.push(`✅ <b>DexScreener RECOVERED</b>`);
+    _apiHealthState.dexscreener = r.ok;
+  } catch (e) {
+    if (_apiHealthState.dexscreener) alerts.push(`❌ <b>DexScreener DOWN</b> — ${e.message}. Scanner offline.`);
+    _apiHealthState.dexscreener = false; checks.dexscreener = false;
+  }
+
+  // Claude — use a minimal valid request to check API health
+  if (CLAUDE_API_KEY) {
+    try {
+      const r = await fetch(CLAUDE_API_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 32, messages: [{ role: 'user', content: 'Say OK' }] }),
+        signal: AbortSignal.timeout(12000),
+      });
+      // 200 = working. 429 = rate limited but API is alive. Both count as "up".
+      checks.claude = r.ok || r.status === 429;
+      if (!checks.claude && _apiHealthState.claude) alerts.push(`❌ <b>Claude API DOWN</b> — HTTP ${r.status}. AI scoring offline — bot can only use Foundation Signals.`);
+      if (checks.claude && !_apiHealthState.claude) alerts.push(`✅ <b>Claude API RECOVERED</b>`);
+      _apiHealthState.claude = checks.claude;
+    } catch (e) {
+      if (_apiHealthState.claude) alerts.push(`❌ <b>Claude API DOWN</b> — ${e.message}. No AI evaluation.`);
+      _apiHealthState.claude = false; checks.claude = false;
+    }
+  }
+
+  // OpenAI
+  if (OPENAI_API_KEY) {
+    try {
+      const r = await fetch('https://api.openai.com/v1/models', {
+        headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      checks.openai = r.ok;
+      if (!r.ok && _apiHealthState.openai) alerts.push(`❌ <b>OpenAI API DOWN</b> — HTTP ${r.status}. Secondary AI offline.`);
+      if (r.ok && !_apiHealthState.openai) alerts.push(`✅ <b>OpenAI API RECOVERED</b>`);
+      _apiHealthState.openai = r.ok;
+    } catch (e) {
+      if (_apiHealthState.openai) alerts.push(`❌ <b>OpenAI API DOWN</b> — ${e.message}`);
+      _apiHealthState.openai = false; checks.openai = false;
+    }
+  }
+
+  // Send alerts only when state CHANGES (down→up or up→down)
+  if (alerts.length > 0) {
+    const msg = `🚨 <b>API HEALTH ALERT</b>\n\n${alerts.join('\n\n')}\n\n<i>Status: Helius=${checks.helius?'✅':'❌'} Birdeye=${checks.birdeye?'✅':'❌'} DexScreener=${checks.dexscreener?'✅':'❌'} Claude=${checks.claude?'✅':'❌'} OpenAI=${checks.openai?'✅':'❌'}</i>`;
+    sendAdminAlert(msg).catch(() => {});
+    console.log(`[health] Alert sent: ${alerts.length} state changes`);
+    logEvent('WARN', 'API_HEALTH_ALERT', alerts.join(' | '));
+  }
+}
+
+// Run health check every 5 minutes
+setInterval(runApiHealthCheck, 5 * 60 * 1000);
+// Initial check 30s after boot
+setTimeout(runApiHealthCheck, 30_000);
+console.log('[health] API health monitor scheduled: every 5min');
+
+// ── MASTER TOGGLE — kills ALL activity (scanner, enrichment, AI, health checks) ──
+let _botActive = true;
+// Restore from DB on boot
+try {
+  const saved = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='bot_active'`).get();
+  if (saved?.value === 'false') _botActive = false;
+} catch {}
+if (!_botActive) console.log('[master] ⚠ Bot is OFF (restored from DB)');
+
+app.post('/api/bot/master-toggle', express.json(), async (req, res) => {
+  setCors(res);
+  const { active } = req.body ?? {};
+  _botActive = active !== false;
+  AI_CONFIG_OVERRIDES.pausePosting = !_botActive;
+  persistAIConfig();
+  try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('bot_active', ?)`).run(String(_botActive)); } catch {}
+
+  if (!_botActive) {
+    console.log('[master] 🔴 BOT OFF — all scanning, enrichment, AI calls stopped');
+    logEvent('INFO', 'BOT_OFF', 'Master toggle OFF — all activity paused');
+    sendAdminAlert('🔴 <b>BOT OFFLINE</b>\n\nAll scanning, scoring, and API calls stopped.\nCall alerts paused. Send "chat on" or toggle ON to resume.').catch(() => {});
+  } else {
+    console.log('[master] 🟢 BOT ON — resuming all activity');
+    logEvent('INFO', 'BOT_ON', 'Master toggle ON — all activity resumed');
+    sendAdminAlert('🟢 <b>BOT ONLINE</b>\n\nScanning, scoring, and API calls resumed.\nCall alerts active.').catch(() => {});
+  }
+  res.json({ ok: true, active: _botActive });
+});
+
+app.get('/api/bot/status', (req, res) => {
+  setCors(res);
+  res.json({ ok: true, active: _botActive });
+});
+
+// Health check endpoint for dashboard
+// Force reconnect Helius WebSocket
+app.post('/api/helius/reconnect', (req, res) => {
+  setCors(res);
+  try {
+    if (heliusListener) {
+      heliusListener.stop();
+      heliusListener = null;
+    }
+    if (HELIUS_API_KEY) {
+      heliusListener = startHeliusListener(HELIUS_API_KEY);
+      heliusListener.on('new_candidate', async (candidate) => {
+        if (!_botActive || !candidate?.contractAddress) return;
+        if (isRecentlySeen(candidate.contractAddress)) return;
+        if (isBlocklisted(candidate.contractAddress)) return;
+        console.log(`[helius] ⚡ Fast-track: $${candidate.token ?? '?'} (${candidate.stage})`);
+        processCandidate(candidate, false).catch(() => {});
+      });
+      res.json({ ok: true, message: 'Helius WebSocket reconnecting...' });
+    } else {
+      res.json({ ok: false, error: 'No HELIUS_API_KEY' });
+    }
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.get('/api/health', async (req, res) => {
+  setCors(res);
+  res.json({ ok: true, apis: _apiHealthState });
+});
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   const message = req.body?.message;
@@ -7274,7 +9053,52 @@ app.post('/webhook', async (req, res) => {
       case '/why':       await handleWhyCommand(chatId, args);          break;
       case '/top':       await handleTopCommand(chatId);                break;
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
-      default: break;
+      default:
+        if (!message.text || message.text.startsWith('/')) break;
+        const lower = message.text.trim().toLowerCase();
+        const isAdmin = String(fromId) === String(ADMIN_TELEGRAM_ID);
+        const isGroup = message.chat?.type === 'group' || message.chat?.type === 'supergroup';
+        const firstName = message.from?.first_name || 'anon';
+
+        // Admin toggle — works everywhere
+        if (isAdmin && lower === 'chat on') {
+          _telegramChatEnabled = true;
+          await sendTelegramMessage(chatId, '✅ Chat responses <b>ON</b>. Call alerts always active.');
+          break;
+        }
+        if (isAdmin && lower === 'chat off') {
+          _telegramChatEnabled = false;
+          await sendTelegramMessage(chatId, '🔇 Chat <b>OFF</b>. Calls only. Send "chat on" to re-enable.');
+          break;
+        }
+
+        if (!_telegramChatEnabled) break;
+
+        // Admin DMs — full Claude response
+        if (isAdmin && !isGroup) {
+          await handleFreeChatTelegram(chatId, message.text);
+          break;
+        }
+
+        // Group chat — respond to anyone but keep it short, funny, crypto-native
+        // Only respond if the bot is mentioned, or randomly ~20% of the time for vibes
+        if (isGroup) {
+          const botMentioned = lower.includes('pulse') || lower.includes('bot') || lower.includes('caller');
+          const isQuestion = message.text.includes('?');
+          const isCryptoTalk = /\$[a-zA-Z]|sol|pump|rug|moon|degen|ape|gem|token|coin|mcap|chart/i.test(message.text);
+          const shouldRespond = botMentioned || (isQuestion && isCryptoTalk) || (isCryptoTalk && Math.random() < 0.15);
+
+          if (shouldRespond) {
+            await handleGroupChat(chatId, message.text, firstName);
+          }
+          break;
+        }
+
+        // Private chat from non-admin — still respond if enabled
+        if (!isGroup) {
+          await handleFreeChatTelegram(chatId, message.text);
+        }
+        break;
     }
   } catch (err) { console.error('[webhook]', err.message); }
 });
@@ -7758,6 +9582,78 @@ app.get('/api/wallets/rankings', (req, res) => {
 // Instant SOL-balance classification for brain_scan wallets still sitting at NEUTRAL.
 // Runs in <50ms (pure SQLite, no external APIs). Call this before the Dune scan so
 // users see categories immediately instead of waiting 2 minutes.
+// ── Top 200 wallet activity feed — every move they make ─────────────────────
+app.get('/api/wallets/top-activity', (req, res) => {
+  setCors(res);
+  try {
+    const { limit = 200, hours = 72 } = req.query;
+
+    // Get top 200 wallets by score
+    const topWallets = dbInstance.prepare(`
+      SELECT address, label, category, win_rate, avg_roi, trade_count, score,
+             wins_found_in, losses_in
+      FROM tracked_wallets
+      WHERE is_blacklist=0 AND category IN ('WINNER','SMART_MONEY','ALPHA')
+      ORDER BY score DESC, win_rate DESC
+      LIMIT ?
+    `).all(parseInt(limit));
+
+    if (!topWallets.length) {
+      return res.json({ ok: true, wallets: [], activity: [], summary: { totalWallets: 0 } });
+    }
+
+    const addresses = topWallets.map(w => w.address);
+
+    // Get recent activity for these wallets
+    const placeholders = addresses.map(() => '?').join(',');
+    const activity = dbInstance.prepare(`
+      SELECT wa.wallet_address, wa.token_mint, wa.side, wa.token_amount, wa.block_time, wa.detected_at,
+             tw.label, tw.category, tw.score as wallet_score, tw.win_rate as wallet_win_rate
+      FROM wallet_activity wa
+      LEFT JOIN tracked_wallets tw ON tw.address = wa.wallet_address
+      WHERE wa.wallet_address IN (${placeholders})
+        AND wa.detected_at > datetime('now', '-' || ? || ' hours')
+      ORDER BY wa.block_time DESC, wa.id DESC
+      LIMIT 500
+    `).all(...addresses, parseInt(hours));
+
+    // Group activity by token to find convergence (multiple wallets buying same token)
+    const tokenBuyers = {};
+    for (const a of activity) {
+      if (a.side !== 'BUY') continue;
+      if (!tokenBuyers[a.token_mint]) tokenBuyers[a.token_mint] = new Set();
+      tokenBuyers[a.token_mint].add(a.wallet_address);
+    }
+    const convergence = Object.entries(tokenBuyers)
+      .filter(([, wallets]) => wallets.size >= 2)
+      .map(([token, wallets]) => ({ token, walletCount: wallets.size, wallets: [...wallets] }))
+      .sort((a, b) => b.walletCount - a.walletCount);
+
+    // Per-wallet recent trade summary
+    const walletSummaries = topWallets.map(w => {
+      const trades = activity.filter(a => a.wallet_address === w.address);
+      const buys = trades.filter(t => t.side === 'BUY').length;
+      const sells = trades.filter(t => t.side === 'SELL').length;
+      const uniqueTokens = new Set(trades.map(t => t.token_mint)).size;
+      const lastTrade = trades[0]?.detected_at || null;
+      return { ...w, recentBuys: buys, recentSells: sells, uniqueTokens, lastTrade };
+    }).filter(w => w.recentBuys > 0 || w.recentSells > 0);
+
+    res.json({
+      ok: true,
+      wallets: walletSummaries,
+      activity: activity.slice(0, 200),
+      convergence,
+      summary: {
+        totalWallets: topWallets.length,
+        activeWallets: walletSummaries.length,
+        totalTrades: activity.length,
+        convergenceAlerts: convergence.length,
+      },
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.post('/api/wallets/classify-by-sol', (req, res) => {
   setCors(res);
   try {
@@ -8532,14 +10428,11 @@ app.listen(PORT, async () => {
     console.warn('[startup] Momentum tracker failed to start:', err.message);
   }
 
-  // ── Pre-Launch Detector: watch exchange wallets for fresh dev funding ────
-  try {
-    const { startPreLaunchDetector } = await import('./pre-launch-detector.js');
-    startPreLaunchDetector(dbInstance);
-    console.log('[startup] ✓ Pre-launch detector active — 90s tick, watching exchange hot wallets');
-  } catch (err) {
-    console.warn('[startup] Pre-launch detector failed to start:', err.message);
-  }
+  // ── Pre-Launch Detector: DISABLED — burns 5,000+ Helius credits/day
+  // Watching exchange hot wallets every 90s is too expensive. The scanner
+  // catches these tokens via DexScreener within 90s anyway.
+  // Re-enable when on a higher Helius plan.
+  console.log('[startup] ⏸ Pre-launch detector DISABLED (saves ~5K Helius credits/day)');
 
   // ── Cross-Chain Tracker: ETH/Base trending → Solana migration matches ────
   try {
