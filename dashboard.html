@@ -2299,6 +2299,15 @@ body::before {
   padding: 4px 10px;
   font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 1px;
   cursor: pointer; transition: all 0.15s;
+  white-space: nowrap;
+  min-height: 32px;  /* touch-target */
+  min-width: 56px;
+}
+/* Mobile: stack title above tabs, let tabs wrap into two rows, bigger touch */
+@media(max-width:720px){
+  .rs-header { flex-direction:column; align-items:stretch; gap:8px; }
+  .rs-tab-row { justify-content:space-between; gap:6px; }
+  .rs-tab { flex:1; padding:8px 6px; font-size:9px; min-width:0; }
 }
 .rs-tab:hover { color: var(--text1); border-color: rgba(255,255,255,0.18); }
 .rs-tab.active {
@@ -2312,7 +2321,8 @@ body::before {
   margin-bottom: 12px;
 }
 @media(max-width:1100px){ .rs-grid { grid-template-columns: repeat(4, 1fr); } }
-@media(max-width:600px) { .rs-grid { grid-template-columns: repeat(2, 1fr); } }
+@media(max-width:720px) { .rs-grid { grid-template-columns: repeat(3, 1fr); gap:5px; } }
+@media(max-width:440px) { .rs-grid { grid-template-columns: repeat(2, 1fr); } }
 .rs-tile {
   background: rgba(0,0,0,0.45);
   border: 1px solid rgba(255,255,255,0.06);
@@ -2320,10 +2330,13 @@ body::before {
   border-radius: 6px;
   padding: 8px 6px 6px 8px;
   position: relative;
+  min-width: 0;         /* allow shrink inside grid cells on small screens */
+  overflow: hidden;
 }
-.rs-lbl { font-family: var(--mono); font-size: 7px; color: var(--text3); letter-spacing: 1px; margin-bottom: 4px; }
+.rs-lbl { font-family: var(--mono); font-size: 7px; color: var(--text3); letter-spacing: 1px; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rs-val { font-family: 'Orbitron', var(--mono), monospace; font-size: 20px; font-weight: 900; line-height: 1; color: var(--rs-col); text-shadow: 0 0 6px color-mix(in srgb, var(--rs-col) 40%, transparent); }
-.rs-sub { font-family: var(--mono); font-size: 6px; color: var(--text3); letter-spacing: 0.5px; margin-top: 3px; opacity: 0.7; }
+.rs-sub { font-family: var(--mono); font-size: 6px; color: var(--text3); letter-spacing: 0.5px; margin-top: 3px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media(max-width:440px){ .rs-val { font-size: 16px; } }
 
 .rs-totals { padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); }
 .rs-totals-title { font-family: var(--mono); font-size: 8px; font-weight: 700; color: var(--text3); letter-spacing: 2px; margin-bottom: 8px; }
