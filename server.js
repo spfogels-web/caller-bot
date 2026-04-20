@@ -10425,18 +10425,12 @@ app.listen(PORT, async () => {
         // watching — post a TG notice but do NOT push into processCandidate
         // (no new call to make; we're flagging whale exits for awareness).
         if (kind === 'exit') {
-          console.log(`[smart-money→pipeline] 🚨 WHALE EXIT detected — ${ca.slice(0,8)} exitCluster=${clusterSize}`);
-          logEvent('WARN', 'WHALE_EXIT', `${ca} — ${clusterSize} tracked winners dumping`);
-          try {
-            if (TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID && !AI_CONFIG_OVERRIDES.pausePosting) {
-              await sendTelegramGroupMessage(
-                `🚨 <b>WHALE EXIT WARNING</b>\n` +
-                `${clusterSize} tracked winner wallet${clusterSize > 1 ? 's' : ''} just dumped this coin in the last 10 min.\n\n` +
-                `<code>${ca}</code>\n\n` +
-                `If you're holding, check the chart. This may be the top.`
-              );
-            }
-          } catch (e) { console.warn('[whale-exit] TG send failed:', e.message); }
+          // User disabled the TG notification — too noisy. Still log the
+          // exit to Railway + system_log so wallet_activity keeps the
+          // SELL entry and the oracle can query "did whales exit this?"
+          // on demand, but no channel ping.
+          console.log(`[smart-money→pipeline] 📉 WHALE EXIT detected (silent) — ${ca.slice(0,8)} exitCluster=${clusterSize}`);
+          logEvent('WARN', 'WHALE_EXIT_SILENT', `${ca} — ${clusterSize} tracked winners dumping (TG alert disabled)`);
           return;
         }
         console.log(`[smart-money→pipeline] $${ca.slice(0,8)} kind=${kind} cluster=${clusterSize} — pushing into processCandidate`);
