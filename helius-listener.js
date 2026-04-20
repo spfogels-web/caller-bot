@@ -752,8 +752,9 @@ export async function getTokenMetadata(mint, apiKey) {
  */
 export async function getTopHolders(mint, apiKey, limit = 20) {
   try {
+    // Use free Solana public RPC — saves Helius credits
     const res = await fetch(
-      `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
+      SOLANA_PUBLIC_RPC,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -762,7 +763,7 @@ export async function getTopHolders(mint, apiKey, limit = 20) {
           method: 'getTokenLargestAccounts',
           params: [mint],
         }),
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.timeout(8_000),
       }
     );
     if (!res.ok) return [];
