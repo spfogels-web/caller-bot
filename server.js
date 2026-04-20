@@ -7643,7 +7643,7 @@ app.post('/api/seed/scan', async (req, res) => {
         // 1. Fetch holder addresses via Helius
         let holders = [];
         try {
-          holders = await getTopHolders(ca, 100) ?? [];
+          holders = await getTopHolders(ca, HELIUS_API_KEY, 100) ?? [];
           console.log(`[seed] Helius holders: ${holders.length}`);
         } catch (err) {
           console.warn(`[seed] Helius failed: ${err.message}`);
