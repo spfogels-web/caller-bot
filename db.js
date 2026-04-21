@@ -627,6 +627,11 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_consensus_disagreements_at ON consensus_disagreements(logged_at DESC)`,
     `DELETE FROM consensus_disagreements WHERE logged_at < datetime('now', '-30 days')`,
 
+    // Confidence meter columns — 0-100% meta-score + label + per-dimension breakdown
+    `ALTER TABLE candidates ADD COLUMN confidence INTEGER`,
+    `ALTER TABLE candidates ADD COLUMN confidence_label TEXT`,
+    `ALTER TABLE candidates ADD COLUMN confidence_breakdown TEXT`,
+
     // Config-change audit log — every POST /api/config/* writes one row.
     // Captures category (SCORING/DISCOVERY/WALLETS/PRELAUNCH/OUTCOMES/AI),
     // source (operator/agent/telegram/api), knob_key, old_value, new_value,

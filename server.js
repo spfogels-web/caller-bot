@@ -1595,6 +1595,104 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   return 'IGNORE';
 }
 
+// ─── Confidence Meter ────────────────────────────────────────────────
+// A 0-100% meta-score that reflects how confident the bot is in its own
+// decision. Separate from the composite quality score — this tells you
+// how reliable the data + signals were, not how good the coin is.
+//
+// A coin can be high-quality but low-confidence (missing Helius data,
+// very young, ambiguous score), and a coin can be low-quality but
+// high-confidence (everything filled out, clearly a pass). The meter
+// helps you decide whether to trust the bot's call.
+//
+// Inputs weighted to 100:
+//   Data completeness (30)   — 5 enrichment sources all reported
+//   Score clarity (25)       — score is decisive, not borderline
+//   AI agreement (20)        — Claude + scorer aligned
+//   Structure quality (15)   — all 5 foundation signals have values
+//   Penalty cleanliness (10) — no big uncapped penalties firing
+//
+// Label bands: 80+ ELITE, 65-79 HIGH, 50-64 MEDIUM, 35-49 LOW, <35 VERY_LOW
+function computeConfidence(candidate, scoreResult, verdict) {
+  const c = candidate || {};
+  const s = scoreResult || {};
+  const v = verdict || {};
+  const breakdown = {};
+
+  // 1. Data completeness (0-30)
+  let data = 0;
+  if (c.birdeyeOk)                       data += 8;
+  if (c.heliusOk)                        data += 8;
+  if (v.decision || c.claudeDecision)    data += 6;
+  if (c.lunarCrushOk)                    data += 4;
+  if (c.bubblemapOk)                     data += 4;
+  breakdown.dataCompleteness = data;
+
+  // 2. Score clarity (0-25) — how decisive vs borderline
+  let clarity = 0;
+  const score = s.score ?? 0;
+  if      (score >= 75)  clarity = 25;  // clear winner
+  else if (score >= 62)  clarity = 20;
+  else if (score >= 52)  clarity = 14;
+  else if (score <= 38)  clarity = 22;  // clear IGNORE = also decisive
+  else if (score <= 44)  clarity = 18;
+  else                   clarity = 8;   // 45-51 is the wishy-washy zone
+  // Penalty: score was pinned by the NO_SIGNAL cap (we don't know true ceiling)
+  if (s.penalties?.wallet?.some?.(p => String(p).includes('NO_ALPHA_SIGNAL'))) clarity = Math.max(0, clarity - 6);
+  breakdown.scoreClarity = clarity;
+
+  // 3. AI agreement (0-20) — Claude's decision vs scorer's direction
+  let agreement = 0;
+  const claudeYes = v.decision === 'AUTO_POST' || v.decision === 'POST';
+  const claudeNo  = v.decision === 'IGNORE'    || v.decision === 'BLOCKLIST';
+  const scorerYes = score >= (SCORING_CONFIG.minScoreToPost ?? 45);
+  if      (v.decision == null)               agreement = 8;  // Claude didn't run — neutral
+  else if (claudeYes && scorerYes)           agreement = 20; // full agreement to post
+  else if (claudeNo  && !scorerYes)          agreement = 18; // full agreement to skip
+  else if (claudeYes && !scorerYes)          agreement = 10; // Claude disagrees, coins often run on this
+  else if (claudeNo  && scorerYes)           agreement = 6;  // Claude saw something scorer missed
+  else                                       agreement = 10; // WATCHLIST / RETEST / uncertain
+  breakdown.aiAgreement = agreement;
+
+  // 4. Structure quality (0-15) — all 5 foundation signals have values
+  const dp = s.dualParts || {};
+  const signalsPresent = [
+    dp.volumeVelocity,
+    dp.buyPressure,
+    dp.walletQuality,
+    dp.holderDistribution,
+    dp.liquidityHealth,
+  ].filter(x => x != null && x > 0).length;
+  const structure = Math.round((signalsPresent / 5) * 15);
+  breakdown.structureQuality = structure;
+
+  // 5. Penalty cleanliness (0-10) — no big penalties firing
+  const allPenalties = [
+    ...(s.penalties?.launch  ?? []),
+    ...(s.penalties?.wallet  ?? []),
+    ...(s.penalties?.market  ?? []),
+    ...(s.penalties?.social  ?? []),
+  ];
+  let cleanliness;
+  if      (allPenalties.length === 0) cleanliness = 10;
+  else if (allPenalties.length <= 2)  cleanliness = 6;
+  else if (allPenalties.length <= 4)  cleanliness = 3;
+  else                                cleanliness = 0;
+  // Extra hit for severe penalties (anything with -10 or more in the text)
+  if (allPenalties.some(p => /\-\s*1[5-9]|\-\s*[2-9]\d/.test(String(p)))) cleanliness = Math.max(0, cleanliness - 3);
+  breakdown.penaltyCleanliness = cleanliness;
+
+  const total = data + clarity + agreement + structure + cleanliness;
+  const pct   = Math.max(0, Math.min(100, total));
+  const label = pct >= 80 ? 'ELITE'
+              : pct >= 65 ? 'HIGH'
+              : pct >= 50 ? 'MEDIUM'
+              : pct >= 35 ? 'LOW'
+              :             'VERY_LOW';
+
+  return { pct, label, breakdown };
+}
+
 // ─── 10-criteria compensate-pass scorer ───────────────────────────────
 // Each criterion is a binary 0/1. Coin passes if it scores 7+ overall.
 // Cleanly bypasses the "one bad dimension kills it" problem.
@@ -2203,7 +2301,8 @@ function buildCallAlertCaption(candidate, verdict, scoreResult) {
     `├ 🔒 Mint:${mintOk} Freeze:${freezeOk} LP:${lpOk} · Top10: <b>${top10}</b> · Dev: <b>${devPct}</b> · Holders: <b>${holders}</b>\n` +
     `├ 👤 Dev: ${devRap}\n` +
     `├ 🧠 Score: <b>${score}/100</b> · Risk: <b>${risk}</b> · Setup: <b>${setup_type}</b>\n` +
-    `└ 🎯 Structure: <b>${grade}</b>\n` +
+    (scoreResult?.confidence ? `├ 🎯 Confidence: <b>${Math.round(scoreResult.confidence.pct)}%</b> · <b>${scoreResult.confidence.label}</b>\n` : '') +
+    `└ 🏛 Structure: <b>${grade}</b>\n` +
     (vSnip ? `\n💬 <i>${escapeHtml(vSnip)}</i>\n` : '') +
     `\n🔗 ${linkParts.join(' · ')}`
   );
@@ -3517,6 +3616,13 @@ async function processCandidate(candidate, isRescan = false) {
     enrichedCandidate.stealthBonus    = scoreResult.stealthBonus    ?? 0;
     enrichedCandidate.trapConfidencePenalty = scoreResult.trapDetector?.confidencePenalty ?? 0;
 
+    // Confidence meter — 0-100% meta-score + label (ELITE/HIGH/MEDIUM/LOW/VERY_LOW)
+    const confidence = computeConfidence(enrichedCandidate, scoreResult, verdict);
+    scoreResult.confidence       = confidence;
+    enrichedCandidate.confidence = confidence.pct;
+    enrichedCandidate.confidenceLabel    = confidence.label;
+    enrichedCandidate.confidenceBreakdown = JSON.stringify(confidence.breakdown);
+
     const candidateId = insertCandidate({
       ...enrichedCandidate,
       compositeScore:      scoreResult.score,
@@ -3573,6 +3679,18 @@ async function processCandidate(candidate, isRescan = false) {
         scoreResult.discoveryScore ?? null,
         scoreResult.modelUsed ?? null,
         candidateId);
+    } catch {}
+
+    // Persist confidence meter values (0-100 % + label + breakdown JSON)
+    try {
+      dbInstance.prepare(
+        `UPDATE candidates SET confidence=?, confidence_label=?, confidence_breakdown=? WHERE id=?`
+      ).run(
+        scoreResult.confidence?.pct   ?? null,
+        scoreResult.confidence?.label ?? null,
+        scoreResult.confidence?.breakdown ? JSON.stringify(scoreResult.confidence.breakdown) : null,
+        candidateId
+      );
     } catch {}
 
     // Write to our own sub-scores table — guaranteed schema we control

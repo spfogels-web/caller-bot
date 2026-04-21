@@ -6624,6 +6624,17 @@ function renderAuditList(){
       }catch(ex){}
     }
 
+    // Confidence badge — tiny 0-100% indicator under the score
+    var confVal = r.confidence != null ? Math.round(Number(r.confidence)) : null;
+    var confCol = confVal >= 80 ? 'var(--green)'
+                : confVal >= 65 ? 'var(--cyan)'
+                : confVal >= 50 ? 'var(--gold)'
+                : confVal >= 35 ? 'var(--orange)'
+                : confVal != null ? 'var(--red)' : 'var(--text3)';
+    var confBadge = confVal != null
+      ? '<div style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:3px;background:'+confCol+'14;border:1px solid '+confCol+'44;color:'+confCol+';margin-top:2px;letter-spacing:0.5px" title="Bot confidence in this call (data completeness + score clarity + AI agreement + structure + penalties)">🎯 '+confVal+'%</div>'
+      : '';
+
     // Score block — show ⏳ SCORING badge (clickable to trigger) for unscored rows
     var scoreBlock = isScoring
       ? '<div class="score-pending" data-ca="'+esc(r.contractAddress||'')+'" style="text-align:right;flex-shrink:0">'+
@@ -6632,6 +6643,7 @@ function renderAuditList(){
       : '<div style="text-align:right;flex-shrink:0">'+
           '<div class="coin-score-big" style="color:'+sCol+';text-shadow:0 0 10px '+sCol+'44">'+displayScore+'</div>'+
           '<div style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:'+decCol2+'18;border:1px solid '+decCol2+'44;color:'+decCol2+';margin-top:3px">'+esc(dec)+'</div>'+
+          confBadge+
         '</div>';
 
     // Avatar fallback — use initial letter in a colored circle when image fails
@@ -7291,6 +7303,52 @@ function buildAuditDetail(c){
       <code style="font-family:var(--mono);font-size:8px;color:var(--text3);flex:1;word-break:break-all">${ca}</code>
       <button onclick="copyCA('${ca}')" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:3px;padding:4px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;white-space:nowrap;flex-shrink:0">📋 COPY</button>
     </div>`:''}
+
+    <!-- ═══ CONFIDENCE METER — 0-100% bot confidence in this call ═══ -->
+    ${(()=>{
+      const cf = c.confidence;
+      if (cf == null) return '';
+      const label = c.confidenceLabel || c.confidence_label || '—';
+      const pct = Math.max(0, Math.min(100, Number(cf)));
+      const col = pct >= 80 ? 'var(--green)'
+                : pct >= 65 ? 'var(--cyan)'
+                : pct >= 50 ? 'var(--gold)'
+                : pct >= 35 ? 'var(--orange)'
+                :             'var(--red)';
+      const bd = (()=>{
+        const raw = c.confidenceBreakdown || c.confidence_breakdown;
+        if (!raw) return null;
+        if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return null; } }
+        return raw;
+      })();
+      const bdRow = (label, val, max) => `
+        <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px">
+          <span>${label}</span>
+          <span style="color:${val >= max*0.8 ? 'var(--green)' : val >= max*0.5 ? 'var(--gold)' : 'var(--text3)'}">${val ?? 0}/${max}</span>
+        </div>`;
+      return `<div style="background:linear-gradient(135deg,${col}10,rgba(0,0,0,0.3));border:1px solid ${col}44;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+          <div>
+            <div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:2px;margin-bottom:3px">🎯 BOT CONFIDENCE</div>
+            <div style="font-family:'Orbitron',var(--mono);font-size:26px;font-weight:900;color:${col};letter-spacing:1px;line-height:1">${Math.round(pct)}<span style="font-size:14px;font-weight:700;opacity:0.7">%</span></div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-bottom:3px">TIER</div>
+            <div style="font-family:var(--mono);font-size:12px;font-weight:900;color:${col};letter-spacing:1px">${label}</div>
+          </div>
+        </div>
+        <div style="height:10px;background:rgba(0,0,0,0.3);border-radius:5px;overflow:hidden;margin-bottom:10px">
+          <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,${col}aa,${col});border-radius:5px;transition:width 0.4s"></div>
+        </div>
+        ${bd ? `<div style="padding-top:8px;border-top:1px dashed rgba(255,255,255,0.06)">
+          ${bdRow('📡 Data completeness',   bd.dataCompleteness,   30)}
+          ${bdRow('🎯 Score clarity',       bd.scoreClarity,       25)}
+          ${bdRow('🤝 AI agreement',        bd.aiAgreement,        20)}
+          ${bdRow('🏗 Structure quality',   bd.structureQuality,   15)}
+          ${bdRow('🧹 Penalty cleanliness', bd.penaltyCleanliness, 10)}
+        </div>` : ''}
+      </div>`;
+    })()}
 
     <!-- WHY card moved below foundation signals so Claude's AI VERDICT
          card (rendered above, right after timestamps) keeps the prime
