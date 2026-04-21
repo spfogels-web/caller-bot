@@ -753,9 +753,12 @@ export async function getTokenMetadata(mint, apiKey) {
 export async function getTopHolders(mint, apiKey, limit = 20) {
   let holders = [];
 
-  // 1. Free Solana RPC — getTokenLargestAccounts (max 20, free)
+  // 1. getTokenLargestAccounts via Helius (was public RPC — 20% error rate
+  //    there was corrupting holder data on ~150 tokens/day). Helius charges
+  //    ~1 credit per call, trivial vs. the budget impact.
+  const rpcUrl = apiKey ? `https://mainnet.helius-rpc.com/?api-key=${apiKey}` : SOLANA_PUBLIC_RPC;
   try {
-    const res = await fetch(SOLANA_PUBLIC_RPC, {
+    const res = await fetch(rpcUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenLargestAccounts', params: [mint] }),

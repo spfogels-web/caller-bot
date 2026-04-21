@@ -164,11 +164,15 @@ async function safeFetch(url, options = {}, label = 'fetch', timeoutMs = 12_000)
   }
 }
 
-// Basic RPC methods that can use the FREE Solana public RPC (saves Helius credits)
-const FREE_RPC_METHODS = new Set(['getAccountInfo', 'getTokenSupply', 'getTokenLargestAccounts', 'getMultipleAccounts']);
+// Previously we routed these 4 methods to api.mainnet-beta.solana.com to
+// save Helius credits. That endpoint is aggressively rate-limited and was
+// failing ~20% of calls, leaving enrichment with holes (missing holders,
+// top10, owner info) that silently hurt scoring. Re-route everything to
+// Helius RPC — the cost is ~750 credits/day (<0.3% of budget) vs. ~150
+// corrupted enrichments/day we were running on.
+const FREE_RPC_METHODS = new Set(); // kept for backwards compat; empty now
 
 async function heliusRpc(method, params, label = 'rpc') {
-  // Use free Solana public RPC for basic calls — saves Helius credits
   const useFreeRpc = FREE_RPC_METHODS.has(method);
   const url = useFreeRpc ? SOLANA_PUBLIC_RPC : getHeliusRpc();
 
