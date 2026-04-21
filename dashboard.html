@@ -7288,12 +7288,18 @@ function buildAuditDetail(c){
       <button onclick="copyCA('${ca}')" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:3px;padding:4px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;white-space:nowrap;flex-shrink:0">📋 COPY</button>
     </div>`:''}
 
-    <!-- ═══ WHY THIS DECISION — plain-English audit of why coin was/wasn't posted ═══ -->
+    <!-- WHY card moved below foundation signals so Claude's AI VERDICT
+         card (rendered above, right after timestamps) keeps the prime
+         top-of-panel slot. See _auditWhyCard(c) block below. -->
+
+    <!-- ═══ 5 FOUNDATION SIGNALS — new scoring engine ═══ -->
+    ${renderFoundationSignals(c)}
+
+    <!-- ═══ WHY THIS DECISION — scoring breakdown, data readiness, penalties ═══ -->
     ${(()=>{
       const decision = c.finalDecision || 'PENDING';
       const ignoreReason = c.ignore_reason || c.ignoreReason;
       const postReason   = c.post_reason || c.postReason;
-      const claudeReason = c.claudeVerdict || c.claude_verdict;
       const topPenalties = [];
       const p = c.penalties;
       if (p) {
@@ -7316,9 +7322,8 @@ function buildAuditDetail(c){
       return `<div style="background:linear-gradient(135deg,${decCol}08,rgba(0,0,0,0.3));border:1px solid ${decCol}33;border-radius:8px;padding:12px 14px;margin-bottom:12px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span style="font-size:14px">${decEmoji}</span>
-          <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:${decCol};letter-spacing:1px">WHY ${decision}</span>
+          <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:${decCol};letter-spacing:1px">WHY ${decision} — SCORING BREAKDOWN</span>
         </div>
-        ${claudeReason ? `<div style="font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.5;margin-bottom:8px;font-style:italic">"${esc(claudeReason.slice(0,280))}${claudeReason.length>280?'…':''}"</div>` : ''}
         ${(ignoreReason || postReason) ? `<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:6px">↳ ${esc(ignoreReason || postReason)}</div>` : ''}
         ${topPenalties.length ? `<div style="margin-bottom:8px">
           <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-bottom:4px">TOP PENALTIES:</div>
@@ -7329,14 +7334,6 @@ function buildAuditDetail(c){
         </div>
       </div>`;
     })()}
-
-    <!-- Chart iframe removed — the DEX / PUMP / BIRD buttons at the top
-         already open the full chart in one click, and pump.fun pre-bond
-         coins don't have a DexScreener pair yet (stuck on "Loading pair…"
-         indefinitely). The top buttons are faster and always work. -->
-
-    <!-- ═══ 5 FOUNDATION SIGNALS — new scoring engine ═══ -->
-    ${renderFoundationSignals(c)}
 
     <!-- ═══ 4 CORE SUB-SCORES (legacy dimensions — retained for reference) ═══ -->
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden">
