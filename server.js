@@ -150,26 +150,7 @@ globalThis.fetch = async function(url, options) {
   }
 };
 
-app.get('/api/usage', (req, res) => {
-  setCors(res);
-  const uptime = Date.now() - new Date(_apiUsageStartedAt).getTime();
-  const hours = uptime / 3_600_000;
-  const usage = {};
-  for (const [svc, data] of Object.entries(_apiUsage)) {
-    const calls = data.calls || data.events || 0;
-    usage[svc] = {
-      ...data,
-      callsPerHour: hours > 0 ? Math.round(calls / hours) : 0,
-      projectedDaily: hours > 0 ? Math.round((calls / hours) * 24) : 0,
-    };
-  }
-  res.json({
-    ok: true,
-    startedAt: _apiUsageStartedAt,
-    uptimeSeconds: Math.round(uptime / 1000),
-    usage,
-  });
-});
+// /api/usage endpoint registered after app initialization (see below)
 
 const BANNER_IMAGE_URL = process.env.BANNER_IMAGE_URL
   ?? 'https://raw.githubusercontent.com/spfogles-web/caller-bot/main/banner.png';
@@ -3823,6 +3804,28 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
+
+// API Usage tracking endpoint
+app.get('/api/usage', (req, res) => {
+  setCors(res);
+  const uptime = Date.now() - new Date(_apiUsageStartedAt).getTime();
+  const hours = uptime / 3_600_000;
+  const usage = {};
+  for (const [svc, data] of Object.entries(_apiUsage)) {
+    const calls = data.calls || data.events || 0;
+    usage[svc] = {
+      ...data,
+      callsPerHour: hours > 0 ? Math.round(calls / hours) : 0,
+      projectedDaily: hours > 0 ? Math.round((calls / hours) * 24) : 0,
+    };
+  }
+  res.json({
+    ok: true,
+    startedAt: _apiUsageStartedAt,
+    uptimeSeconds: Math.round(uptime / 1000),
+    usage,
+  });
+});
 
 app.options('*', (req, res) => { setCors(res); res.sendStatus(204); });
 
