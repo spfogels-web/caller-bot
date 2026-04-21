@@ -155,13 +155,13 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   if (bv == null) {
     p = Math.round(maxVV * 0.20);
     risks.push('Volume velocity unknown — very early');
-  } else if (bv >= 1.0)  { p = maxVV;                    reasons.push(`Explosive velocity (${bv.toFixed(2)}/min) — STRONG BUY SIGNAL`); }
-  else if (bv >= 0.7)    { p = Math.round(maxVV * 0.90);  reasons.push(`Very strong velocity (${bv.toFixed(2)}/min)`); }
-  else if (bv >= 0.5)    { p = Math.round(maxVV * 0.78);  reasons.push(`Strong buy velocity (${bv.toFixed(2)}/min)`); }
-  else if (bv >= 0.3)    { p = Math.round(maxVV * 0.60);  reasons.push(`Healthy buy velocity (${bv.toFixed(2)}/min)`); }
-  else if (bv >= 0.15)   { p = Math.round(maxVV * 0.40);  reasons.push(`Modest velocity (${bv.toFixed(2)}/min)`); }
-  else if (bv >= 0.05)   { p = Math.round(maxVV * 0.20);  risks.push(`Weak velocity (${bv.toFixed(2)}/min)`); }
-  else                   { p = 0;                         risks.push('Flat/dead volume — no acceleration'); }
+  } else if (bv >= 12)   { p = 35;                        reasons.push(`EXPLOSIVE velocity (${bv.toFixed(1)} buys/min) — STRONG BUY SIGNAL`); }
+  else if (bv >= 8)      { p = 32;                        reasons.push(`Very strong velocity (${bv.toFixed(1)} buys/min)`); }
+  else if (bv >= 5)      { p = 28;                        reasons.push(`Strong velocity (${bv.toFixed(1)} buys/min)`); }
+  else if (bv >= 3)      { p = 22;                        reasons.push(`Healthy velocity (${bv.toFixed(1)} buys/min)`); }
+  else if (bv >= 1.5)    { p = 15;                        reasons.push(`Developing velocity (${bv.toFixed(1)} buys/min)`); }
+  else if (bv >= 0.7)    { p = 8;                         risks.push(`Weak velocity (${bv.toFixed(1)} buys/min)`); }
+  else                   { p = 0;                         risks.push(`Dead volume (${bv.toFixed(1)} buys/min) — no momentum`); }
 
   // Acceleration bonus: 5m run-rate exceeding 1h average = momentum building
   if (m.priceChange5m != null && m.priceChange1h != null) {
