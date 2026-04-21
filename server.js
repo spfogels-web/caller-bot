@@ -1156,6 +1156,9 @@ const SCORING_CONFIG_DEFAULTS = {
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
+  earlyMCapDeferMinutes:   3,   // defer AUTO_POST for $6K-$9K coins until N min after first-seen (lets us confirm real momentum); extreme-velocity bypasses
+  earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
+  earlyMCapDeferMax:    9000,   // upper edge of the defer band ($)
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -1170,6 +1173,25 @@ function persistScoringConfig() {
   try {
     dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoring_config', ?)`).run(JSON.stringify(SCORING_CONFIG));
   } catch {}
+}
+
+// ─── Early-MCap defer tracker ─────────────────────────────────────────────
+// When we first see a coin in the $6K-$9K MCap band, record the timestamp.
+// On the next evaluation pass, if less than N minutes have elapsed AND
+// velocity isn't extremely high, we demote to WATCHLIST and wait for the
+// scanner's rescan cycle to re-evaluate. This lets a 3-min hold time
+// confirm sustained momentum vs a one-wick pump-and-dump.
+const _earlyMCapSeen = new Map(); // ca → firstSeenAtMs
+function hasExtremeVelocity(c) {
+  // Any ONE of these is "from the beginning extremely high":
+  //   - 5m price +25%+ (sustained pump)
+  //   - 1h buy count >= 30 (real buying interest)
+  //   - volume velocity >= 2 (1h vol is 2x the 6h per-hour average)
+  //   - explicit smart-money signal (cluster/KOL — already bypasses elsewhere)
+  if ((c.priceChange5m ?? 0) >= 25) return true;
+  if ((c.buys1h ?? 0) >= 30)        return true;
+  if ((c.volumeVelocity ?? 0) >= 2) return true;
+  return false;
 }
 
 // ─── Additional runtime configs (persisted to kv_store) ──────────────────────
@@ -3337,6 +3359,44 @@ async function processCandidate(candidate, isRescan = false) {
       logEvent('INFO', 'LIQUIDITY_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} liq=$${Math.round(liqNow)} < $${minLiq} → WATCHLIST`);
       console.log(`[auto-caller] 💧 $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — liquidity $${Math.round(liqNow)} below floor $${minLiq} (can't sustain a 2.5x run)`);
       finalDecision = 'WATCHLIST';
+    }
+
+    // ── EARLY-MCAP DEFER: $6K-$9K coins wait N min to confirm momentum ──
+    // User's rule: for coins first seen in the $6-$9K band, hold the post
+    // for 3 minutes and re-evaluate on the next scan cycle. UNLESS velocity
+    // is extreme from the start (big 5m pump / sustained buys / accelerating
+    // volume) — then it's clearly organic and posts immediately.
+    // Cluster / KOL alerts also bypass — their conviction trumps the wait.
+    if (finalDecision === 'AUTO_POST' && !bypassRugGuard) {
+      const mcapForDefer  = enrichedCandidate.marketCap ?? 0;
+      const deferMin      = SCORING_CONFIG.earlyMCapDeferMin ?? 6000;
+      const deferMax      = SCORING_CONFIG.earlyMCapDeferMax ?? 9000;
+      const deferMinutes  = SCORING_CONFIG.earlyMCapDeferMinutes ?? 3;
+      const inBand        = mcapForDefer >= deferMin && mcapForDefer <= deferMax;
+      if (inBand) {
+        const extreme = hasExtremeVelocity(enrichedCandidate);
+        if (extreme) {
+          logEvent('INFO', 'EARLY_MCAP_EXTREME', `${enrichedCandidate.token ?? ca.slice(0,6)} $${Math.round(mcapForDefer/1000)}K in defer band but extreme velocity — posting immediately`);
+        } else {
+          const firstSeen = _earlyMCapSeen.get(ca);
+          if (!firstSeen) {
+            _earlyMCapSeen.set(ca, Date.now());
+            logEvent('INFO', 'EARLY_MCAP_DEFER', `${enrichedCandidate.token ?? ca.slice(0,6)} $${Math.round(mcapForDefer/1000)}K — first sighting, deferring ${deferMinutes}min to confirm momentum`);
+            console.log(`[auto-caller] ⏱  $${enrichedCandidate.token ?? ca.slice(0,6)} $${Math.round(mcapForDefer/1000)}K — first seen in $${deferMin/1000}-${deferMax/1000}K band, deferring ${deferMinutes}min (velocity not extreme)`);
+            finalDecision = 'WATCHLIST';
+          } else {
+            const elapsedMin = (Date.now() - firstSeen) / 60_000;
+            if (elapsedMin < deferMinutes) {
+              logEvent('INFO', 'EARLY_MCAP_DEFER', `${enrichedCandidate.token ?? ca.slice(0,6)} still within ${deferMinutes}min hold window (${elapsedMin.toFixed(1)}min elapsed) → WATCHLIST`);
+              finalDecision = 'WATCHLIST';
+            } else {
+              // Hold expired — allow the post. Cleanup so the tracker doesn't bloat.
+              _earlyMCapSeen.delete(ca);
+              logEvent('INFO', 'EARLY_MCAP_CLEAR', `${enrichedCandidate.token ?? ca.slice(0,6)} ${elapsedMin.toFixed(1)}min after first sighting — hold expired, post allowed`);
+            }
+          }
+        }
+      }
     }
 
     // Attach scoreResult breakdown directly to enrichedCandidate

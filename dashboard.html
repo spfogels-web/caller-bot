@@ -5452,6 +5452,9 @@ const _CS_KNOBS = {
       { key:'winPeakMultiple',        label:'WIN PEAK MULTIPLE',      desc:'Peak multiple needed to log a call as WIN. Current target: 2.5× (consistent winners that circulate, 10× is aspiration). The bot learning loop optimizes toward whatever this is — set it to what you actually want to hunt.',      impact:'higher = harder to earn WIN · lower = more "cheap" wins' },
       { key:'neutralDrawdownPct',     label:'NEUTRAL DRAWDOWN %',     desc:'Max drawdown at 6h still considered NEUTRAL (not LOSS). Above this → LOSS.',                impact:'higher = more tolerance before LOSS' },
       { key:'minLiquidityForPost',    label:'MIN LIQUIDITY ($)',      desc:'Minimum pool liquidity in USD for AUTO_POST. Thin-liq coins pump 30-70% on tiny volume then instantly dump — unsustainable for 2.5×+ runs. Cluster/KOL alerts bypass this floor.', impact:'higher = fewer rug-prone posts' },
+      { key:'earlyMCapDeferMinutes',  label:'EARLY-MCAP DEFER (min)', desc:'For coins first seen in the $6K-$9K band, wait this many minutes before posting (to confirm sustained momentum). Extreme velocity (5m ≥+25%, buys1h ≥30, or vol accel ≥2x) bypasses the wait. Cluster/KOL always bypass.', impact:'higher = tighter filter, fewer early pump-and-dumps' },
+      { key:'earlyMCapDeferMin',      label:'DEFER BAND LOW ($)',     desc:'Lower edge of the defer band in USD MCap. Default $6K.',  impact:'raising widens the defer zone' },
+      { key:'earlyMCapDeferMax',      label:'DEFER BAND HIGH ($)',    desc:'Upper edge of the defer band in USD MCap. Default $9K.',  impact:'raising widens the defer zone' },
     ],
   },
   scanner: {
