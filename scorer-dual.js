@@ -44,6 +44,40 @@ export const RUNNER_WEIGHTS = {
 export const DISCOVERY_THRESHOLDS = { alert: 75, watchlist: 65, monitor: 55 };
 export const RUNNER_THRESHOLDS    = { alert: 80, watchlist: 70, monitor: 60 };
 
+// ── Late-pump penalty config (tunable via setLatePumpConfig) ────────────────
+// Softened defaults — the old -25/-40 penalty was murdering legitimate early
+// runners (pre-bond pump.fun coins doing 300%+ on a $10K → $30K leg still
+// have room). New coins under ageExemptHours are exempt entirely: "late" is
+// not a meaningful concept for a 15-minute-old token.
+let _latePumpConfig = {
+  p1hSevereThreshold: 500, p1hSeverePenalty: 15,
+  p1hThreshold:       300, p1hPenalty:       10,
+  p24hThreshold:      500, p24hPenalty:       8,
+  ageExemptHours:     0.5,   // <30min old = no late-pump penalty applies
+};
+export function setLatePumpConfig(cfg = {}) {
+  _latePumpConfig = { ..._latePumpConfig, ...cfg };
+}
+export function getLatePumpConfig() { return { ..._latePumpConfig }; }
+
+// Compute penalty using current config, respecting the age exemption.
+function applyLatePumpPenalty(p1h, p24h, ageHours) {
+  const cfg = _latePumpConfig;
+  if (ageHours != null && ageHours < cfg.ageExemptHours) {
+    return { penalty: 0, risk: null, exempt: true };
+  }
+  if (p1h != null && p1h > cfg.p1hSevereThreshold) {
+    return { penalty: cfg.p1hSeverePenalty, risk: `Already pumped +${p1h.toFixed(0)}% 1h — late entry risk` };
+  }
+  if (p1h != null && p1h > cfg.p1hThreshold) {
+    return { penalty: cfg.p1hPenalty, risk: `Up +${p1h.toFixed(0)}% 1h — extended` };
+  }
+  if (p24h != null && p24h > cfg.p24hThreshold) {
+    return { penalty: cfg.p24hPenalty, risk: `Up +${p24h.toFixed(0)}% 24h — extended continuation` };
+  }
+  return { penalty: 0, risk: null };
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────────
 function clamp(v, lo = 0, hi = 100) { return Math.max(lo, Math.min(hi, v)); }
 function safeNum(v, fallback = null) {
@@ -370,14 +404,19 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   parts.liquidityHealth = p;
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // LATE-PUMP PENALTY — final deduction (unchanged)
+  // LATE-PUMP PENALTY — final deduction (tunable via setLatePumpConfig)
+  // Age<30min exempt: "late" doesn't apply to brand-new coins still priced in.
   // ═══════════════════════════════════════════════════════════════════════════
-  const p1h  = m.priceChange1h;
-  const p24h = m.priceChange24h;
-  let latePumpPenalty = 0;
-  if (p1h != null && p1h > 500)        { latePumpPenalty = 40; risks.push(`Already pumped +${p1h.toFixed(0)}% 1h — missed entry`); }
-  else if (p1h != null && p1h > 300)   { latePumpPenalty = 25; risks.push(`Up +${p1h.toFixed(0)}% 1h — late entry risk`); }
-  else if (p24h != null && p24h > 500) { latePumpPenalty = 20; risks.push(`Up +${p24h.toFixed(0)}% 24h — extended`); }
+  const p1h    = m.priceChange1h;
+  const p24h   = m.priceChange24h;
+  const ageHrs = m.pairAgeHours;
+  const lp = applyLatePumpPenalty(p1h, p24h, ageHrs);
+  let latePumpPenalty = lp.penalty;
+  if (lp.exempt && (p1h > _latePumpConfig.p1hThreshold || p24h > _latePumpConfig.p24hThreshold)) {
+    reasons.push(`Early-gem exemption: +${(p1h??p24h).toFixed(0)}% but age<${_latePumpConfig.ageExemptHours*60}min`);
+  } else if (lp.risk) {
+    risks.push(lp.risk);
+  }
   parts.latePumpPenalty = -latePumpPenalty;
 
   // ── DATA CONFIDENCE — how much of this score is based on real data ──────
@@ -511,13 +550,17 @@ export function scoreRunnerCoin(candidate, metricsIn = null) {
   if (p > 0) reasons.push(`${socials} social channel(s) active`);
   parts.attentionSignal = p;
 
-  // 9. Late-pump penalty
+  // 9. Late-pump penalty (shared tunable config with Discovery, age<30min exempt)
   const rp1h  = m.priceChange1h;
   const rp24h = m.priceChange24h;
-  let runnerLatePenalty = 0;
-  if (rp1h != null && rp1h > 500)       { runnerLatePenalty = 40; risks.push(`Already +${rp1h.toFixed(0)}% 1h — parabolic top risk`); }
-  else if (rp1h != null && rp1h > 300)  { runnerLatePenalty = 25; risks.push(`Up +${rp1h.toFixed(0)}% 1h — extended runner`); }
-  else if (rp24h != null && rp24h > 500) { runnerLatePenalty = 20; risks.push(`Up +${rp24h.toFixed(0)}% 24h — late continuation`); }
+  const rAge  = m.pairAgeHours;
+  const lpR   = applyLatePumpPenalty(rp1h, rp24h, rAge);
+  let runnerLatePenalty = lpR.penalty;
+  if (lpR.exempt && (rp1h > _latePumpConfig.p1hThreshold || rp24h > _latePumpConfig.p24hThreshold)) {
+    reasons.push(`Early-runner exemption: +${(rp1h??rp24h).toFixed(0)}% but age<${_latePumpConfig.ageExemptHours*60}min`);
+  } else if (lpR.risk) {
+    risks.push(lpR.risk);
+  }
   parts.latePumpPenalty = -runnerLatePenalty;
 
   const total = Object.values(parts).reduce((a, b) => a + b, 0);

@@ -4877,7 +4877,7 @@ try { dbInstance.exec(`
 const TUNING_DEFAULTS = {
   discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
   thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:85000, sweetSpotMin:8000, sweetSpotMax:40000 },
-  penalties: { latePump1hThreshold:300, latePump1hPenalty:25, latePump1hSevereThreshold:500, latePump1hSeverePenalty:40, latePump24hThreshold:500, latePump24hPenalty:20, winThresholdPct:20, lossThresholdPct:-30 },
+  penalties: { latePump1hThreshold:300, latePump1hPenalty:10, latePump1hSevereThreshold:500, latePump1hSeverePenalty:15, latePump24hThreshold:500, latePump24hPenalty:8, latePumpAgeExemptHours:0.5, winThresholdPct:20, lossThresholdPct:-30 },
 };
 let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
 try {
@@ -4902,7 +4902,31 @@ try {
 
 function saveTuningConfig() {
   try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('tuning_config', ?)`).run(JSON.stringify(TUNING_CONFIG)); } catch {}
+  syncLatePumpConfig(); // keep scorer-dual in sync with tuning.penalties
 }
+
+// Push the late-pump penalty settings from TUNING_CONFIG.penalties into
+// scorer-dual.js so the sub-scorer applies live values. Safe to call
+// repeatedly — no-op if scorer-dual import fails.
+function syncLatePumpConfig() {
+  try {
+    const p = TUNING_CONFIG.penalties || {};
+    import('./scorer-dual.js').then(mod => {
+      if (typeof mod.setLatePumpConfig === 'function') {
+        mod.setLatePumpConfig({
+          p1hSevereThreshold: p.latePump1hSevereThreshold,
+          p1hSeverePenalty:   p.latePump1hSeverePenalty,
+          p1hThreshold:       p.latePump1hThreshold,
+          p1hPenalty:         p.latePump1hPenalty,
+          p24hThreshold:      p.latePump24hThreshold,
+          p24hPenalty:        p.latePump24hPenalty,
+          ageExemptHours:     p.latePumpAgeExemptHours ?? 0.5,
+        });
+      }
+    }).catch(() => {});
+  } catch {}
+}
+syncLatePumpConfig(); // initial sync on boot
 
 // GET current config + audit log
 app.get('/api/tuning/config', (req, res) => {
