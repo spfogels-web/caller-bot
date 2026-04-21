@@ -248,15 +248,24 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   const clusters = m.clusterWalletCount ?? 0;
   const coord = m.coordinationIntensity ?? 0;
 
-  // Winner wallets are the strongest conviction signal
-  if (winners >= 5)       { p = maxWQ;                     reasons.push(`${winners} winner wallets in early — HIGHEST CONVICTION`); }
-  else if (winners >= 3)  { p = Math.round(maxWQ * 0.85);  reasons.push(`${winners} winner wallets — strong conviction signal`); }
-  else if (winners >= 2)  { p = Math.round(maxWQ * 0.70);  reasons.push(`${winners} winner wallets entering`); }
-  else if (winners >= 1)  { p = Math.round(maxWQ * 0.50);  reasons.push(`${winners} winner wallet early`); }
+  // Winner wallets are the strongest conviction signal.
+  // Wallet DB is still growing — adjusted to our actual volume:
+  //   3+ winners = max (rare but strongest signal)
+  //   2 winners = near-max (very strong)
+  //   1 winner = high (meaningful — winner wallets are selective)
+  //   0 winners = fall back to smart money + clean behavior
+  if (winners >= 3)       { p = maxWQ;                     reasons.push(`${winners} winner wallets in early — HIGHEST CONVICTION`); }
+  else if (winners >= 2)  { p = Math.round(maxWQ * 0.90);  reasons.push(`${winners} winner wallets — very strong signal`); }
+  else if (winners >= 1)  { p = Math.round(maxWQ * 0.70);  reasons.push(`${winners} winner wallet early — meaningful signal`); }
   else {
-    // No known winners — fall back to behavioral signals
-    if (clusters === 0 && coord < 0.2)      { p = Math.round(maxWQ * 0.35); reasons.push('Clean wallet behavior — no coordination'); }
-    else if (clusters <= 2)                  { p = Math.round(maxWQ * 0.25); }
+    // No known winners — fall back to smart money + behavioral signals
+    const smartMoney = m.smartMoneyScore ?? 0;
+    const hasSmartMoney = smartMoney >= 30;
+
+    if (hasSmartMoney && clusters === 0)     { p = Math.round(maxWQ * 0.55); reasons.push(`Smart money present (score ${smartMoney}) + clean wallets`); }
+    else if (hasSmartMoney)                  { p = Math.round(maxWQ * 0.40); reasons.push(`Smart money signals (score ${smartMoney})`); }
+    else if (clusters === 0 && coord < 0.2)  { p = Math.round(maxWQ * 0.30); reasons.push('Clean wallet behavior — no coordination'); }
+    else if (clusters <= 2)                  { p = Math.round(maxWQ * 0.20); }
     else if (clusters <= 5)                  { p = Math.round(maxWQ * 0.10); risks.push(`${clusters} cluster wallets — coordination concern`); }
     else                                     { p = 0;                        risks.push(`Heavy coordination: ${clusters} cluster wallets`); }
   }
