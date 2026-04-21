@@ -3455,7 +3455,18 @@ async function processCandidate(candidate, isRescan = false) {
       {
       // Use v8 caption builder that includes OpenAI decision layer
       const caption  = buildV8Caption(enrichedCandidate, verdict, scoreResult, openAIDecision);
-      const coinImg  = enrichedCandidate.imageUrl || enrichedCandidate.headerUrl || null;
+      // Coin image for the call — user wants the coin's own avatar so the
+      // post is visually distinct and confirmable (vs. the generic Pulse
+      // banner reserved for status/startup messages). Fall through:
+      //   1. DexScreener info.imageUrl (when pair metadata present)
+      //   2. DexScreener CDN URL (works for any SPL token with metadata,
+      //      including pump.fun pre-bond — the dashboard already pulls
+      //      from here reliably)
+      // sendCallAlertWithImage handles Telegram rejection gracefully and
+      // falls back to the Pulse banner only if both image sources fail.
+      const caForImg = enrichedCandidate.contractAddress;
+      const coinImg  = enrichedCandidate.imageUrl
+                    || (caForImg ? `https://dd.dexscreener.com/ds-data/tokens/solana/${caForImg}.png` : null);
 
       // Respect pausePosting config override (set via dashboard or /config Telegram command)
       if (AI_CONFIG_OVERRIDES.pausePosting) {
