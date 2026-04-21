@@ -25,7 +25,12 @@ const MAX_PROMOTED_CANDIDATES = Number(process.env.MAX_CANDIDATES      ?? 50);  
 const MAX_TOKENS_TO_FETCH     = Number(process.env.MAX_TOKENS_TO_FETCH ?? 300); // was 200
 const DEX_BATCH_SIZE          = Number(process.env.DEX_BATCH_SIZE      ?? 30);
 
-const RESCAN_SCHEDULE_MINUTES = [1, 3, 7, 15];
+// Extended from 4 to 6 rescans (1, 3, 7, 15, 25, 40 min).
+// Watchlist-band coins (quick score 20-40) often need 20-40 min to either
+// mature into a real run or fade out. Previously we gave up at 15 min and
+// dropped candidates that would've hit AUTO_POST at minute 20-25.
+// DexScreener rescans are free; only cost is memory + time.
+const RESCAN_SCHEDULE_MINUTES = [1, 3, 7, 15, 25, 40];
 const MAX_RESCANS             = RESCAN_SCHEDULE_MINUTES.length;
 
 // v7: Widened net — scan more, let Foundation Signals + Claude filter quality

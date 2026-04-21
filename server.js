@@ -1029,6 +1029,91 @@ function invalidateMemoryCache() {
   _memoryCacheTime = 0;
 }
 
+// ─── Missed-Opportunity Memory ───────────────────────────────────────────
+// Coins we marked IGNORE or WATCHLIST in the last 48h that have since run
+// ≥2x get cached here and injected into Claude's prompt as a "learn from
+// these" block. Self-improvement loop: the more we reject winners, the
+// more examples Claude has to recognize the pattern next time.
+//
+// Refreshed every 30 min via setInterval. Uses same logic as the public
+// /api/candidates/missed endpoint — DexScreener batch lookup, free API.
+const _missedCache = { rows: [], refreshedAt: 0 };
+const MISSED_REFRESH_MS = 30 * 60_000;
+
+async function refreshMissedOpportunities() {
+  try {
+    const cands = dbInstance.prepare(`
+      SELECT contract_address, token, market_cap, evaluated_at, final_decision
+      FROM candidates
+      WHERE final_decision IN ('IGNORE', 'WATCHLIST')
+        AND market_cap > 0
+        AND evaluated_at > datetime('now', '-48 hours')
+      ORDER BY evaluated_at DESC
+      LIMIT 150
+    `).all();
+    if (cands.length === 0) { _missedCache.rows = []; _missedCache.refreshedAt = Date.now(); return; }
+    const caList = cands.map(c => c.contract_address).filter(Boolean);
+    const results = [];
+    const BATCH = 30;
+    for (let i = 0; i < caList.length; i += BATCH) {
+      const batch = caList.slice(i, i + BATCH).join(',');
+      try {
+        const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${batch}`, {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!r.ok) continue;
+        const j = await r.json();
+        const pairs = Array.isArray(j.pairs) ? j.pairs : [];
+        const byCa = {};
+        for (const p of pairs) {
+          const ca = p.baseToken?.address;
+          if (!ca) continue;
+          const mc = p.marketCap ?? p.fdv ?? null;
+          if (mc && (!byCa[ca] || mc > byCa[ca].mc)) byCa[ca] = { mc, priceChange24h: p.priceChange?.h24 };
+        }
+        for (const c of cands.slice(i, i + BATCH)) {
+          const cur = byCa[c.contract_address];
+          if (!cur || !cur.mc || !c.market_cap) continue;
+          const multiple = cur.mc / c.market_cap;
+          if (multiple >= 2) {
+            results.push({
+              token:       c.token,
+              decision:    c.final_decision,
+              scan_mcap:   c.market_cap,
+              current_mcap: cur.mc,
+              multiple:    Number(multiple.toFixed(2)),
+              scanned_at:  c.evaluated_at,
+            });
+          }
+        }
+      } catch {}
+    }
+    results.sort((a, b) => b.multiple - a.multiple);
+    _missedCache.rows = results.slice(0, 10);
+    _missedCache.refreshedAt = Date.now();
+    console.log(`[missed-memory] Refreshed — ${_missedCache.rows.length} misses from ${cands.length} candidates checked`);
+  } catch (err) {
+    console.warn(`[missed-memory] Refresh failed: ${err.message}`);
+  }
+}
+
+function getMissedOpportunityMemory() {
+  if (_missedCache.rows.length === 0) return '';
+  const lines = _missedCache.rows.slice(0, 5).map(r =>
+    `  - $${r.token || '?'} (${r.decision}) — scan $${Math.round(r.scan_mcap/1000)}K → now $${Math.round(r.current_mcap/1000)}K (${r.multiple}x)`
+  );
+  return [
+    'RECENT MISSES — coins we rejected that ran 2x+ since. Learn the pattern:',
+    ...lines,
+    'If this candidate shares traits with any of these (same MCap band, same stage, similar early-volume signature, same narrative), bias toward AUTO_POST. Past misses inform this decision.',
+  ].join('\n');
+}
+
+// Initial refresh 60s after boot (let DB settle), then every 30 min
+setTimeout(() => { refreshMissedOpportunities().catch(() => {}); }, 60_000);
+setInterval(() => { refreshMissedOpportunities().catch(() => {}); }, MISSED_REFRESH_MS);
+
 
 
 /**
@@ -1226,6 +1311,7 @@ async function callClaudeForAnalysis(candidate, scoreResult, options = {}) {
   const history     = options.includeHistory !== false ? getRecentOutcomesContext(15) : 'History disabled for this call.';
   const botMemory   = options.includeHistory !== false ? getBotMemory() : '';
   const aiCfg       = getAIConfigSummary();
+  const missedMemo  = options.includeHistory !== false ? getMissedOpportunityMemory() : '';
 
   // Micro-cap gem context
   const mcap = candidate.marketCap ?? 0;
@@ -1242,6 +1328,7 @@ ${botMemory}
 
 ${history}
 
+${missedMemo ? missedMemo + '\n' : ''}
 ${aiCfg}
 
 ${gemAlert}
