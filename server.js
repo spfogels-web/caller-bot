@@ -1149,7 +1149,7 @@ const SCORING_CONFIG_DEFAULTS = {
   devFingerprintCap:       3,   // max positive delta from dev history
   globalBonusCap:         10,   // total bonus stack across all sources
   noSignalCap:            72,   // structure-only coins capped here (raised 68→72)
-  rugGuardMinScore:       60,   // $13K-$17.5K requires this score
+  rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
   winPeakMultiple:         2.5, // peak X to lock WIN (raised 1.5→2.5: we hunt real winners, not wicks)
