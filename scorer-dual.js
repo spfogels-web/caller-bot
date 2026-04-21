@@ -249,12 +249,13 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   const coord = m.coordinationIntensity ?? 0;
 
   // Winner wallets are the strongest conviction signal.
-  // Wallet DB is still growing — adjusted to our actual volume:
-  //   3+ winners = max (rare but strongest signal)
-  //   2 winners = near-max (very strong)
-  //   1 winner = high (meaningful — winner wallets are selective)
-  //   0 winners = fall back to smart money + clean behavior
-  if (winners >= 3)       { p = maxWQ;                     reasons.push(`${winners} winner wallets in early — HIGHEST CONVICTION`); }
+  //   4-5 winners = max + bonus (+5)
+  //   3 winners = max
+  //   2 winners = near-max
+  //   1 winner = meaningful
+  //   0 winners = smart money + clean wallets fallback
+  if (winners >= 4)       { p = Math.min(maxWQ + 5, 25);   reasons.push(`${winners} winner wallets — EXCEPTIONAL conviction +5 bonus`); }
+  else if (winners >= 3)  { p = maxWQ;                     reasons.push(`${winners} winner wallets in early — HIGHEST CONVICTION`); }
   else if (winners >= 2)  { p = Math.round(maxWQ * 0.90);  reasons.push(`${winners} winner wallets — very strong signal`); }
   else if (winners >= 1)  { p = Math.round(maxWQ * 0.70);  reasons.push(`${winners} winner wallet early — meaningful signal`); }
   else {
@@ -264,7 +265,7 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
 
     if (hasSmartMoney && clusters === 0)     { p = Math.round(maxWQ * 0.55); reasons.push(`Smart money present (score ${smartMoney}) + clean wallets`); }
     else if (hasSmartMoney)                  { p = Math.round(maxWQ * 0.40); reasons.push(`Smart money signals (score ${smartMoney})`); }
-    else if (clusters === 0 && coord < 0.2)  { p = Math.round(maxWQ * 0.30); reasons.push('Clean wallet behavior — no coordination'); }
+    else if (clusters === 0 && coord < 0.2)  { p = 9;                        reasons.push('Clean wallet behavior — no coordination'); }
     else if (clusters <= 2)                  { p = Math.round(maxWQ * 0.20); }
     else if (clusters <= 5)                  { p = Math.round(maxWQ * 0.10); risks.push(`${clusters} cluster wallets — coordination concern`); }
     else                                     { p = 0;                        risks.push(`Heavy coordination: ${clusters} cluster wallets`); }
