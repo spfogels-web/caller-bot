@@ -1056,7 +1056,7 @@ function persistAIConfig() {
 // and whenever a POST /api/config/scoring lands. Every hot-path site below
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
-  minScoreToPost:         50,   // hard floor for AUTO_POST
+  minScoreToPost:         45,   // hard floor for AUTO_POST (lowered from 50)
   sweetSpotBonus:          4,   // $13K-$40K MCap
   secondaryBonus:          2,   // $40K-$80K MCap
   preLaunchBonus:          6,   // dev funded by CEX within 6h
@@ -1065,10 +1065,11 @@ const SCORING_CONFIG_DEFAULTS = {
   globalBonusCap:         10,   // total bonus stack across all sources
   noSignalCap:            68,   // structure-only coins capped here
   rugGuardMinScore:       60,   // $13K-$17.5K requires this score
-  consensusOverrideScore: 60,   // single-AI override floor
+  consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
   winPeakMultiple:         1.5, // peak X to lock WIN
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
+  claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -2965,20 +2966,38 @@ async function processCandidate(candidate, isRescan = false) {
       finalDecision = 'WATCHLIST';
     }
 
-    // ── CLAUDE + OPENAI CONSENSUS GATE ───────────────────────────────────────
-    // Before AUTO_POST fires, require both AI layers to agree OR a single
-    // high-conviction override (score >= 65 AND at least one AI said yes).
-    // Bypassed only by smart-money cluster alert — checked in the next block.
+    // ── DECISION GATE ────────────────────────────────────────────────────────
+    // Default mode (claudeOnlyMode=1): Claude is the sole judge. If Claude
+    // says AUTO_POST or POST, the coin posts (subject to other gates like
+    // momentum / regime / bundle). This fits our current pipeline where
+    // OpenAI's live decision call is disabled anyway (it runs batch-only
+    // in the 6h self-improvement cycle).
+    //
+    // Legacy mode (claudeOnlyMode=0): keep the old Claude+OpenAI consensus
+    // with score >= consensusOverrideScore single-AI override fallback.
+    //
+    // Bypassed entirely by smart-money cluster/KOL alerts.
     if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney) {
       const claudeOK = verdict && (verdict.decision === 'AUTO_POST' || verdict.decision === 'POST');
       const openaiOK = openAIDecision && (openAIDecision.decision === 'POST' || openAIDecision.decision === 'PROMOTE');
-      const bothAgree   = claudeOK && openaiOK;
-      const eitherAndScore = (claudeOK || openaiOK) && scoreResult.score >= SCORING_CONFIG.consensusOverrideScore;
+      const claudeOnly = !!SCORING_CONFIG.claudeOnlyMode;
 
-      if (!bothAgree && !eitherAndScore) {
-        const reason = `Claude=${verdict?.decision ?? 'none'} OpenAI=${openAIDecision?.decision ?? 'none'} score=${scoreResult.score}`;
-        logEvent('INFO', 'CONSENSUS_GATE', `${enrichedCandidate.token ?? ca.slice(0,6)} AUTO_POST→WATCHLIST — ${reason}`);
-        console.log(`[auto-caller] 🧠 Consensus gate — $${enrichedCandidate.token ?? ca.slice(0,6)} demoted to WATCHLIST (${reason})`);
+      let gateFailed;
+      if (claudeOnly) {
+        gateFailed = !claudeOK;
+      } else {
+        const bothAgree       = claudeOK && openaiOK;
+        const eitherAndScore  = (claudeOK || openaiOK) && scoreResult.score >= SCORING_CONFIG.consensusOverrideScore;
+        gateFailed = !bothAgree && !eitherAndScore;
+      }
+
+      if (gateFailed) {
+        const trigger = claudeOnly ? 'CLAUDE_SAID_NO' : 'CONSENSUS_GATE';
+        const reason = claudeOnly
+          ? `Claude=${verdict?.decision ?? 'none'} score=${scoreResult.score}`
+          : `Claude=${verdict?.decision ?? 'none'} OpenAI=${openAIDecision?.decision ?? 'none'} score=${scoreResult.score}`;
+        logEvent('INFO', trigger, `${enrichedCandidate.token ?? ca.slice(0,6)} AUTO_POST→WATCHLIST — ${reason}`);
+        console.log(`[auto-caller] 🧠 ${claudeOnly ? 'Claude gate' : 'Consensus gate'} — $${enrichedCandidate.token ?? ca.slice(0,6)} demoted to WATCHLIST (${reason})`);
         // Persist the demotion so we can audit missed calls later. These are
         // the ones most likely to moon without us when the gate is too strict.
         try {
@@ -2998,7 +3017,7 @@ async function processCandidate(candidate, isRescan = false) {
             verdict?.risk ?? null,
             openAIDecision?.decision ?? null,
             openAIDecision?.conviction ?? null,
-            'CONSENSUS_GATE',
+            trigger,
             getRegime()?.market ?? null,
             enrichedCandidate.marketCap ?? null
           );
