@@ -558,7 +558,8 @@ export function detectTraps(candidate) {
 
   const change1h     = candidate.priceChange1h  ?? 0;
   const change24h    = candidate.priceChange24h ?? 0;
-  const holderGrowth = candidate.holderGrowth24h ?? 0;
+  const holderGrowthRaw = candidate.holderGrowth24h; // keep null distinct from 0
+  const holderGrowth = holderGrowthRaw ?? 0;
   const top10        = candidate.top10HolderPct ?? null;
   const vol24h       = candidate.volume24h ?? 0;
   const devPct       = candidate.devWalletPct ?? null;
@@ -568,8 +569,15 @@ export function detectTraps(candidate) {
   const buys         = candidate.buys24h ?? 0;
   const sells        = candidate.sells24h ?? 0;
   const totalTxns    = buys + sells;
+  const ageHoursEarly= candidate.pairAgeHours ?? 99;
 
-  if (change1h > 100 && holderGrowth < 5) {
+  // Birdeye indexes holderGrowth24h on a delay — for coins <30min old,
+  // the field is null or 0 simply because the data hasn't populated yet,
+  // NOT because growth is actually zero. Skip the manipulation trap here
+  // to avoid torpedoing legitimate fresh runners ($JACKSON style).
+  // The trap still fires on >30min coins with real flat-growth signals.
+  const holderDataReady = holderGrowthRaw != null && ageHoursEarly >= 0.5;
+  if (change1h > 100 && holderGrowth < 5 && holderDataReady) {
     traps.push(`+${change1h.toFixed(0)}% in 1h but only ${holderGrowth.toFixed(1)}% holder growth — manipulation suspected`);
   }
 

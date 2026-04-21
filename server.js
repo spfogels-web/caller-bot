@@ -2703,6 +2703,33 @@ async function processCandidate(candidate, isRescan = false) {
         }
       }
     } catch {}
+
+    // ── Score trajectory bonus ──────────────────────────────────────────
+    // If this coin has been rescanned and the score is climbing 20+ points
+    // across the last 3 scans, that trajectory itself is alpha (real
+    // momentum building). Catches candidates ticking up from 30 → 45 → 65
+    // that would otherwise be in the watchlist bucket — same signal the
+    // $JACKSON pattern showed before it ran.
+    try {
+      const prior = dbInstance.prepare(`
+        SELECT composite_score FROM candidates
+        WHERE contract_address = ? AND composite_score > 0 AND composite_score IS NOT NULL
+        ORDER BY id DESC LIMIT 3
+      `).all(ca);
+      if (prior.length >= 2) {
+        const oldest = prior[prior.length - 1].composite_score;
+        const currentScore = scoreResult.score ?? 0;
+        const delta = currentScore - oldest;
+        if (delta >= 20) {
+          const applied = addBonusCapped(5);
+          if (applied > 0) {
+            scoreResult.scoreTrajectory = { oldest, current: currentScore, delta };
+            (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+            scoreResult.signals.market.push(`+${applied} TRAJECTORY — score climbing ${Math.round(oldest)}→${Math.round(currentScore)} across rescans (+${delta.toFixed(0)} pts)`);
+          }
+        }
+      }
+    } catch {}
     let regimeAdj = { adjustedScore: scoreResult.score, thresholdAdjust: 0, regimeNotes: [] };
     try {
       const ra = applyRegimeAdjustments(scoreResult.score, enrichedCandidate, scoreResult);
