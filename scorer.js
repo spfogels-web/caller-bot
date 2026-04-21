@@ -414,11 +414,20 @@ export function scoreMarketBehavior(candidate) {
   }
 
   const holders = candidate.holders ?? null;
+  const ageHrsForHolders = candidate.pairAgeHours ?? null;
   if (holders !== null) {
     if      (holders > 5000) { score += 15; signals.push(`${holders.toLocaleString()} holders`); }
     else if (holders > 2000) { score += 10; signals.push(`${holders.toLocaleString()} holders`); }
     else if (holders > 500)  { score += 5;  signals.push(`${holders.toLocaleString()} holders`); }
     else if (holders > 50)   { score += 2;  signals.push(`${holders.toLocaleString()} holders — growing`); }
+    // Young-coin micro-tier: 10-50 holders on a <30min coin is legitimate
+    // early growth — Birdeye just hasn't indexed the full count yet. Small
+    // bonus keeps fresh gems from getting 0 points from this metric.
+    else if (holders >= 10 && ageHrsForHolders != null && ageHrsForHolders < 0.5) {
+      score += 3;
+      const ageMin = Math.round(ageHrsForHolders * 60);
+      signals.push(`${holders} holders at ${ageMin}min — early distribution`);
+    }
   }
 
   const holderGrowth = candidate.holderGrowth24h ?? null;

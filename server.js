@@ -1146,7 +1146,8 @@ const SCORING_CONFIG_DEFAULTS = {
   secondaryBonus:          2,   // $40K-$80K MCap
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
-  devFingerprintCap:       3,   // max positive delta from dev history
+  devFingerprintCap:       6,   // max positive delta from dev history (raised 3→6: proven devs deserve real weight)
+  hotDevBonus:             4,   // bonus when dev has a coin that hit 2x+ in the last 24h (currently-running dev boost)
   globalBonusCap:         10,   // total bonus stack across all sources
   noSignalCap:            72,   // structure-only coins capped here (raised 68→72)
   rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
@@ -2721,6 +2722,30 @@ async function processCandidate(candidate, isRescan = false) {
             (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `${adj.delta} ${adj.reason}`];
           }
         }
+
+        // Hot-dev boost: does this deployer have another coin actively running
+        // right now? If any prior launch from them hit 2x+ in the last 24h,
+        // they're on a hot streak. Real pattern — devs that hit one often hit
+        // the next. Single query against calls table joined by deployer.
+        try {
+          const hotRun = dbInstance.prepare(`
+            SELECT MAX(c.peak_multiple) as best_peak
+            FROM calls c
+            JOIN candidates ca ON ca.id = c.candidate_id
+            WHERE ca.deployer_verdict = ?
+              AND c.posted_at > datetime('now', '-24 hours')
+              AND c.peak_multiple >= 2
+          `).get(deployer);
+          if (hotRun && hotRun.best_peak) {
+            const hotBonus = SCORING_CONFIG.hotDevBonus ?? 4;
+            const applied = addBonusCapped(hotBonus);
+            if (applied > 0) {
+              (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+              scoreResult.signals.launch.push(`+${applied} HOT DEV — deployer's other launch hit ${hotRun.best_peak.toFixed(1)}x in last 24h`);
+              console.log(`[auto-caller] 🔥 HOT DEV — $${enrichedCandidate.token ?? ca.slice(0,6)} deployer has ${hotRun.best_peak.toFixed(1)}x runner active`);
+            }
+          }
+        } catch {}
       }
     } catch {}
 
@@ -2810,6 +2835,37 @@ async function processCandidate(candidate, isRescan = false) {
           (scoreResult.signals = scoreResult.signals || {}).social =
             [...(scoreResult.signals.social || []),
              `+${applied} CROSS-CHAIN MATCH — $${match.source_symbol} on ${match.source_chain} up ${Math.round(match.source_price_change||0)}% (${Math.round(match.match_confidence*100)}% match)`];
+        }
+      }
+    } catch {}
+
+    // ── LunarCrush social bonus ─────────────────────────────────────────
+    // We pay for LunarCrush and were fetching galaxyScore / socialSpike /
+    // twitterMentions on every enrichment but never feeding any of it into
+    // the composite. A real social-volume spike is early alpha — coins
+    // with a 2x social volume surge ahead of price almost always run.
+    try {
+      let lcBonus = 0;
+      const lcSignals = [];
+      if (enrichedCandidate.socialSpike) {
+        lcBonus += 3;
+        lcSignals.push(`social volume spike (2x+ above baseline)`);
+      }
+      const gs = Number(enrichedCandidate.galaxyScore);
+      if (Number.isFinite(gs) && gs >= 60) {
+        lcBonus += 2;
+        lcSignals.push(`galaxy score ${gs.toFixed(0)}`);
+      }
+      const tm = Number(enrichedCandidate.twitterMentions);
+      if (Number.isFinite(tm) && tm >= 100) {
+        lcBonus += 1;
+        lcSignals.push(`${tm} Twitter mentions`);
+      }
+      if (lcBonus > 0) {
+        const applied = addBonusCapped(lcBonus);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).social = scoreResult.signals.social || [];
+          scoreResult.signals.social.push(`+${applied} LUNARCRUSH — ${lcSignals.join(', ')}`);
         }
       }
     } catch {}
@@ -3084,9 +3140,22 @@ async function processCandidate(candidate, isRescan = false) {
     // what OpenAI or the scorer says, block the post — these are the
     // split-brain cases that embarrass the channel.
     // Smart-money cluster alerts (3+ winners buying) still bypass this veto.
+    // Age exemption: young sweet-spot coins often trip Claude's EXTREME
+    // flag on ambiguous signals (parabolic 1h change, freeze auth, etc.)
+    // that are actually normal pump.fun graduation mechanics. For <30min
+    // coins in sweet-spot MCap, soft-demote (WATCHLIST) instead of hard
+    // IGNORE — lets them re-evaluate on the next scan cycle. >30min coins
+    // keep the hard veto since Claude's EXTREME on older coins is more
+    // reliable (real rug/manipulation signals dominate at that age).
+    const ageForExtremeVeto = enrichedCandidate.pairAgeHours ?? 99;
+    const mcapForExtremeVeto = enrichedCandidate.marketCap ?? 0;
+    const youngSweetspot = ageForExtremeVeto < 0.5
+                        && mcapForExtremeVeto >= 5_000
+                        && mcapForExtremeVeto <= 80_000;
     if (
       finalDecision === 'AUTO_POST' &&
       !enrichedCandidate._smartMoney &&
+      !youngSweetspot &&
       verdict?.risk === 'EXTREME' &&
       (verdict?.score ?? 100) < 35
     ) {
