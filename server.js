@@ -1167,6 +1167,40 @@ try {
   if (row?.value) {
     SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS, ...JSON.parse(row.value) };
     console.log('[config] Restored SCORING_CONFIG from DB:', JSON.stringify(SCORING_CONFIG));
+
+    // ── One-time auto-migration for stale kv_store values ──────────────
+    // When we raise a default floor/cap in code, the kv_store's previously-
+    // saved lower value wins and silently pins scoring. Detect and bump
+    // to the new default when stored < default for these upward-only knobs.
+    // Preserves explicit upward customization (if user has 80, keeps 80).
+    const MIGRATE_UP = {
+      noSignalCap:           72,   // raised 65→68→72 today
+      winPeakMultiple:       2.5,  // raised 1.5→2.5 today (user wants real winners)
+      minScoreToPost:        45,   // lowered 50→45, but shouldn't exceed 45 in stale form
+      globalBonusCap:        10,   // raised 8→10
+      consensusOverrideScore:60,   // lowered 65→60
+      devFingerprintCap:      6,   // raised 3→6
+    };
+    let migrated = false;
+    for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
+      const stored = SCORING_CONFIG[key];
+      if (typeof stored === 'number' && stored < newDefault) {
+        console.log(`[config:migrate] ${key}: ${stored} → ${newDefault} (bumped from stale DB value)`);
+        SCORING_CONFIG[key] = newDefault;
+        migrated = true;
+      }
+    }
+    // Same for knobs where we want to enforce a ceiling (lowered values)
+    const MIGRATE_DOWN = {
+      minScoreToPost:        45,   // if stored > 45, keep user intent; else ensure 45
+    };
+    // (No active down-migrations right now — kept for future shape)
+    if (migrated) {
+      try {
+        dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoring_config', ?)`).run(JSON.stringify(SCORING_CONFIG));
+        console.log('[config:migrate] Persisted migrated scoring config.');
+      } catch {}
+    }
   }
 } catch (err) { console.warn('[config] Failed to restore scoring config:', err.message); }
 
