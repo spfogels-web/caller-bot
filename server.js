@@ -107,6 +107,70 @@ const OPENAI_FT_MODEL = process.env.OPENAI_FT_MODEL ?? null;
 
 const WT_SERVER_URL = process.env.WALLET_TRACKER_URL ?? 'http://localhost:3100';
 
+// ── API Usage Tracker — counts every external API call ──────────────────────
+const _apiUsage = {
+  helius:      { calls: 0, errors: 0, lastCall: null, cost: 0 },    // paid, ~1 CU each
+  birdeye:     { calls: 0, errors: 0, lastCall: null, cost: 0 },    // paid, ~1 CU each
+  claude:      { calls: 0, errors: 0, lastCall: null, cost: 0 },    // paid, tokens
+  openai:      { calls: 0, errors: 0, lastCall: null, cost: 0 },    // paid, tokens
+  lunarcrush:  { calls: 0, errors: 0, lastCall: null, cost: 0 },    // paid, fixed
+  solana:      { calls: 0, errors: 0, lastCall: null, cost: 0 },    // FREE public RPC
+  dexscreener: { calls: 0, errors: 0, lastCall: null, cost: 0 },    // FREE
+  helius_ws:   { events: 0, lastEvent: null },                       // WebSocket
+};
+const _apiUsageStartedAt = new Date().toISOString();
+
+function trackApi(service, isError = false) {
+  if (!_apiUsage[service]) return;
+  _apiUsage[service].calls = (_apiUsage[service].calls || 0) + 1;
+  if (isError) _apiUsage[service].errors = (_apiUsage[service].errors || 0) + 1;
+  _apiUsage[service].lastCall = new Date().toISOString();
+}
+
+// Wrap fetch to auto-track calls based on URL
+const _origFetch = globalThis.fetch;
+globalThis.fetch = async function(url, options) {
+  const urlStr = typeof url === 'string' ? url : (url?.url || String(url));
+  let service = null;
+  if (urlStr.includes('helius-rpc.com') || urlStr.includes('helius.xyz')) service = 'helius';
+  else if (urlStr.includes('birdeye.so')) service = 'birdeye';
+  else if (urlStr.includes('anthropic.com')) service = 'claude';
+  else if (urlStr.includes('openai.com')) service = 'openai';
+  else if (urlStr.includes('lunarcrush.com')) service = 'lunarcrush';
+  else if (urlStr.includes('api.mainnet-beta.solana.com')) service = 'solana';
+  else if (urlStr.includes('dexscreener.com')) service = 'dexscreener';
+
+  try {
+    const res = await _origFetch.call(this, url, options);
+    if (service) trackApi(service, !res.ok);
+    return res;
+  } catch (err) {
+    if (service) trackApi(service, true);
+    throw err;
+  }
+};
+
+app.get('/api/usage', (req, res) => {
+  setCors(res);
+  const uptime = Date.now() - new Date(_apiUsageStartedAt).getTime();
+  const hours = uptime / 3_600_000;
+  const usage = {};
+  for (const [svc, data] of Object.entries(_apiUsage)) {
+    const calls = data.calls || data.events || 0;
+    usage[svc] = {
+      ...data,
+      callsPerHour: hours > 0 ? Math.round(calls / hours) : 0,
+      projectedDaily: hours > 0 ? Math.round((calls / hours) * 24) : 0,
+    };
+  }
+  res.json({
+    ok: true,
+    startedAt: _apiUsageStartedAt,
+    uptimeSeconds: Math.round(uptime / 1000),
+    usage,
+  });
+});
+
 const BANNER_IMAGE_URL = process.env.BANNER_IMAGE_URL
   ?? 'https://raw.githubusercontent.com/spfogles-web/caller-bot/main/banner.png';
 // PulseCaller branding — set BANNER_IMAGE_URL in Railway to your banner URL

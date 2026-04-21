@@ -4838,6 +4838,20 @@ body::before {
         <div class="tile"><div class="tile-label">MARKET REGIME</div><div class="tile-value" id="sbRegime">—</div></div>
         <div class="tile"><div class="tile-label">EVALUATIONS</div><div class="tile-value" id="sbEvals">—</div></div>
       </div>
+
+      <!-- ═══ API USAGE MONITOR — real-time spend tracking ═══ -->
+      <div class="card" style="margin-bottom:12px;border-color:rgba(255,109,0,0.3)">
+        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(255,109,0,0.08),transparent)">
+          <div class="card-title" style="color:var(--orange)"><span class="icon">📊</span>API USAGE — Real-time tracking</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" id="apiUsageUptime">—</span>
+            <button onclick="loadApiUsage()" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:5px;padding:5px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">↻ REFRESH</button>
+          </div>
+        </div>
+        <div class="card-body" id="apiUsageBody">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Loading usage data...</div>
+        </div>
+      </div>
       <div class="card" style="margin-bottom:12px">
         <div class="card-header">⚙️ SCAN MODE</div>
         <div class="card-body" id="modeButtonList"><div class="spinner"><div class="spin-dot" style="background:var(--cyan)"></div></div></div>
@@ -7829,7 +7843,69 @@ async function markOutcome(id,outcome){
 }
 
 // ── SYSTEM ────────────────────────────────────────────────
+async function loadApiUsage() {
+  try {
+    var data = await apiFetch('/api/usage');
+    if (!data || !data.ok) return;
+
+    var hours = Math.round(data.uptimeSeconds / 3600 * 10) / 10;
+    var uptimeEl = document.getElementById('apiUsageUptime');
+    if (uptimeEl) uptimeEl.textContent = 'Uptime: ' + hours + 'h · Since ' + (data.startedAt ? new Date(data.startedAt).toLocaleTimeString() : '?');
+
+    var services = [
+      { key: 'helius',      name: 'Helius',       icon: '⚡', paid: true,  limit: '10M CU/month',    col: 'var(--orange)' },
+      { key: 'birdeye',     name: 'Birdeye',      icon: '🦅', paid: true,  limit: 'check plan',     col: 'var(--purple)' },
+      { key: 'claude',      name: 'Claude',       icon: '🤖', paid: true,  limit: 'token-based',    col: 'var(--cyan)' },
+      { key: 'openai',      name: 'OpenAI',       icon: '🧠', paid: true,  limit: 'token-based',    col: 'var(--green)' },
+      { key: 'lunarcrush',  name: 'LunarCrush',   icon: '📱', paid: true,  limit: 'plan-based',     col: 'var(--gold)' },
+      { key: 'solana',      name: 'Solana RPC',   icon: '◎',  paid: false, limit: 'FREE (public)',  col: 'var(--text2)' },
+      { key: 'dexscreener', name: 'DexScreener',  icon: '📊', paid: false, limit: 'FREE (300/min)', col: 'var(--text2)' },
+      { key: 'helius_ws',   name: 'Helius WS',    icon: '🔌', paid: false, limit: 'connected',      col: 'var(--blue)',  isWs: true },
+    ];
+
+    var el = document.getElementById('apiUsageBody');
+    if (!el) return;
+
+    el.innerHTML = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+      services.map(function(s) {
+        var u = data.usage[s.key] || {};
+        var calls = s.isWs ? (u.events || 0) : (u.calls || 0);
+        var errors = u.errors || 0;
+        var perHour = u.callsPerHour || 0;
+        var projDaily = u.projectedDaily || 0;
+        var paidTag = s.paid
+          ? '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;background:rgba(255,109,0,0.15);color:var(--orange);border:1px solid rgba(255,109,0,0.3);border-radius:3px">💰 PAID</span>'
+          : '<span style="font-family:var(--mono);font-size:7px;padding:2px 6px;background:rgba(0,230,118,0.1);color:var(--green);border:1px solid rgba(0,230,118,0.3);border-radius:3px">✓ FREE</span>';
+        var errPct = calls > 0 ? Math.round((errors/calls)*100) : 0;
+        var errDisplay = errors > 0 ? '<span style="color:var(--red)">' + errors + ' errors (' + errPct + '%)</span>' : '<span style="color:var(--green)">0 errors</span>';
+        return '<div style="background:rgba(0,0,0,0.3);border:1px solid ' + s.col + '33;border-radius:8px;padding:12px">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+            '<span style="font-size:18px">' + s.icon + '</span>' +
+            '<div style="flex:1">' +
+              '<div style="font-family:Orbitron,var(--mono);font-size:11px;color:' + s.col + ';font-weight:700">' + s.name + '</div>' +
+              '<div style="font-family:var(--mono);font-size:7px;color:var(--text3)">' + s.limit + '</div>' +
+            '</div>' +
+            paidTag +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-family:var(--mono);font-size:9px">' +
+            '<div><span style="color:var(--text3);font-size:7px">CALLS</span><br><span style="color:' + s.col + ';font-size:14px;font-weight:700">' + calls.toLocaleString() + '</span></div>' +
+            '<div><span style="color:var(--text3);font-size:7px">PER HOUR</span><br><span style="color:var(--text1);font-size:12px;font-weight:700">' + perHour + '</span></div>' +
+            '<div style="grid-column:span 2;margin-top:4px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05)">' +
+              '<span style="color:var(--text3);font-size:7px">PROJECTED 24H:</span> ' +
+              '<span style="color:var(--text2);font-size:10px;font-weight:700">' + projDaily.toLocaleString() + '</span> · ' + errDisplay +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>' +
+    '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);text-align:center;padding:10px;margin-top:8px;border-top:1px solid rgba(255,255,255,0.05)">' +
+      '💡 Counter resets on server restart. Helius CU varies by method (100-5000 CU per call).' +
+    '</div>';
+  } catch (e) { console.warn('[usage]', e.message); }
+}
+
 async function loadSystem(){
+  loadApiUsage();
   const [statsData,modeData,v8Data]=await Promise.all([apiFetch('/api/stats'),apiFetch('/api/mode'),apiFetch('/api/v8/dashboard')]);
   if(statsData){
     const c=statsData.config||{},m=statsData.mode||{};
