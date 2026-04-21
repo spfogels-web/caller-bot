@@ -7330,14 +7330,10 @@ function buildAuditDetail(c){
       </div>`;
     })()}
 
-    <!-- ═══ LIVE CHART — DexScreener embed, 1m candles ═══ -->
-    <div style="background:rgba(0,0,0,0.5);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden">
-      <div style="padding:6px 12px;background:rgba(0,0,0,0.3);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-        <span style="font-family:var(--mono);font-size:8px;color:var(--text2);letter-spacing:1px">📈 LIVE CHART · DexScreener</span>
-        <a href="https://dexscreener.com/solana/${ca}" target="_blank" style="font-family:var(--mono);font-size:8px;color:var(--cyan);text-decoration:none">OPEN ↗</a>
-      </div>
-      <iframe src="https://dexscreener.com/solana/${ca}?embed=1&theme=dark&trades=0&info=0" style="width:100%;height:280px;border:0;display:block;background:rgba(0,0,0,0.3)" loading="lazy"></iframe>
-    </div>
+    <!-- Chart iframe removed — the DEX / PUMP / BIRD buttons at the top
+         already open the full chart in one click, and pump.fun pre-bond
+         coins don't have a DexScreener pair yet (stuck on "Loading pair…"
+         indefinitely). The top buttons are faster and always work. -->
 
     <!-- ═══ 5 FOUNDATION SIGNALS — new scoring engine ═══ -->
     ${renderFoundationSignals(c)}
