@@ -1141,20 +1141,21 @@ function persistAIConfig() {
 // and whenever a POST /api/config/scoring lands. Every hot-path site below
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
-  minScoreToPost:         45,   // hard floor for AUTO_POST (lowered from 50)
+  minScoreToPost:         45,   // hard floor for AUTO_POST
   sweetSpotBonus:          4,   // $13K-$40K MCap
   secondaryBonus:          2,   // $40K-$80K MCap
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
   devFingerprintCap:       3,   // max positive delta from dev history
   globalBonusCap:         10,   // total bonus stack across all sources
-  noSignalCap:            68,   // structure-only coins capped here
+  noSignalCap:            72,   // structure-only coins capped here (raised 68→72)
   rugGuardMinScore:       60,   // $13K-$17.5K requires this score
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:         1.5, // peak X to lock WIN
+  winPeakMultiple:         2.5, // peak X to lock WIN (raised 1.5→2.5: we hunt real winners, not wicks)
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
+  minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -3319,6 +3320,22 @@ async function processCandidate(candidate, isRescan = false) {
     ) {
       logEvent('INFO', 'RUG_GUARD', `${enrichedCandidate.token ?? ca.slice(0,6)} mcap=${Math.round(mcapNow/1000)}K score=${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore} → WATCHLIST (high-risk band guard)`);
       console.log(`[auto-caller] 🛡  $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — $${Math.round(mcapNow/1000)}K in rug-risk band, score ${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore}`);
+      finalDecision = 'WATCHLIST';
+    }
+
+    // ── LIQUIDITY FLOOR: a coin with no liquidity can't sustain a 2.5x run ──
+    // Observed pattern in the last 8 losing calls: thin liquidity ($2K-$3K)
+    // let the coin flash +30-70% on tiny volume and dump right back. For
+    // sustainable 2.5x+ winners we need depth. Cluster/KOL alerts bypass.
+    const liqNow = enrichedCandidate.liquidity ?? null;
+    const minLiq = SCORING_CONFIG.minLiquidityForPost ?? 3000;
+    if (
+      finalDecision === 'AUTO_POST' &&
+      !bypassRugGuard &&
+      liqNow != null && liqNow < minLiq
+    ) {
+      logEvent('INFO', 'LIQUIDITY_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} liq=$${Math.round(liqNow)} < $${minLiq} → WATCHLIST`);
+      console.log(`[auto-caller] 💧 $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — liquidity $${Math.round(liqNow)} below floor $${minLiq} (can't sustain a 2.5x run)`);
       finalDecision = 'WATCHLIST';
     }
 

@@ -5449,8 +5449,9 @@ const _CS_KNOBS = {
       { key:'claudeOnlyMode',         label:'CLAUDE-ONLY MODE',       desc:'1 = Claude is sole judge (default). 0 = require Claude+OpenAI consensus. OpenAI live decisions are currently disabled so leave at 1.',           impact:'1 = more calls, Claude authority · 0 = stricter' },
       { key:'consensusOverrideScore', label:'CONSENSUS OVERRIDE',     desc:'[LEGACY] Used only when claudeOnlyMode=0. Minimum score for a single-AI override in consensus mode.',                                           impact:'only matters if claudeOnlyMode=0' },
       { key:'deadRegimeFloorAdj',     label:'DEAD REGIME FLOOR ADJ',  desc:'Points added to minScoreToPost when market regime is DEAD.',                                 impact:'higher = tighter in dead markets' },
-      { key:'winPeakMultiple',        label:'WIN PEAK MULTIPLE',      desc:'Peak multiple required to lock a call as WIN (e.g. 1.5 = call needed to peak ≥1.5×).',      impact:'higher = harder to earn WIN' },
+      { key:'winPeakMultiple',        label:'WIN PEAK MULTIPLE',      desc:'Peak multiple needed to log a call as WIN. Current target: 2.5× (consistent winners that circulate, 10× is aspiration). The bot learning loop optimizes toward whatever this is — set it to what you actually want to hunt.',      impact:'higher = harder to earn WIN · lower = more "cheap" wins' },
       { key:'neutralDrawdownPct',     label:'NEUTRAL DRAWDOWN %',     desc:'Max drawdown at 6h still considered NEUTRAL (not LOSS). Above this → LOSS.',                impact:'higher = more tolerance before LOSS' },
+      { key:'minLiquidityForPost',    label:'MIN LIQUIDITY ($)',      desc:'Minimum pool liquidity in USD for AUTO_POST. Thin-liq coins pump 30-70% on tiny volume then instantly dump — unsustainable for 2.5×+ runs. Cluster/KOL alerts bypass this floor.', impact:'higher = fewer rug-prone posts' },
     ],
   },
   scanner: {
