@@ -5533,6 +5533,12 @@ function csSwitchTab(tab) {
 }
 
 // ── Helius credit budget panel (Wallets tab) ──────────────────────────
+// The /api/usage tracker resets on every server restart, so the "calls/hr"
+// and 30-day projection is unreliable during the first hour (startup
+// bursts from Dune scan + first smart-money tick skew the average).
+// Below MIN_TRUSTED_UPTIME the projection is dimmed + a warning banner
+// replaces the budget health signal.
+const MIN_TRUSTED_UPTIME_SEC = 3600; // 1 hour
 async function csHeliusBudgetRefresh() {
   const dot     = document.getElementById('csHbDot');
   const sub     = document.getElementById('csHbSubtitle');
@@ -5552,6 +5558,17 @@ async function csHeliusBudgetRefresh() {
     const projectedMo   = projected24h * 30;
     const errors        = h.errors || 0;
     const errorPct      = calls > 0 ? (errors / calls * 100) : 0;
+    const uptimeSec     = data.uptimeSeconds || 0;
+    const trusted       = uptimeSec >= MIN_TRUSTED_UPTIME_SEC;
+
+    // Uptime label — render something like "24m" / "2.3h" / "5.1d"
+    const uptimeLbl = uptimeSec < 60
+      ? uptimeSec + 's'
+      : uptimeSec < 3600
+        ? Math.round(uptimeSec/60) + 'm'
+        : uptimeSec < 86400
+          ? (uptimeSec/3600).toFixed(1) + 'h'
+          : (uptimeSec/86400).toFixed(1) + 'd';
 
     // Credit estimate: assume ~8 credits/call avg (Enhanced TX = 10, basic = 1)
     const AVG_CREDITS_PER_CALL = 8;
@@ -5559,36 +5576,52 @@ async function csHeliusBudgetRefresh() {
     const projMonthlyCredits = projectedMo * AVG_CREDITS_PER_CALL;
     const pctOfPlan = Math.min(100, (projMonthlyCredits / PLAN_LIMIT) * 100);
 
-    // Health: green <70% of plan AND errors <5%; gold 70-95% OR errors 5-15%; red >95% or errors >15%
+    // Health decision — only trusted once uptime ≥ 1h
     let color, label;
-    if (pctOfPlan >= 95 || errorPct > 15)          { color = 'var(--red)';   label = 'BLOWING BUDGET'; }
-    else if (pctOfPlan >= 70 || errorPct > 5)      { color = 'var(--gold)';  label = 'APPROACHING LIMIT'; }
-    else                                           { color = 'var(--green)'; label = 'WITHIN BUDGET'; }
+    if (!trusted) {
+      color = 'var(--text3)';
+      label = `WARMING UP · uptime ${uptimeLbl} · projection unreliable <1h`;
+    } else if (pctOfPlan >= 95 || errorPct > 15)   { color = 'var(--red)';   label = `BLOWING BUDGET · uptime ${uptimeLbl}`; }
+    else if (pctOfPlan >= 70 || errorPct > 5)      { color = 'var(--gold)';  label = `APPROACHING LIMIT · uptime ${uptimeLbl}`; }
+    else                                           { color = 'var(--green)'; label = `WITHIN BUDGET · uptime ${uptimeLbl}`; }
 
     dot.style.background = color;
     dot.style.boxShadow  = `0 0 10px ${color}`;
     sub.textContent = `${label} · ${callsPerHour.toLocaleString()} calls/hr · ${errorPct.toFixed(1)}% errors`;
     sub.style.color = color;
 
+    // Dim 30-day figures during warm-up so they don't misread as real
+    const projDim = trusted ? 1 : 0.35;
+    const projColor = trusted ? 'var(--gold)' : 'var(--text3)';
+    const creditsColor = trusted ? color : 'var(--text3)';
+
     statsEl.innerHTML = [
-      ['CALLS / HR',      callsPerHour.toLocaleString(),          'var(--cyan)'],
-      ['24H (projected)', projected24h.toLocaleString(),          'var(--orange)'],
-      ['30D (projected)', (projectedMo/1000).toFixed(0)+'K',      'var(--gold)'],
-      ['30D CREDITS',     (projMonthlyCredits/1_000_000).toFixed(2)+'M', color],
-      ['ERRORS',          errors.toLocaleString() + ` (${errorPct.toFixed(1)}%)`, errorPct > 5 ? 'var(--red)' : 'var(--text2)'],
-    ].map(([lbl, val, col]) => `
-      <div style="padding:8px 10px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:5px">
+      ['CALLS / HR',      callsPerHour.toLocaleString(),          'var(--cyan)', 1],
+      ['24H (projected)', projected24h.toLocaleString(),          'var(--orange)', projDim],
+      ['30D (projected)', (projectedMo/1000).toFixed(0)+'K',      projColor, projDim],
+      ['30D CREDITS',     (projMonthlyCredits/1_000_000).toFixed(2)+'M', creditsColor, projDim],
+      ['ERRORS',          errors.toLocaleString() + ` (${errorPct.toFixed(1)}%)`, errorPct > 5 ? 'var(--red)' : 'var(--text2)', 1],
+    ].map(([lbl, val, col, opacity]) => `
+      <div style="padding:8px 10px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:5px;opacity:${opacity}">
         <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">${lbl}</div>
         <div style="font-family:var(--mono);font-size:14px;font-weight:700;color:${col};margin-top:2px">${val}</div>
       </div>`).join('');
 
-    bar.style.width = pctOfPlan.toFixed(1) + '%';
-    bar.style.background = pctOfPlan >= 95
-      ? 'linear-gradient(90deg, var(--orange), var(--red))'
-      : pctOfPlan >= 70
-        ? 'linear-gradient(90deg, var(--cyan), var(--gold))'
-        : 'linear-gradient(90deg, var(--green), var(--cyan))';
-    pctLbl.textContent = pctOfPlan.toFixed(1) + '% · ~' + (projMonthlyCredits/1_000_000).toFixed(1) + 'M / 10M';
+    if (trusted) {
+      bar.style.width = pctOfPlan.toFixed(1) + '%';
+      bar.style.background = pctOfPlan >= 95
+        ? 'linear-gradient(90deg, var(--orange), var(--red))'
+        : pctOfPlan >= 70
+          ? 'linear-gradient(90deg, var(--cyan), var(--gold))'
+          : 'linear-gradient(90deg, var(--green), var(--cyan))';
+      pctLbl.textContent = pctOfPlan.toFixed(1) + '% · ~' + (projMonthlyCredits/1_000_000).toFixed(1) + 'M / 10M';
+    } else {
+      // Gray out the bar during warm-up and display a clear warning in its label
+      bar.style.width = '0%';
+      bar.style.background = 'var(--text3)';
+      pctLbl.textContent = `⏳ need ${Math.ceil((MIN_TRUSTED_UPTIME_SEC - uptimeSec)/60)}m more uptime for a reliable reading`;
+      pctLbl.style.color = 'var(--text3)';
+    }
   } catch (err) {
     dot.style.background = 'var(--red)';
     sub.textContent = '✕ ' + err.message;
