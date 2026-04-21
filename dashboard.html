@@ -3553,6 +3553,16 @@ body::before {
                 <button class="fchip" onclick="auditFilter(this,'PENDING')" style="color:var(--text3)">PENDING</button>
                 <button class="fchip" onclick="auditFilter(this,'IGNORE')">IGNORED</button>
                 <button class="fchip" onclick="auditFilter(this,'BLOCKLIST')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">BLOCKED</button>
+                <button class="fchip" onclick="auditFilter(this,'MISSED')" style="color:var(--orange);border-color:rgba(255,109,0,0.4)" title="Coins we didn't post that later ran 2x+ — these are the ones we left on the table">🎯 MISSED</button>
+              </div>
+              <!-- Sort controls — newer = default, others let you surface hot or high-velocity quickly -->
+              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
+                <span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-right:4px">SORT:</span>
+                <button class="fchip audit-sort active" data-sort="newest"   onclick="auditSort(this,'newest')">NEW</button>
+                <button class="fchip audit-sort"        data-sort="score"    onclick="auditSort(this,'score')">SCORE ⬇</button>
+                <button class="fchip audit-sort"        data-sort="velocity" onclick="auditSort(this,'velocity')" title="Sort by 5m price change">5M ⬇</button>
+                <button class="fchip audit-sort"        data-sort="mcap"     onclick="auditSort(this,'mcap')">MCAP ⬆</button>
+                <button class="fchip audit-sort"        data-sort="age"      onclick="auditSort(this,'age')" title="Youngest first">AGE ⬆</button>
               </div>
               <input id="auditSearch" oninput="filterAuditList()" placeholder="Search $TICKER or CA..."
                 style="width:100%;background:rgba(0,0,0,0.4);border:1px solid var(--border2);border-radius:5px;padding:6px 10px;color:var(--text1);font-family:var(--mono);font-size:10px;outline:none;box-sizing:border-box">
@@ -6444,11 +6454,45 @@ async function loadAudit(){
 }
 
 function auditFilter(btn,f){
-  document.querySelectorAll('#tab-audit .fchip').forEach(b=>b.classList.remove('active'));
+  // Only reset decision-filter chips, not sort chips (which use .audit-sort)
+  document.querySelectorAll('#tab-audit .fchip:not(.audit-sort)').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   auditCurrentFilter=f;
   _auditPage=0;
+  // MISSED filter needs the server to attach _missedMultiple — fetch on-demand.
+  if (f === 'MISSED') loadMissedOpportunities();
   renderAuditList();
+}
+
+function auditSort(btn, mode){
+  document.querySelectorAll('#tab-audit .fchip.audit-sort').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  window._auditSortMode = mode;
+  _auditPage = 0;
+  renderAuditList();
+}
+
+async function loadMissedOpportunities(){
+  // Hit the backend; it batches DexScreener calls for recent IGNORE/WATCHLIST
+  // coins and returns those that ran ≥2x vs MCap at scan. Results merge into
+  // allCandidatesData so the filter in renderAuditList picks them up.
+  try {
+    const res = await fetch('/api/candidates/missed?hours=24&minMultiple=2');
+    const data = await res.json();
+    if (!data.ok || !Array.isArray(data.rows)) return;
+    const map = {};
+    data.rows.forEach(r => { if (r.contract_address) map[r.contract_address] = r; });
+    (allCandidatesData || []).forEach(c => {
+      const hit = map[c.contractAddress];
+      if (hit) {
+        c._missedMultiple = hit.multiple;
+        c._missedCurrentMcap = hit.current_mcap;
+      }
+    });
+    renderAuditList();
+  } catch (err) {
+    console.warn('[missed] load failed:', err.message);
+  }
 }
 
 function filterAuditList(){
@@ -6475,12 +6519,24 @@ function renderAuditList(){
   else if(auditCurrentFilter==='IGNORE') rows=rows.filter(function(r){return r.finalDecision==='IGNORE';});
   else if(auditCurrentFilter==='BLOCKLIST') rows=rows.filter(function(r){return r.finalDecision==='BLOCKLIST';});
   else if(auditCurrentFilter==='PENDING') rows=rows.filter(function(r){return r.finalDecision==='PENDING';});
+  else if(auditCurrentFilter==='MISSED') rows=rows.filter(function(r){
+    // A "missed" coin is one we didn't post (IGNORE/WATCHLIST) that since ran ≥2x.
+    // Server attaches `_missedMultiple` on /api/candidates/missed fetch; if not
+    // present, fall back to any tracked peak_multiple >= 2 from outcome tracker.
+    var notPosted = r.finalDecision === 'IGNORE' || r.finalDecision === 'WATCHLIST';
+    var mult = r._missedMultiple || r.peak_multiple || r.peakMultiple;
+    return notPosted && mult && mult >= 2;
+  });
 
-  // Sort by newest first — fresh scans always at the top
+  // Sort — default newest, other modes surface hot/high-velocity candidates
+  var sortMode = window._auditSortMode || 'newest';
   rows.sort(function(a,b){
-    var aid = a.id || 0;
-    var bid = b.id || 0;
-    return bid - aid;
+    if (sortMode === 'score')    return (b.compositeScore||0) - (a.compositeScore||0);
+    if (sortMode === 'velocity') return (b.priceChange5m||-9999) - (a.priceChange5m||-9999);
+    if (sortMode === 'mcap')     return (a.marketCap||Infinity) - (b.marketCap||Infinity);
+    if (sortMode === 'age')      return (a.pairAgeHours||999) - (b.pairAgeHours||999);
+    // default: newest id first
+    return (b.id||0) - (a.id||0);
   });
 
   const total=rows.length;
@@ -6583,6 +6639,43 @@ function renderAuditList(){
     for (var ci=0; ci<tokenSym.length; ci++) colorIdx = (colorIdx + tokenSym.charCodeAt(ci)) % avatarColors.length;
     var avatarBg = avatarColors[colorIdx];
 
+    // ── Candidate "at-a-glance" badges ──
+    //   - 5m price delta (color-coded)
+    //   - Buy pressure micro-bar
+    //   - Reason tag explaining why this candidate is interesting right now
+    var p5 = r.priceChange5m;
+    var p1hRow = r.priceChange1h;
+    var p5Badge = '';
+    if (p5 != null) {
+      var p5c = p5 > 5 ? 'var(--green)' : p5 < -5 ? 'var(--red)' : 'var(--text3)';
+      p5Badge = '<span class="cand-chip" style="background:'+p5c+'14;border-color:'+p5c+'44;color:'+p5c+';font-size:7px">'+(p5>0?'+':'')+p5.toFixed(0)+'% 5m</span>';
+    }
+    var buys1h = r.buys1h || 0;
+    var sells1h = r.sells1h || 0;
+    var totalTx = buys1h + sells1h;
+    var buyPct = totalTx > 0 ? Math.round((buys1h / totalTx) * 100) : null;
+    var bsBadge = '';
+    if (buyPct != null && totalTx >= 10) {
+      var bsCol = buyPct > 65 ? 'var(--green)' : buyPct < 40 ? 'var(--red)' : 'var(--gold)';
+      bsBadge = '<span class="cand-chip" style="background:'+bsCol+'14;border-color:'+bsCol+'44;color:'+bsCol+';font-size:7px" title="Buys/Sells 1h">'+buyPct+'% 🟢 '+totalTx+'tx</span>';
+    }
+
+    // Reason tag — what makes this candidate stand out right now
+    var reason = '';
+    if (r.smartMoneyScore && r.smartMoneyScore > 0) reason = '🐋 SMART MONEY';
+    else if (r.knownWinnerWalletCount && r.knownWinnerWalletCount >= 2) reason = '🏆 WINNER BUY';
+    else if (r.isKolFollow) reason = '⭐ KOL BUY';
+    else if (p5 != null && p5 >= 50) reason = '🚀 SPIKE +'+p5.toFixed(0)+'%';
+    else if (isNew && gemWin) reason = '⚡ FRESH GEM';
+    else if (gemWin) reason = '🎯 SWEET SPOT';
+    else if (isNew) reason = '⚡ BRAND NEW';
+    else if (buyPct != null && buyPct >= 75 && totalTx >= 20) reason = '📈 BUY PRESSURE';
+    // Missed-opportunity shown only on MISSED filter (data attached server-side)
+    var missedBadge = '';
+    if (r._missedMultiple && r._missedMultiple >= 2) {
+      missedBadge = '<span class="cand-chip" style="background:rgba(255,109,0,0.18);border-color:rgba(255,109,0,0.5);color:var(--orange);font-size:7px;font-weight:700" title="We skipped this — it ran '+r._missedMultiple.toFixed(1)+'x since scan">💸 MISSED '+r._missedMultiple.toFixed(1)+'x</span>';
+    }
+
     var headerHTML =
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
         '<div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">'+
@@ -6595,13 +6688,16 @@ function renderAuditList(){
           '<div style="min-width:0;flex:1">'+
             '<div style="display:flex;align-items:center;gap:5px;margin-bottom:2px;flex-wrap:wrap">'+
               '<span style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px">$'+esc(r.token||'?')+'</span>'+
-              (isNew?'<span class="cand-chip" style="background:rgba(255,23,68,0.15);border-color:rgba(255,23,68,0.3);color:var(--red)">⚡ NEW</span>':'')+
-              (gemWin?'<span class="cand-chip" style="background:rgba(255,215,64,0.12);border-color:rgba(255,215,64,0.3);color:var(--gold)">💎 GEM</span>':'')+
+              missedBadge+
+              (reason?'<span class="cand-chip" style="background:rgba(0,229,255,0.12);border-color:rgba(0,229,255,0.35);color:var(--cyan);font-size:7px">'+reason+'</span>':'')+
+              (isNew && reason!=='⚡ BRAND NEW' && reason!=='⚡ FRESH GEM'?'<span class="cand-chip" style="background:rgba(255,23,68,0.15);border-color:rgba(255,23,68,0.3);color:var(--red)">⚡ NEW</span>':'')+
+              (gemWin && reason!=='🎯 SWEET SPOT' && reason!=='⚡ FRESH GEM'?'<span class="cand-chip" style="background:rgba(255,215,64,0.12);border-color:rgba(255,215,64,0.3);color:var(--gold)">💎 GEM</span>':'')+
             '</div>'+
             '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+
               esc(stage)+' &middot; '+mc+' &middot; '+age+
               (tsStr?' &middot; <span style="color:#ffffff;font-size:7px">'+tsStr+'</span>':'')+
             '</div>'+
+            (p5Badge || bsBadge ? '<div style="display:flex;gap:4px;margin-top:3px;flex-wrap:wrap">'+p5Badge+bsBadge+'</div>' : '')+
           '</div>'+
         '</div>'+
         scoreBlock+
@@ -7191,6 +7287,57 @@ function buildAuditDetail(c){
       <code style="font-family:var(--mono);font-size:8px;color:var(--text3);flex:1;word-break:break-all">${ca}</code>
       <button onclick="copyCA('${ca}')" style="background:rgba(24,255,255,0.1);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:3px;padding:4px 10px;font-family:var(--mono);font-size:9px;cursor:pointer;white-space:nowrap;flex-shrink:0">📋 COPY</button>
     </div>`:''}
+
+    <!-- ═══ WHY THIS DECISION — plain-English audit of why coin was/wasn't posted ═══ -->
+    ${(()=>{
+      const decision = c.finalDecision || 'PENDING';
+      const ignoreReason = c.ignore_reason || c.ignoreReason;
+      const postReason   = c.post_reason || c.postReason;
+      const claudeReason = c.claudeVerdict || c.claude_verdict;
+      const topPenalties = [];
+      const p = c.penalties;
+      if (p) {
+        ['launch','wallet','market','social'].forEach(k => {
+          (p[k]||[]).slice(0,2).forEach(s => topPenalties.push(s));
+        });
+      }
+      const decCol = decision==='AUTO_POST'?'var(--green)':decision==='WATCHLIST'?'var(--gold)':decision==='IGNORE'||decision==='BLOCKLIST'?'var(--red)':'var(--text3)';
+      const decEmoji = decision==='AUTO_POST'?'✅':decision==='WATCHLIST'?'👁':decision==='IGNORE'?'🚫':decision==='BLOCKLIST'?'⛔':'⏳';
+      const dataOk = {
+        Birdeye:   c.birdeyeOk===true || c.birdeye_ok===1,
+        Helius:    c.heliusOk===true  || c.helius_ok===1,
+        BubbleMap: c.bubblemapOk===true || c.bubblemap_ok===1,
+        Claude:    !!(c.claudeDecision || c.claude_decision),
+      };
+      const dataChips = Object.entries(dataOk).map(([k,v])=>{
+        const col = v?'var(--green)':'var(--text3)';
+        return `<span style="font-family:var(--mono);font-size:7px;padding:2px 7px;border-radius:3px;background:${col}14;border:1px solid ${col}44;color:${col}">${v?'✓':'✗'} ${k}</span>`;
+      }).join('');
+      return `<div style="background:linear-gradient(135deg,${decCol}08,rgba(0,0,0,0.3));border:1px solid ${decCol}33;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:14px">${decEmoji}</span>
+          <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:${decCol};letter-spacing:1px">WHY ${decision}</span>
+        </div>
+        ${claudeReason ? `<div style="font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.5;margin-bottom:8px;font-style:italic">"${esc(claudeReason.slice(0,280))}${claudeReason.length>280?'…':''}"</div>` : ''}
+        ${(ignoreReason || postReason) ? `<div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:6px">↳ ${esc(ignoreReason || postReason)}</div>` : ''}
+        ${topPenalties.length ? `<div style="margin-bottom:8px">
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-bottom:4px">TOP PENALTIES:</div>
+          ${topPenalties.slice(0,4).map(pen=>`<div style="font-family:var(--mono);font-size:8px;color:var(--red);margin-bottom:2px">• ${esc(String(pen).slice(0,120))}</div>`).join('')}
+        </div>` : ''}
+        <div style="display:flex;flex-wrap:wrap;gap:4px;padding-top:8px;border-top:1px dashed rgba(255,255,255,0.06)">
+          <span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-right:4px">DATA:</span>${dataChips}
+        </div>
+      </div>`;
+    })()}
+
+    <!-- ═══ LIVE CHART — DexScreener embed, 1m candles ═══ -->
+    <div style="background:rgba(0,0,0,0.5);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden">
+      <div style="padding:6px 12px;background:rgba(0,0,0,0.3);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-family:var(--mono);font-size:8px;color:var(--text2);letter-spacing:1px">📈 LIVE CHART · DexScreener</span>
+        <a href="https://dexscreener.com/solana/${ca}" target="_blank" style="font-family:var(--mono);font-size:8px;color:var(--cyan);text-decoration:none">OPEN ↗</a>
+      </div>
+      <iframe src="https://dexscreener.com/solana/${ca}?embed=1&theme=dark&trades=0&info=0" style="width:100%;height:280px;border:0;display:block;background:rgba(0,0,0,0.3)" loading="lazy"></iframe>
+    </div>
 
     <!-- ═══ 5 FOUNDATION SIGNALS — new scoring engine ═══ -->
     ${renderFoundationSignals(c)}

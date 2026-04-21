@@ -8564,6 +8564,78 @@ app.get('/api/candidates/by-ca/:ca', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// ── Missed Opportunities — ignored/watchlist coins that since ran ≥Nx ─────
+// Finds IGNORE/WATCHLIST candidates from the last H hours and batches a
+// DexScreener price lookup to compute current MCap vs scan-time MCap. Coins
+// running at ≥minMultiple get returned. Cheap (one batched DS call per 30
+// CAs, free API). Used by the Candidates page MISSED filter to surface
+// the gems we left on the table.
+app.get('/api/candidates/missed', async (req, res) => {
+  setCors(res);
+  try {
+    const hours = Math.min(168, Math.max(1, Number(req.query.hours ?? 24)));
+    const minMultiple = Math.max(1.2, Number(req.query.minMultiple ?? 2));
+    const cands = dbInstance.prepare(`
+      SELECT id, contract_address, token, market_cap, evaluated_at, final_decision
+      FROM candidates
+      WHERE final_decision IN ('IGNORE', 'WATCHLIST')
+        AND market_cap > 0
+        AND evaluated_at > datetime('now', '-' || ? || ' hours')
+      ORDER BY evaluated_at DESC
+      LIMIT 200
+    `).all(hours);
+    if (cands.length === 0) return res.json({ ok: true, rows: [], checked: 0 });
+
+    const caList = cands.map(c => c.contract_address).filter(Boolean);
+    const results = [];
+    const BATCH = 30;
+    for (let i = 0; i < caList.length; i += BATCH) {
+      const batch = caList.slice(i, i + BATCH).join(',');
+      try {
+        const dsRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${batch}`, {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!dsRes.ok) continue;
+        const dsData = await dsRes.json();
+        const pairs = Array.isArray(dsData.pairs) ? dsData.pairs : [];
+        const byCa = {};
+        for (const p of pairs) {
+          const ca = p.baseToken?.address;
+          if (!ca) continue;
+          const mc = p.marketCap ?? p.fdv ?? null;
+          if (mc && (!byCa[ca] || mc > byCa[ca].mc)) {
+            byCa[ca] = { mc, priceUsd: p.priceUsd, symbol: p.baseToken?.symbol };
+          }
+        }
+        for (const c of cands.slice(i, i + BATCH)) {
+          const now = byCa[c.contract_address];
+          if (!now || !now.mc || !c.market_cap) continue;
+          const multiple = now.mc / c.market_cap;
+          if (multiple >= minMultiple) {
+            results.push({
+              id: c.id,
+              contract_address: c.contract_address,
+              token: c.token || now.symbol,
+              decision: c.final_decision,
+              scan_mcap: c.market_cap,
+              current_mcap: now.mc,
+              multiple: Number(multiple.toFixed(2)),
+              scanned_at: c.evaluated_at,
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(`[missed] batch ${i}-${i+BATCH} failed: ${err.message}`);
+      }
+    }
+    results.sort((a, b) => b.multiple - a.multiple);
+    res.json({ ok: true, rows: results, checked: cands.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/candidates/:id', (req, res) => {
   setCors(res);
   try {
