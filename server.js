@@ -1153,7 +1153,7 @@ const SCORING_CONFIG_DEFAULTS = {
   rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:         3.0, // peak X to lock WIN (raised 2.5→3.0: real winners only, NEUTRAL wave was 1.5-2.4x wicks)
+  winPeakMultiple:       1.28, // peak X to lock WIN (1.28x reflects realistic achievable threshold; <1.27 = LOSS)
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
@@ -1169,17 +1169,24 @@ try {
     console.log('[config] Restored SCORING_CONFIG from DB:', JSON.stringify(SCORING_CONFIG));
 
     // ── One-time auto-migration for stale kv_store values ──────────────
-    // When we raise a default floor/cap in code, the kv_store's previously-
-    // saved lower value wins and silently pins scoring. Detect and bump
-    // to the new default when stored < default for these upward-only knobs.
-    // Preserves explicit upward customization (if user has 80, keeps 80).
+    // When defaults change, the kv_store's previously-saved value wins and
+    // silently pins scoring. Apply two migration tables:
+    //   MIGRATE_UP:   stored < new default → bump up (preserves higher values)
+    //   MIGRATE_FORCE: always set to new default (for direction reversals)
     const MIGRATE_UP = {
-      noSignalCap:           72,   // raised 65→68→72 today
-      winPeakMultiple:       3.0,  // raised 2.5→3.0 (NEUTRAL wave fix — real winners only)
-      minScoreToPost:        45,   // lowered 50→45, but shouldn't exceed 45 in stale form
-      globalBonusCap:        10,   // raised 8→10
-      consensusOverrideScore:60,   // lowered 65→60
-      devFingerprintCap:      6,   // raised 3→6
+      noSignalCap:           72,
+      minScoreToPost:        45,
+      globalBonusCap:        10,
+      consensusOverrideScore:60,
+      devFingerprintCap:      6,
+    };
+    // Force-migrate: win threshold reshaped from 3.0 → 1.28 to reflect
+    // realistic achievable peaks in the call pool. Downgrade from a higher
+    // stored value is intentional here; we want the whole fleet using the
+    // new target. User can re-edit in Control Station after if they want.
+    const MIGRATE_FORCE = {
+      winPeakMultiple:    1.28,
+      neutralDrawdownPct: 10,
     };
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
@@ -1190,16 +1197,50 @@ try {
         migrated = true;
       }
     }
-    // Same for knobs where we want to enforce a ceiling (lowered values)
-    const MIGRATE_DOWN = {
-      minScoreToPost:        45,   // if stored > 45, keep user intent; else ensure 45
-    };
-    // (No active down-migrations right now — kept for future shape)
+    for (const [key, forcedValue] of Object.entries(MIGRATE_FORCE)) {
+      const stored = SCORING_CONFIG[key];
+      if (stored !== forcedValue) {
+        // One-time flag so we don't repeat-force on every boot once user adjusts
+        const migKey = `migrated_force_${key}`;
+        const alreadyRan = (() => {
+          try { return dbInstance.prepare(`SELECT value FROM kv_store WHERE key=?`).get(migKey)?.value === '1'; } catch { return false; }
+        })();
+        if (!alreadyRan) {
+          console.log(`[config:migrate] ${key}: ${stored} → ${forcedValue} (force-migrate, one-time)`);
+          SCORING_CONFIG[key] = forcedValue;
+          migrated = true;
+          try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, '1')`).run(migKey); } catch {}
+        }
+      }
+    }
     if (migrated) {
       try {
         dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoring_config', ?)`).run(JSON.stringify(SCORING_CONFIG));
         console.log('[config:migrate] Persisted migrated scoring config.');
       } catch {}
+    }
+
+    // ── Re-resolve existing calls against the new win threshold ──────────
+    // After winPeakMultiple drops, historical calls labeled NEUTRAL or LOSS
+    // may now qualify as WIN (and vice versa). Run once; flag in kv_store.
+    try {
+      const resolveFlagKey = 'migrated_resolve_calls_v_1_28';
+      const alreadyResolved = dbInstance.prepare(`SELECT value FROM kv_store WHERE key=?`).get(resolveFlagKey)?.value === '1';
+      if (!alreadyResolved) {
+        const winTarget = SCORING_CONFIG.winPeakMultiple ?? 1.28;
+        const upRes = dbInstance.prepare(`
+          UPDATE calls SET
+            outcome          = CASE WHEN peak_multiple >= ? THEN 'WIN' ELSE 'LOSS' END,
+            auto_resolved_at = datetime('now'),
+            outcome_source   = 'AUTO_MIGRATE'
+          WHERE outcome != 'PENDING'
+            AND peak_multiple IS NOT NULL
+        `).run(winTarget);
+        console.log(`[config:migrate] Re-resolved ${upRes.changes} calls against winPeakMultiple=${winTarget}`);
+        try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, '1')`).run(resolveFlagKey); } catch {}
+      }
+    } catch (err) {
+      console.warn('[config:migrate] Re-resolve failed:', err.message);
     }
   }
 } catch (err) { console.warn('[config] Failed to restore scoring config:', err.message); }
@@ -9662,12 +9703,22 @@ app.get('/api/stats/weekly', (req, res) => {
 
     const resolved = (allTime.wins || 0) + (allTime.losses || 0);
 
-    // Current week individual calls for the live scoreboard
+    // Current week individual calls for the live scoreboard — deduped by
+    // contract_address. Multiple calls of the same coin (rescans, retests)
+    // collapse into the most recent row so the user doesn't see $Flork
+    // appear 4 times with different outcomes.
     const currentCalls = dbInstance.prepare(`
       SELECT token, contract_address, outcome, peak_multiple, score_at_call,
-             market_cap_at_call, COALESCE(called_at, posted_at) as call_time
-      FROM calls
-      WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+             market_cap_at_call, call_time
+      FROM (
+        SELECT token, contract_address, outcome, peak_multiple, score_at_call,
+               market_cap_at_call, COALESCE(called_at, posted_at) as call_time,
+               id,
+               ROW_NUMBER() OVER (PARTITION BY contract_address ORDER BY id DESC) as rn
+        FROM calls
+        WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+      )
+      WHERE rn = 1
       ORDER BY id DESC LIMIT 20
     `).all();
 
