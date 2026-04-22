@@ -1038,6 +1038,42 @@ function invalidateMemoryCache() {
 // Refreshed every 30 min via setInterval. Uses same logic as the public
 // /api/candidates/missed endpoint — DexScreener batch lookup, free API.
 const _missedCache = { rows: [], refreshedAt: 0 };
+
+// ─── Call funnel diagnostic ───────────────────────────────────────────────
+// Tracks where candidates drop in the pipeline so we can see at a glance
+// why calls aren't flowing. Rolling 60-min window, rolls forward on each
+// increment so old events age out naturally. Read via /api/diagnose/funnel.
+const _callFunnel = {
+  windowStartMs: Date.now(),
+  stages: {
+    evaluated:          0,  // entered auto-caller
+    dataVoidSkip:       0,  // no enrichment data at all
+    scored:             0,  // got a composite score
+    belowFloor:         0,  // score < 38 hard floor
+    ignoreDecision:     0,  // makeFinalDecision said IGNORE
+    watchlistDecision:  0,  // makeFinalDecision said WATCHLIST
+    autoPostDecision:   0,  // makeFinalDecision said AUTO_POST
+    claudeExtremeVeto:  0,
+    consensusGate:      0,  // Claude said no (claude-only mode)
+    momentumGate:       0,  // DUMPING/SEVERE
+    rugGuard:           0,  // $13-17.5K band failed
+    liquidityFloor:     0,  // <$3K liq
+    earlyMcapDefer:     0,  // $6-9K defer
+    bundleVeto:         0,
+    extendedAvoid:      0,
+    smartMoneyOverride: 0,  // cluster/KOL forced auto-post
+    posted:             0,
+    pausedPosting:      0,
+  },
+};
+function fnl(stage) {
+  // Roll window every 60 min
+  if (Date.now() - _callFunnel.windowStartMs > 60 * 60_000) {
+    _callFunnel.windowStartMs = Date.now();
+    for (const k of Object.keys(_callFunnel.stages)) _callFunnel.stages[k] = 0;
+  }
+  _callFunnel.stages[stage] = (_callFunnel.stages[stage] || 0) + 1;
+}
 const MISSED_REFRESH_MS = 30 * 60_000;
 
 async function refreshMissedOpportunities() {
@@ -2823,13 +2859,15 @@ async function processCandidate(candidate, isRescan = false) {
       }
     } catch {}
 
+    fnl('evaluated');
     let scoreResult;
     try {
       scoreResult = computeFullScore(enrichedCandidate, TUNING_CONFIG?.discovery);
+      fnl('scored');
     } catch (scoreErr) {
       console.error('[auto-caller] computeFullScore CRASHED — falling back to legacy:', scoreErr.message);
       // Fallback: run without custom weights
-      try { scoreResult = computeFullScore(enrichedCandidate); } catch (e2) {
+      try { scoreResult = computeFullScore(enrichedCandidate); fnl('scored'); } catch (e2) {
         console.error('[auto-caller] Legacy scoring also failed:', e2.message);
         return; // Can't score at all — skip this candidate
       }
@@ -2859,6 +2897,7 @@ async function processCandidate(candidate, isRescan = false) {
     // credits evaluating air.
     if (!enrichedCandidate.birdeyeOk && !enrichedCandidate.heliusOk && enrichedCandidate.marketCap == null) {
       console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
+      fnl('dataVoidSkip');
       logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
       return;
     }
@@ -3184,19 +3223,14 @@ async function processCandidate(candidate, isRescan = false) {
       }
     } catch {}
 
-    // ── Age-mismatch penalty — stale coins that stalled out ───────────────
-    // A $20K coin that's 4 hours old and hasn't run is probably done. Real
-    // winners move in the first 30-60 min post-launch. Coins sitting at low
-    // MCap but elevated age with flat momentum are the 1.0-1.3x dead-call
-    // profile — the NEUTRAL wave we've been fighting. Penalty fires only
-    // when price has actually stalled (not when it's currently rolling
-    // over, which the momentum gate already catches).
-    //
-    // Conditions (ALL must be true):
-    //   - pairAgeHours > 2 (past the sweet-spot entry window)
-    //   - MCap < $30K (should have rallied by now if it was going to)
-    //   - priceChange1h < 10% AND priceChange6h < 20% (flat, stuck)
-    //   - Cluster/KOL bypasses (their conviction overrides the time signal)
+    // ── Age-mismatch penalty — DISABLED while diagnosing call drought ─────
+    // Shipped in 2d35d30, user reports no calls for 6h after. Temporarily
+    // off so we can rule it in or out. Re-enable once the funnel diagnostic
+    // shows where coins are actually dying. The binary WIN/LOSS + 1.28x
+    // threshold combined with other penalties may have made this penalty
+    // the straw that tipped too many coins below the 45 floor.
+    // Logic preserved for easy re-enable:
+    //   - ageHours > 2 + MCap < $30K + p1h<10 + p6h<20 → -5
     try {
       const ageMm   = enrichedCandidate.pairAgeHours ?? 0;
       const mcapMm  = enrichedCandidate.marketCap ?? 0;
@@ -3209,10 +3243,9 @@ async function processCandidate(candidate, isRescan = false) {
                    && p1hMm < 10
                    && p6hMm < 20;
       if (isStuck && !bypass) {
-        scoreResult.score = Math.max(0, scoreResult.score - 5);
-        (scoreResult.penalties = scoreResult.penalties || {}).market = scoreResult.penalties.market || [];
-        scoreResult.penalties.market.push(`-5 AGE_MISMATCH — $${Math.round(mcapMm/1000)}K @ ${ageMm.toFixed(1)}h with flat momentum (1h ${p1hMm.toFixed(0)}% / 6h ${p6hMm.toFixed(0)}%) — stuck out of sequence`);
-        console.log(`[auto-caller] ⏱  $${enrichedCandidate.token ?? ca.slice(0,6)} age-mismatch -5: ${ageMm.toFixed(1)}h old at $${Math.round(mcapMm/1000)}K, still flat`);
+        // Diagnostic only — no score hit while we investigate the drought
+        scoreResult._ageMismatchWouldHit = true;
+        console.log(`[auto-caller] ⏱  $${enrichedCandidate.token ?? ca.slice(0,6)} would-have-age-mismatched: ${ageMm.toFixed(1)}h @ $${Math.round(mcapMm/1000)}K — penalty DISABLED`);
       }
     } catch {}
 
@@ -3529,6 +3562,7 @@ async function processCandidate(candidate, isRescan = false) {
       verdict?.risk === 'EXTREME' &&
       (verdict?.score ?? 100) < 35
     ) {
+      fnl('claudeExtremeVeto');
       logEvent('WARN', 'CLAUDE_EXTREME_VETO', `${enrichedCandidate.token ?? ca.slice(0,6)} Claude=${verdict.score}/100 EXTREME — vetoed AUTO_POST despite OpenAI=${openAIDecision?.decision ?? '?'} ${openAIDecision?.conviction ?? '?'}%`);
       console.log(`[auto-caller] 🚨 Claude EXTREME veto — $${enrichedCandidate.token ?? ca.slice(0,6)} (Claude score ${verdict.score}, OpenAI ${openAIDecision?.decision ?? '?'}) → WATCHLIST`);
       try {
@@ -3582,6 +3616,7 @@ async function processCandidate(candidate, isRescan = false) {
       }
 
       if (gateFailed) {
+        fnl('consensusGate');
         const trigger = claudeOnly ? 'CLAUDE_SAID_NO' : 'CONSENSUS_GATE';
         const reason = claudeOnly
           ? `Claude=${verdict?.decision ?? 'none'} score=${scoreResult.score}`
@@ -3754,6 +3789,7 @@ async function processCandidate(candidate, isRescan = false) {
           const severe = momentumBlock.startsWith('SEVERE') || momentumBlock.startsWith('ACCELERATING');
           finalDecision = severe ? 'BLOCKLIST' : 'WATCHLIST';
           const tag = severe ? '🚫' : '📉';
+          fnl('momentumGate');
           logEvent('WARN', 'MOMENTUM_GATE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${momentumBlock} → ${finalDecision}`);
           console.log(`[auto-caller] ${tag} Momentum gate — $${enrichedCandidate.token ?? ca.slice(0,6)} ${momentumBlock} → ${finalDecision}`);
           if (severe) {
@@ -3779,6 +3815,7 @@ async function processCandidate(candidate, isRescan = false) {
       !bypassRugGuard &&
       (scoreResult.score ?? 0) < SCORING_CONFIG.rugGuardMinScore
     ) {
+      fnl('rugGuard');
       logEvent('INFO', 'RUG_GUARD', `${enrichedCandidate.token ?? ca.slice(0,6)} mcap=${Math.round(mcapNow/1000)}K score=${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore} → WATCHLIST (high-risk band guard)`);
       console.log(`[auto-caller] 🛡  $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — $${Math.round(mcapNow/1000)}K in rug-risk band, score ${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore}`);
       finalDecision = 'WATCHLIST';
@@ -3795,6 +3832,7 @@ async function processCandidate(candidate, isRescan = false) {
       !bypassRugGuard &&
       liqNow != null && liqNow < minLiq
     ) {
+      fnl('liquidityFloor');
       logEvent('INFO', 'LIQUIDITY_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} liq=$${Math.round(liqNow)} < $${minLiq} → WATCHLIST`);
       console.log(`[auto-caller] 💧 $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — liquidity $${Math.round(liqNow)} below floor $${minLiq} (can't sustain a 2.5x run)`);
       finalDecision = 'WATCHLIST';
@@ -4035,9 +4073,11 @@ async function processCandidate(candidate, isRescan = false) {
 
       // Respect pausePosting config override (set via dashboard or /config Telegram command)
       if (AI_CONFIG_OVERRIDES.pausePosting) {
+        fnl('pausedPosting');
         console.log(`[ai-os] ⏸ Posting PAUSED — $${enrichedCandidate.token} would have posted (score ${scoreResult.score})`);
         logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
       } else {
+        fnl('posted');
         await sendCallAlertWithImage(caption, null, coinImg);
       }
 
@@ -10719,6 +10759,39 @@ app.get('/api/diagnose/holders/:ca', async (req, res) => {
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
+// Call-funnel diagnostic — shows where candidates drop in the pipeline
+// during the rolling 60-min window. Hit this endpoint during a call
+// drought to see exactly which gate is blocking everything.
+app.get('/api/diagnose/funnel', (req, res) => {
+  setCors(res);
+  const s = _callFunnel.stages;
+  const windowAgeMs = Date.now() - _callFunnel.windowStartMs;
+  const total = s.evaluated || 1;
+  const pct = (n) => `${((n/total)*100).toFixed(1)}%`;
+  const funnel = [
+    ['EVALUATED (entered pipeline)', s.evaluated, '100%'],
+    ['─ data_void_skip',              s.dataVoidSkip,      pct(s.dataVoidSkip)],
+    ['SCORED',                        s.scored,            pct(s.scored)],
+    ['─ CLAUDE_EXTREME_VETO',         s.claudeExtremeVeto, pct(s.claudeExtremeVeto)],
+    ['─ CONSENSUS_GATE (Claude no)',  s.consensusGate,     pct(s.consensusGate)],
+    ['─ MOMENTUM_GATE',               s.momentumGate,      pct(s.momentumGate)],
+    ['─ RUG_GUARD ($13-17.5K)',       s.rugGuard,          pct(s.rugGuard)],
+    ['─ LIQUIDITY_FLOOR',             s.liquidityFloor,    pct(s.liquidityFloor)],
+    ['─ EARLY_MCAP_DEFER',            s.earlyMcapDefer,    pct(s.earlyMcapDefer)],
+    ['─ PAUSED_POSTING',              s.pausedPosting,     pct(s.pausedPosting)],
+    ['🎉 POSTED',                      s.posted,            pct(s.posted)],
+  ];
+  res.json({
+    ok: true,
+    windowAgeMinutes: Math.round(windowAgeMs / 60000),
+    stages: s,
+    funnel: funnel.map(([stage, n, pct]) => `${stage.padEnd(38)} ${String(n).padStart(4)}  ${pct}`),
+    postRate: s.evaluated > 0 ? ((s.posted / s.evaluated) * 100).toFixed(2) + '%' : '—',
+    pausedPosting: !!AI_CONFIG_OVERRIDES.pausePosting,
+    scoringConfig: SCORING_CONFIG,
+  });
+});
+
 app.get('/api/diagnose/claude', async (req, res) => {
   setCors(res);
   const key = process.env.CLAUDE_API_KEY || null;
