@@ -1153,7 +1153,7 @@ const SCORING_CONFIG_DEFAULTS = {
   rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:         2.5, // peak X to lock WIN (raised 1.5→2.5: we hunt real winners, not wicks)
+  winPeakMultiple:         3.0, // peak X to lock WIN (raised 2.5→3.0: real winners only, NEUTRAL wave was 1.5-2.4x wicks)
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
@@ -1175,7 +1175,7 @@ try {
     // Preserves explicit upward customization (if user has 80, keeps 80).
     const MIGRATE_UP = {
       noSignalCap:           72,   // raised 65→68→72 today
-      winPeakMultiple:       2.5,  // raised 1.5→2.5 today (user wants real winners)
+      winPeakMultiple:       3.0,  // raised 2.5→3.0 (NEUTRAL wave fix — real winners only)
       minScoreToPost:        45,   // lowered 50→45, but shouldn't exceed 45 in stale form
       globalBonusCap:        10,   // raised 8→10
       consensusOverrideScore:60,   // lowered 65→60
@@ -3023,6 +3023,65 @@ async function processCandidate(candidate, isRescan = false) {
         if (applied > 0) {
           (scoreResult.signals = scoreResult.signals || {}).social = scoreResult.signals.social || [];
           scoreResult.signals.social.push(`+${applied} LUNARCRUSH — ${lcSignals.join(', ')}`);
+        }
+      }
+    } catch {}
+
+    // ── Pre-breakout accumulation bonus ──────────────────────────────────
+    // The 10x-30x coins almost always show this pattern FIRST: volume is
+    // climbing steadily, buy-pressure dominating, but price hasn't moved
+    // much yet. That's smart money accumulating before the pop. We reward
+    // this setup BEFORE velocity explodes — getting us in earlier than
+    // the price-follow crowd.
+    //
+    // Conditions (all must be true):
+    //   - Age < 1 hour (still in the accumulation window)
+    //   - Buys1h / sells1h ≥ 2.0 (dominant buy pressure)
+    //   - Price change 1h < 30% (hasn't ripped yet)
+    //   - Volume1h ≥ $2K (real accumulation, not crickets)
+    //   - At least 15 buys in the hour (real participants)
+    try {
+      const ageHrs  = enrichedCandidate.pairAgeHours ?? 99;
+      const b1h     = enrichedCandidate.buys1h ?? 0;
+      const s1h     = enrichedCandidate.sells1h ?? 0;
+      const vol1h   = enrichedCandidate.volume1h ?? 0;
+      const p1h     = enrichedCandidate.priceChange1h ?? 0;
+      const bsRatio = s1h > 0 ? b1h / s1h : (b1h > 0 ? 99 : 0);
+      const preBreakout = ageHrs < 1
+                      && b1h >= 15
+                      && vol1h >= 2000
+                      && bsRatio >= 2.0
+                      && p1h < 30;
+      if (preBreakout) {
+        const applied = addBonusCapped(5);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+          scoreResult.signals.market.push(`+${applied} PRE-BREAKOUT — buy pressure ${bsRatio.toFixed(1)}x accumulating, price still flat (+${p1h.toFixed(0)}%)`);
+          console.log(`[auto-caller] 🎯 PRE-BREAKOUT — $${enrichedCandidate.token ?? ca.slice(0,6)} ratio=${bsRatio.toFixed(1)} vol1h=${Math.round(vol1h)} p1h=${p1h.toFixed(1)}%`);
+        }
+      }
+    } catch {}
+
+    // ── Early-entry MCap bonus — tighter band for real upside ────────────
+    // A $10K coin doing 10x peaks at $100K. A $60K coin doing 10x peaks at
+    // $600K — different game entirely. Bias harder toward the $5K-$20K
+    // band where 10x moves are structurally possible. Above $40K we need
+    // to be skeptical that upside remains.
+    try {
+      const mcapEarly = enrichedCandidate.marketCap ?? 0;
+      const ageEarly  = enrichedCandidate.pairAgeHours ?? 99;
+      let earlyBonus = 0;
+      let earlyLabel = '';
+      if (mcapEarly >= 5000 && mcapEarly <= 12000 && ageEarly < 0.25) {
+        earlyBonus = 4; earlyLabel = `EARLIEST ENTRY ($${Math.round(mcapEarly/1000)}K @ ${Math.round(ageEarly*60)}min)`;
+      } else if (mcapEarly >= 5000 && mcapEarly <= 20000 && ageEarly < 0.5) {
+        earlyBonus = 3; earlyLabel = `EARLY ENTRY ($${Math.round(mcapEarly/1000)}K @ ${Math.round(ageEarly*60)}min)`;
+      }
+      if (earlyBonus > 0) {
+        const applied = addBonusCapped(earlyBonus);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+          scoreResult.signals.launch.push(`+${applied} ${earlyLabel} — structural 10x upside`);
         }
       }
     } catch {}

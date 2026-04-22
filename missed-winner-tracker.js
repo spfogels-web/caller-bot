@@ -529,11 +529,15 @@ export async function runOutcomeTracker(dbInstance) {
         const wasUpgrade = call.outcome && call.outcome !== 'WIN' && call.outcome !== 'PENDING';
         console.log(`[outcome-tracker] ✅ ${wasUpgrade ? 'UPGRADED' : 'Auto'}-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)${wasUpgrade ? ' (was ' + call.outcome + ')' : ''} — LOCKED`);
       } else if (confirmWindow && !reachedWinBar && call.outcome !== 'WIN') {
-        // 2h passed and peak never hit 1.5x. Never downgrade an existing WIN.
-        // Peak 0.9x–1.49x → NEUTRAL (didn't lose money)
-        // Peak < 0.9x → LOSS (real drawdown)
-        const finalOutcome = peakNow >= 0.9 ? 'NEUTRAL' : 'LOSS';
-        const emoji = finalOutcome === 'NEUTRAL' ? '➖' : '❌';
+        // 2h passed and peak never hit winPeakMultiple. Never downgrade an
+        // existing WIN.
+        //
+        // BINARY MODE: no more NEUTRAL middle ground. Peak < winPeakMultiple
+        // = LOSS, full stop. We're a caller bot — "didn't lose much" isn't
+        // a win. The feedback loop needs clean WIN/LOSS signal for the
+        // bot to learn what moves vs what stalls.
+        const finalOutcome = 'LOSS';
+        const emoji = '❌';
         dbInstance.prepare(`
           UPDATE calls SET
             outcome = ?,

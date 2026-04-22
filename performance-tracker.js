@@ -231,17 +231,14 @@ function saveWinnerWallets(db, buyers, token, callId, candidateId) {
 // ─── Outcome Determination ────────────────────────────────────────────────────
 
 /**
- * Determine WIN/LOSS/NEUTRAL based on price change since entry
+ * Determine WIN/LOSS based on price change since entry.
+ * Binary mode — no NEUTRAL middle. Anything that didn't hit WIN_THRESHOLD
+ * is LOSS. "Didn't lose much" isn't a win for a caller bot.
  */
 function determineOutcome(entryPrice, currentPrice) {
   if (!entryPrice || !currentPrice || entryPrice <= 0) return null;
   const pctChange = ((currentPrice - entryPrice) / entryPrice) * 100;
-
-  let outcome;
-  if      (pctChange >= WIN_THRESHOLD)  outcome = 'WIN';
-  else if (pctChange <= LOSS_THRESHOLD) outcome = 'LOSS';
-  else                                   outcome = 'NEUTRAL';
-
+  const outcome = pctChange >= WIN_THRESHOLD ? 'WIN' : 'LOSS';
   return { outcome, pctChange: Math.round(pctChange * 100) / 100 };
 }
 
