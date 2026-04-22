@@ -1238,7 +1238,7 @@ function persistAIConfig() {
 // and whenever a POST /api/config/scoring lands. Every hot-path site below
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
-  minScoreToPost:         38,   // AXIOSCAN-MODE — recall over precision. Hard floor for AUTO_POST. Was 45. Dropped to catch more candidates that might be 3-5x.
+  minScoreToPost:         35,   // UNBLOCK — dropped to scorer hard floor. Any passing score should be able to post.
   sweetSpotBonus:          4,   // $13K-$40K MCap
   secondaryBonus:          2,   // $40K-$80K MCap
   preLaunchBonus:          6,   // dev funded by CEX within 6h
@@ -1255,7 +1255,7 @@ const SCORING_CONFIG_DEFAULTS = {
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  1500,   // AXIOSCAN-MODE — $1.5K min liquidity (was $3K). Many 10x moonshots start with thin liquidity and grow it.
   lockedKnobs: ['winPeakMultiple', 'neutralDrawdownPct'],  // knobs auto-optimize cannot touch
-  earlyMCapDeferMinutes:   3,   // defer AUTO_POST for $6K-$9K coins until N min after first-seen (lets us confirm real momentum); extreme-velocity bypasses
+  earlyMCapDeferMinutes:   0,   // DISABLED — was deferring $6K-$9K coins 3min, which was holding too many. Set to 0 to skip defer entirely.
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
   earlyMCapDeferMax:    9000,   // upper edge of the defer band ($)
 };
@@ -3635,7 +3635,15 @@ async function processCandidate(candidate, isRescan = false) {
     //
     // Bypassed entirely by smart-money cluster/KOL alerts.
     if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney) {
-      const claudeOK = verdict && (verdict.decision === 'AUTO_POST' || verdict.decision === 'POST');
+      // Softened for call-drought recovery: Claude WATCHLIST + strong scorer
+      // signal (score ≥ 50) now counts as OK to post. Previously only AUTO_POST
+      // / POST decisions passed; Claude being conservative was silently killing
+      // every marginal call. IGNORE / BLOCKLIST / RETEST still block posting.
+      const claudeOK = verdict && (
+        verdict.decision === 'AUTO_POST' ||
+        verdict.decision === 'POST' ||
+        (verdict.decision === 'WATCHLIST' && (scoreResult.score ?? 0) >= 50)
+      );
       const openaiOK = openAIDecision && (openAIDecision.decision === 'POST' || openAIDecision.decision === 'PROMOTE');
       const claudeOnly = !!SCORING_CONFIG.claudeOnlyMode;
 
@@ -3871,16 +3879,12 @@ async function processCandidate(candidate, isRescan = false) {
       finalDecision = 'WATCHLIST';
     }
 
-    // ── FOUNDATION-TRUST GATE ──────────────────────────────────────────────
-    // When scorer-dual can't compute the 5 foundation signals (data missing
-    // or ledger not populated yet), it returns dualParts with all zeros.
-    // The composite still gets a score from bonuses + baseline structure,
-    // but that's not a real read on the coin's quality.
-    // Example: $MARS AUTO_POSTed at 58 with Foundation 0/100 — 0/35 vol
-    // velocity, 0/25 buy pressure, 0/20 wallet, etc. All fallback values.
-    // Block AUTO_POST when foundation is functionally empty so we don't
-    // call on coins the scorer literally couldn't evaluate.
-    // Cluster/KOL bypasses (their conviction trumps data completeness).
+    // ── FOUNDATION-TRUST GATE — DISABLED during call drought ───────────
+    // Was demoting coins where scorer-dual returned 0 foundation signals
+    // (e.g. fresh coins before ledger populated). User still getting zero
+    // calls even at threshold 8 — turning it fully off. Gate logic still
+    // logs a diagnostic flag when it WOULD have fired, so we can re-enable
+    // once flow is restored.
     if (finalDecision === 'AUTO_POST' && !bypassRugGuard) {
       const dp = scoreResult.dualParts;
       if (dp) {
@@ -3890,31 +3894,24 @@ async function processCandidate(candidate, isRescan = false) {
           (dp.walletQuality       ?? 0) +
           (dp.holderDistribution  ?? 0) +
           (dp.liquidityHealth     ?? 0);
-        // AXIOSCAN-MODE — threshold 15 → 8. Only blocks coins with
-        // literally zero foundation data. Some real 10x coins have sparse
-        // early data; don't let the scorer's data-gap paranoia kill them.
         if (foundationTotal < 8) {
-          fnl('foundationTrust');
-          logEvent('INFO', 'FOUNDATION_TRUST', `${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 (score ${scoreResult.score}) → WATCHLIST (zero signal)`);
-          console.log(`[auto-caller] 📉 $${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 — no real signal, WATCHLIST`);
-          finalDecision = 'WATCHLIST';
+          scoreResult._foundationTrustWouldHit = true;
+          // Demotion disabled — coins pass through to Claude
         }
       }
     }
 
     // ── EARLY-MCAP DEFER: $6K-$9K coins wait N min to confirm momentum ──
-    // User's rule: for coins first seen in the $6-$9K band, hold the post
-    // for 3 minutes and re-evaluate on the next scan cycle. UNLESS velocity
-    // is extreme from the start (big 5m pump / sustained buys / accelerating
-    // volume) — then it's clearly organic and posts immediately.
-    // Cluster / KOL alerts also bypass — their conviction trumps the wait.
+    // Set earlyMCapDeferMinutes=0 in SCORING_CONFIG to disable entirely
+    // (call drought fix — we were holding too many coins that would have
+    // been real calls).
     if (finalDecision === 'AUTO_POST' && !bypassRugGuard) {
       const mcapForDefer  = enrichedCandidate.marketCap ?? 0;
       const deferMin      = SCORING_CONFIG.earlyMCapDeferMin ?? 6000;
       const deferMax      = SCORING_CONFIG.earlyMCapDeferMax ?? 9000;
       const deferMinutes  = SCORING_CONFIG.earlyMCapDeferMinutes ?? 3;
       const inBand        = mcapForDefer >= deferMin && mcapForDefer <= deferMax;
-      if (inBand) {
+      if (inBand && deferMinutes > 0) {
         const extreme = hasExtremeVelocity(enrichedCandidate);
         if (extreme) {
           logEvent('INFO', 'EARLY_MCAP_EXTREME', `${enrichedCandidate.token ?? ca.slice(0,6)} $${Math.round(mcapForDefer/1000)}K in defer band but extreme velocity — posting immediately`);
