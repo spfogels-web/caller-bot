@@ -5153,8 +5153,17 @@ function renderSidebar(){
 }
 
 function buildSidebarCoin(r){
-  const qs=r.quick_score??0;
-  const col=qs>=80?'var(--gold)':qs>=65?'var(--green)':qs>=50?'var(--cyan)':'var(--orange)';
+  // Prefer the real composite score (0-100 full pipeline) over the quick
+  // score (0-70 pre-screen heuristic). Sidebar used to show 70 then detail
+  // showed 54 — confusing because they're different metrics. Now sidebar
+  // shows what the bot ACTUALLY thinks of the coin, with a label showing
+  // which score is displayed so you know if it's still pre-scoring.
+  const composite = r.composite_score ?? r.compositeScore;
+  const qsRaw     = r.quick_score ?? 0;
+  const hasFull   = composite != null && composite > 0;
+  const qs        = hasFull ? composite : qsRaw;
+  const scoreLabel = hasFull ? 'SCORE' : 'QS·PRE-SCREEN';
+  const col=qs>=80?'var(--gold)':qs>=65?'var(--green)':qs>=50?'var(--cyan)':qs>=35?'var(--orange)':'var(--red)';
   const p5m=r.price_change_5m,p1h=r.price_change_1h;
   const p5mC=p5m>0?'var(--green)':p5m<0?'var(--red)':'var(--text3)';
   const p1hC=p1h>0?'var(--green)':p1h<0?'var(--red)':'var(--text3)';
@@ -5183,7 +5192,7 @@ function buildSidebarCoin(r){
       </div>
       <div style="text-align:right">
         <div class="pcoin-score" style="color:${col}">${qs}</div>
-        <div style="font-family:var(--mono);font-size:7px;color:var(--text3)">SCORE</div>
+        <div style="font-family:var(--mono);font-size:7px;color:var(--text3)" title="${hasFull ? 'Full composite score (scorer + bonuses + AI)' : 'Scanner pre-screen — full composite pending'}">${scoreLabel}</div>
       </div>
     </div>
     <div class="pcoin-meta">
