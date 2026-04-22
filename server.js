@@ -2835,7 +2835,12 @@ async function processCandidate(candidate, isRescan = false) {
     return;
   }
 
-  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 120_000;
+  // AXIOSCAN-MODE — raised default from 120K to 200K. $papi at $236K was
+  // being blocked even though a 3x from there is still a real call. The
+  // sweet-spot bonuses (+4 for $15-40K, +4 for EARLY_ENTRY) already bias
+  // scoring toward low-MCap entries; the raw cap only needs to filter
+  // "obviously too late" coins (>$250K where 3x is harder).
+  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 200_000;
   if ((candidate.marketCap ?? 0) > MCAP_HARD_CAP) {
     logEvent('INFO', 'MCAP_CEILING', `${candidate.token ?? ca.slice(0,6)} mcap=${Math.round(candidate.marketCap/1000)}K > ${MCAP_HARD_CAP/1000}K cap`);
     console.log(`[auto-caller] 🛑 $${candidate.token ?? ca.slice(0,6)} rejected — mcap ${Math.round(candidate.marketCap/1000)}K above $${MCAP_HARD_CAP/1000}K ceiling`);

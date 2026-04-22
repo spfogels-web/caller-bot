@@ -880,7 +880,12 @@ async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
 
 export async function enrichCandidate(candidate) {
   const ca          = candidate.contractAddress;
-  const pairAddress = candidate.pairAddress ?? null;
+  // `pairAddress` may get reassigned below (pre-flight DexScreener fills
+  // it in when missing) — must be `let`, not `const`. Previously thrown:
+  // "Assignment to constant variable" on every enrichment attempting the
+  // pre-flight path, silently breaking enrichment for a big chunk of
+  // Helius-listener-sourced candidates.
+  let pairAddress   = candidate.pairAddress ?? null;
   const ageHours    = candidate.pairAgeHours ?? null;
 
   if (!ca) return candidate;
