@@ -1238,22 +1238,22 @@ function persistAIConfig() {
 // and whenever a POST /api/config/scoring lands. Every hot-path site below
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
-  minScoreToPost:         45,   // hard floor for AUTO_POST
+  minScoreToPost:         38,   // AXIOSCAN-MODE — recall over precision. Hard floor for AUTO_POST. Was 45. Dropped to catch more candidates that might be 3-5x.
   sweetSpotBonus:          4,   // $13K-$40K MCap
   secondaryBonus:          2,   // $40K-$80K MCap
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
-  devFingerprintCap:       6,   // max positive delta from dev history (raised 3→6: proven devs deserve real weight)
-  hotDevBonus:             4,   // bonus when dev has a coin that hit 2x+ in the last 24h (currently-running dev boost)
+  devFingerprintCap:       6,   // max positive delta from dev history
+  hotDevBonus:             4,   // bonus when dev has a coin that hit 2x+ in the last 24h
   globalBonusCap:         10,   // total bonus stack across all sources
-  noSignalCap:            72,   // structure-only coins capped here (raised 68→72)
-  rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
+  noSignalCap:            80,   // AXIOSCAN-MODE — less restrictive ceiling for clean-structure coins (was 72)
+  rugGuardMinScore:       55,   // AXIOSCAN-MODE — loosened from 58. $13K-$17.5K requires this score.
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
   winPeakMultiple:       2.0,  // peak X to lock WIN — 2x minimum bar. Target: 2x floor, sweet spot 3-5x, >5x bonus. Below 2x is LOSS.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
-  minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
+  minLiquidityForPost:  1500,   // AXIOSCAN-MODE — $1.5K min liquidity (was $3K). Many 10x moonshots start with thin liquidity and grow it.
   lockedKnobs: ['winPeakMultiple', 'neutralDrawdownPct'],  // knobs auto-optimize cannot touch
   earlyMCapDeferMinutes:   3,   // defer AUTO_POST for $6K-$9K coins until N min after first-seen (lets us confirm real momentum); extreme-velocity bypasses
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
@@ -1480,19 +1480,34 @@ the earliest possible entries — tokens seconds to hours old with no price disc
 This is high risk / highest ROI territory. Your calls can produce 10x–100x from entry.
 
 TARGET PROFILE (your performance is judged against this):
-- FLOOR: 2x minimum — anything that peaks below 2x is a LOSS, no exceptions.
-- SWEET SPOT: 3x to 5x — this is where most good calls should land. Hunt for this.
-- MOONSHOT: 5x to 100x — bonus territory. Celebrate these but don't force them.
-- REJECT: coins that look like they'll cap out at 1.2x-1.9x. Those are LOSSES in this system,
-  not "neutrals." A 1.5x wick is a failed call. Do NOT post on coins that look like wicks.
+- FLOOR: 2x minimum — coins that peak below 2x = LOSS.
+- SWEET SPOT: 3x to 5x — primary hunting zone.
+- MOONSHOT: 5x to 100x — huge bonus. A single 20x covers 20 losses.
+
+STRATEGIC MINDSET — AXIOSCAN STYLE (RECALL over precision):
+You are NOT a sniper. You are a high-volume gem scanner. Your job is to catch EVERY
+candidate that might 3x+ so the winners carry the portfolio. A 50% hit rate with huge
+winners BEATS a 80% hit rate with modest winners. Math:
+   20 calls · 80% win · avg 1.8x peak  →  16 wins @ 1.8x + 4 losses  →  ~29x total return
+   20 calls · 50% win · avg 4x peak     →  10 wins @ 4x + 10 losses  →  ~40x total return
+Missing a 10x is MUCH worse than calling a few 1.5x losers. FALSE NEGATIVES are the
+enemy. If you see a coin with ANY of these patterns, POST IT:
+  - Volume building while price flat (accumulation phase)
+  - Fresh launch (<30min old) in the sweet-spot MCap band ($8K-$40K)
+  - Dev rap sheet shows past winners
+  - Any Dune-flagged winner wallet holding
+  - Social spike + narrative match
+  - Clean structure + low sniper count even without explosive signals
+Be DECISIVE toward AUTO_POST. Use WATCHLIST only when a hard red flag is CONFIRMED
+(bundle SEVERE, serial rugger dev, evidence of active dumping).
 
 YOUR ROLE: You ARE the decision engine. The pre-computed scores are signals — YOU decide.
 You learn from every call outcome in real-time. Pattern-match against your history.
 
 CHARACTER:
-- Hungry for early gems that can do 2x-100x. The $8K–$40K range is your sweet spot entry band.
-- A 1.5x call is a LOSS. Don't settle for wicks — if the signals suggest a coin will cap at
-  1.2-1.9x, do NOT call it. Pass and wait for a real setup.
+- High-volume hunter. Casting a wide net to catch every potential 3x-100x runner.
+- Bias HARD toward AUTO_POST when the basic shape is there. Don't overthink marginal
+  cases — a few wrong calls are dwarfed by one real moonshot catch.
 - Skeptical of manipulation but not afraid of new/unverified tokens.
 - Decisive. Every evaluation gets a clear decision — you don't hedge.\n- Self-improving. You notice what your wins and losses have in common.\n- Direct. No fluff. Data-backed or explicitly flagged as inferred.\n\nGEM PROFILE YOU ARE HUNTING:\n- MCap: $8K–$85K (primary sweet spot: $8K–$40K pre-bonding). Wins are wins — not every pick needs 10x.\n- Age: 0 minutes to 2 hours old\n- Signs: organic buys, growing holder count, clean dev wallet (<5%), LP locked or new\n- Volume velocity accelerating in first 30 minutes\n- Low sniper count (<10), no bundle risk, mint revoked = ideal\n- Social presence (even just a twitter) = bonus signal\n- UNVERIFIED structure = NEW TOKEN, not a red flag\n\nWHAT TO LOOK FOR:\n- Stealth launches with organic momentum (no shilling, just buys)\n- Volume velocity > 0.3 in first hour = strong signal\n- Buy ratio > 60% sustained = demand exceeding supply\n- Unique buyer ratio > 40% = real people, not bots\n- Dev wallet < 5% + mint revoked = team confident in token\n\nRED FLAGS THAT OVERRIDE EVERYTHING (only trip on CONFIRMED malice):\n- Bundle risk SEVERE = coordinated dump setup\n- Dev wallet > 15% WITH mint ACTIVE AND evidence of dev dumping = rug setup\n- Top 10 holders > 70% WITH sells exceeding buys = whale exit risk\n- BubbleMap SEVERE = clustered/coordinated wallets\n- Sniper count > 30 AND sells > buys = heavily frontrun, dump incoming\n- SERIAL_RUGGER deployer = instant BLOCKLIST\n\nIMPORTANT — DO NOT AUTO-TAG EXTREME WHEN:\n- dev_wallet_pct is very high (e.g. 100%) but buys_1h = 0 — this is a brand-new pre-launch token, nobody has bought yet (dev is mathematically 100% of holders). Default to MEDIUM risk with a 'pre-launch pending liquidity' note.\n- top10_holder_pct is 100% but holders < 5 — same case, pre-launch.\n- pair_age_hours is null or < 5 min AND buys_1h > 0 — normal early gem state, rate risk based on buy pattern not concentration.\n- Most core fields are missing (null token, null age) — default risk to MEDIUM with 'insufficient data' in notes. NEVER default to EXTREME because of missing data alone.\n\nCRITICAL — EARLY-GEM METRIC CALIBRATION (read carefully):\nFor coins WITH pair_age_hours < 0.5 (under 30 minutes old), the following metrics are FREQUENTLY MISLEADING and MUST NOT by themselves trigger EXTENDED_AVOID, BLOCKLIST, or EXTREME risk:\n- priceChange1h showing +200% to +1000% is NORMAL for a young pump.fun coin graduating the bonding curve. This is 'price since inception', not 'a late pump we missed'. A 20-min-old coin running $10K → $100K is a GRADUATION, not a top.\n- freezeAuthority active is COMMON on pump.fun pre-graduation (it's how the curve works); it is NOT confirmed manipulation on its own.\n- holderGrowth24h = 0 or null on a coin < 30min old is Birdeye data lag, not a signal. Ignore it for young coins.\n- Only flag EXTENDED_AVOID on coins > 2h old that have already had their run. For < 30min coins, price momentum is an ENTRY signal, not an exit signal.\nIf a coin is < 30min old AND in $8K-$80K MCap AND has clean bundle/sniper profile, bias toward AUTO_POST — missing these is the single biggest way we miss 10x winners.\n\nRISK CALIBRATION GUIDE:\n- LOW: clean structure + organic buys + reasonable dev% + LP locked\n- MEDIUM: most default cases, unknown data, early-stage concentration\n- HIGH: one confirmed red flag (bundle HIGH, dev > 15% + mint active, > 15 snipers)\n- EXTREME: TWO+ confirmed red flags actively firing, NOT just missing data or pre-launch state\n\nRESPONSE FORMAT — valid JSON only, no markdown, no backticks:\n{\n  "decision": "AUTO_POST | WATCHLIST | RETEST | IGNORE | BLOCKLIST",\n  "score": <integer 0-100>,\n  "risk": "LOW | MEDIUM | HIGH | EXTREME",\n  "setup_type": "CLEAN_STEALTH_LAUNCH | ORGANIC_EARLY | MICRO_CAP_BREAKOUT | BREAKOUT_AFTER_SHAKEOUT | CONSOLIDATION_BREAKOUT | PULLBACK_OPPORTUNITY | STRONG_HOLDER_LOW_DEV | WHALE_SUPPORTED_ROTATION | BUNDLED_HIGH_RISK | EXTENDED_AVOID | STANDARD",\n  "bull_case": ["<specific data point>", "<point>", "<point>"],\n  "red_flags": ["<specific data point>", "<point>", "<point>"],\n  "verdict": "<2-3 sentence direct analyst take — why this is or isn't a gem>",
   "thesis": "<one sentence: what would make this a 10x from here>",
@@ -3242,35 +3257,23 @@ async function processCandidate(candidate, isRescan = false) {
       }
     } catch {}
 
-    // ── Age-mismatch penalty — stale coins that stalled out ───────────────
-    // A $20K coin 4h old that hasn't run is structurally dead. Real winners
-    // move in the first 30-60min post-launch. Coins sitting at low MCap
-    // with flat momentum past the entry window are the 1.0-1.9x dead-call
-    // profile — now definitively LOSS territory at winPeakMultiple=2.0.
-    // Penalty fires only when price has actually stalled (not when it's
-    // currently rolling over, which the momentum gate catches).
-    //
-    // Conditions (ALL must be true):
-    //   - pairAgeHours > 2 (past the sweet-spot entry window)
-    //   - MCap < $30K (should have rallied by now if it was going to)
-    //   - priceChange1h < 10% AND priceChange6h < 20% (flat, stuck)
-    //   - Cluster/KOL bypasses (their conviction overrides the time signal)
+    // ── Age-mismatch penalty — DISABLED in Axioscan mode ──────────────────
+    // A coin that's flat at 2h might STILL run later. Removing this penalty
+    // reclaims late-bloomers that Axioscan-style volume strategy wants to
+    // catch. The binary WIN/LOSS + winPeakMultiple already classifies the
+    // flat-peak outcome cleanly; we don't need pre-emptive penalty too.
     try {
       const ageMm   = enrichedCandidate.pairAgeHours ?? 0;
       const mcapMm  = enrichedCandidate.marketCap ?? 0;
       const p1hMm   = enrichedCandidate.priceChange1h ?? 0;
       const p6hMm   = enrichedCandidate.priceChange6h ?? 0;
-      const smMm    = enrichedCandidate._smartMoney?.kind;
-      const bypass  = smMm === 'cluster' || smMm === 'kol';
       const isStuck = ageMm > 2
                    && mcapMm > 0 && mcapMm < 30_000
                    && p1hMm < 10
                    && p6hMm < 20;
-      if (isStuck && !bypass) {
-        scoreResult.score = Math.max(0, scoreResult.score - 5);
-        (scoreResult.penalties = scoreResult.penalties || {}).market = scoreResult.penalties.market || [];
-        scoreResult.penalties.market.push(`-5 AGE_MISMATCH — $${Math.round(mcapMm/1000)}K @ ${ageMm.toFixed(1)}h with flat momentum (1h ${p1hMm.toFixed(0)}% / 6h ${p6hMm.toFixed(0)}%) — stuck out of sequence`);
-        console.log(`[auto-caller] ⏱  $${enrichedCandidate.token ?? ca.slice(0,6)} age-mismatch -5: ${ageMm.toFixed(1)}h old at $${Math.round(mcapMm/1000)}K, still flat`);
+      if (isStuck) {
+        scoreResult._ageMismatchWouldHit = true;
+        // Diagnostic only — no score hit in Axioscan mode
       }
     } catch {}
 
@@ -3882,10 +3885,13 @@ async function processCandidate(candidate, isRescan = false) {
           (dp.walletQuality       ?? 0) +
           (dp.holderDistribution  ?? 0) +
           (dp.liquidityHealth     ?? 0);
-        if (foundationTotal < 15) {
+        // AXIOSCAN-MODE — threshold 15 → 8. Only blocks coins with
+        // literally zero foundation data. Some real 10x coins have sparse
+        // early data; don't let the scorer's data-gap paranoia kill them.
+        if (foundationTotal < 8) {
           fnl('foundationTrust');
-          logEvent('INFO', 'FOUNDATION_TRUST', `${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 (score ${scoreResult.score}) → WATCHLIST (insufficient signal)`);
-          console.log(`[auto-caller] 📉 $${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 — composite ${scoreResult.score} is mostly bonuses, not real signal → WATCHLIST`);
+          logEvent('INFO', 'FOUNDATION_TRUST', `${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 (score ${scoreResult.score}) → WATCHLIST (zero signal)`);
+          console.log(`[auto-caller] 📉 $${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 — no real signal, WATCHLIST`);
           finalDecision = 'WATCHLIST';
         }
       }
