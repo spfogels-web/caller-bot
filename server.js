@@ -1157,6 +1157,10 @@ const _winnerCache = { rows: [], refreshedAt: 0 };
 
 function refreshWinnerMemory() {
   try {
+    // Sync the memory threshold to the WIN definition. If user set
+    // winPeakMultiple=3.0, Claude sees only 3x+ coins as "winning patterns".
+    // If user wants wider memory for learning, they can lower winPeakMultiple.
+    const winTarget = SCORING_CONFIG.winPeakMultiple ?? 2.0;
     const rows = dbInstance.prepare(`
       SELECT token, contract_address,
              market_cap_at_call as scan_mcap,
@@ -1169,14 +1173,14 @@ function refreshWinnerMemory() {
              called_at
       FROM calls
       WHERE peak_multiple IS NOT NULL
-        AND peak_multiple >= 2
+        AND peak_multiple >= ?
         AND called_at > datetime('now', '-7 days')
       ORDER BY peak_multiple DESC
       LIMIT 10
-    `).all();
+    `).all(winTarget);
     _winnerCache.rows = rows;
     _winnerCache.refreshedAt = Date.now();
-    console.log(`[winner-memory] Refreshed — ${rows.length} recent ≥2x winners (7d)`);
+    console.log(`[winner-memory] Refreshed — ${rows.length} recent ≥${winTarget}x winners (7d)`);
   } catch (err) {
     console.warn(`[winner-memory] Refresh failed: ${err.message}`);
   }
@@ -1193,8 +1197,9 @@ function getWinnerMemory() {
     ].filter(Boolean).join(' · ');
     return `  - $${r.token || '?'} — entry ${mcK} · ${feat} · score ${r.score_at_call ?? '?'} → peak ${r.peak_multiple.toFixed(2)}x`;
   });
+  const winBar = SCORING_CONFIG.winPeakMultiple ?? 2.0;
   return [
-    'RECENT WINS — coins we POSTED that ran ≥2x in the last 7 days. This is what winning calls look like:',
+    `RECENT WINS — coins we POSTED that ran ≥${winBar}x in the last 7 days. This is what winning calls look like:`,
     ...lines,
     'If this candidate has similar structure (grade, setup type, MCap band, score range) to these winners, bias toward AUTO_POST. Reference these as "winning patterns".',
   ].join('\n');
@@ -1245,7 +1250,7 @@ const SCORING_CONFIG_DEFAULTS = {
   rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:       1.28, // peak X to lock WIN (1.28x reflects realistic achievable threshold; <1.27 = LOSS)
+  winPeakMultiple:       3.0,  // peak X to lock WIN — reshaped to 3x target (user wants "3-5x minimum" winners). Also syncs winner-memory so Claude only pattern-matches on real 3x+ runners.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
@@ -1273,14 +1278,16 @@ try {
       consensusOverrideScore:60,
       devFingerprintCap:      6,
     };
-    // Force-migrate: win threshold reshaped from 3.0 → 1.28 to reflect
-    // realistic achievable peaks in the call pool. Downgrade from a higher
-    // stored value is intentional here; we want the whole fleet using the
-    // new target. User can re-edit in Control Station after if they want.
+    // Force-migrate: win threshold reshaped to 3.0 for "3-5x minimum" target.
+    // User explicitly chose this over 1.28 (too lenient, rewarded weak runners)
+    // and 4.0 (too sparse, starves Claude's learning memory). 3.0 is the
+    // sweet spot: real runners only, enough examples for pattern-matching.
+    // New flag suffix (_v3) so the bump from 1.28 applies on next boot.
     const MIGRATE_FORCE = {
-      winPeakMultiple:    1.28,
+      winPeakMultiple:    3.0,
       neutralDrawdownPct: 10,
     };
+    const MIGRATE_FORCE_VERSION = 'v3';   // change this to force re-migration
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -1294,7 +1301,7 @@ try {
       const stored = SCORING_CONFIG[key];
       if (stored !== forcedValue) {
         // One-time flag so we don't repeat-force on every boot once user adjusts
-        const migKey = `migrated_force_${key}`;
+        const migKey = `migrated_force_${key}_${MIGRATE_FORCE_VERSION}`;
         const alreadyRan = (() => {
           try { return dbInstance.prepare(`SELECT value FROM kv_store WHERE key=?`).get(migKey)?.value === '1'; } catch { return false; }
         })();
