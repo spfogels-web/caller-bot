@@ -2835,7 +2835,9 @@ body::before {
 }
 .rej-reason-chip b { font-size: 9px; margin-left: 3px; }
 
-.rej-list { display: flex; flex-direction: column; gap: 5px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+/* Desktop: 2-per-row grid to minimize scrolling. Mobile: single column. */
+.rej-list { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+@media (max-width: 900px) { .rej-list { grid-template-columns: 1fr; } }
 .rej-list::-webkit-scrollbar { width: 4px; }
 .rej-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
 
@@ -3430,6 +3432,38 @@ body::before {
           </div>
         </div>
 
+        <!-- ═══ 📞 CALLED (actual AUTO_POSTs with outcome) ═══ -->
+        <div class="calls-section" style="margin-top:4px">
+          <div class="calls-section-hdr" style="--hdr-col:#00e676">
+            <span>📞 CALLED · <span id="calledCount">0</span></span>
+            <span class="calls-section-sub">every AUTO_POST · outcome + peak tracked</span>
+          </div>
+          <!-- Filter row -->
+          <div style="display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 10px 0">
+            <button class="fchip active" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
+            <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
+            <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
+            <button class="fchip" onclick="filterCalls(this,'NEUTRAL')" style="color:var(--cyan);border-color:rgba(24,255,255,0.4)">➖ NEUTRAL</button>
+            <button class="fchip" onclick="filterCalls(this,'all')">ALL</button>
+            <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
+          </div>
+          <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
+            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
+          </div>
+        </div>
+
+        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
+        <div id="perfChartSection" class="calls-section" style="display:none">
+          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
+            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="calls-section-sub">latest calls left-to-right</span>
+              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
+            </div>
+          </div>
+          <div id="perfChart" class="perf-chart"></div>
+        </div>
+
         <!-- ═══ 🔬 ANALYZER — YES/NO verdict per promoted coin ═══ -->
         <div class="calls-section">
           <div class="calls-section-hdr" style="--hdr-col:#18ffff">
@@ -3449,41 +3483,9 @@ body::before {
           </div>
           <!-- Summary strip: top rejection causes -->
           <div id="rejSummary" class="rej-summary"></div>
-          <!-- Last 10 rejected coins with per-coin breakdown -->
+          <!-- Last 10 rejected coins — 2-per-row grid on desktop to minimize scrolling -->
           <div id="rejList" class="rej-list">
-            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading rejection audit...</div>
-          </div>
-        </div>
-
-        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
-        <div id="perfChartSection" class="calls-section" style="display:none">
-          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
-            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
-            <div style="display:flex;align-items:center;gap:10px">
-              <span class="calls-section-sub">latest calls left-to-right</span>
-              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
-            </div>
-          </div>
-          <div id="perfChart" class="perf-chart"></div>
-        </div>
-
-        <!-- ═══ 📞 CALLED (actual AUTO_POSTs with outcome) ═══ -->
-        <div class="calls-section" style="margin-top:4px">
-          <div class="calls-section-hdr" style="--hdr-col:#00e676">
-            <span>📞 CALLED · <span id="calledCount">0</span></span>
-            <span class="calls-section-sub">every AUTO_POST · outcome + peak tracked</span>
-          </div>
-          <!-- Filter row -->
-          <div style="display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 10px 0">
-            <button class="fchip active" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
-            <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
-            <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
-            <button class="fchip" onclick="filterCalls(this,'NEUTRAL')" style="color:var(--cyan);border-color:rgba(24,255,255,0.4)">➖ NEUTRAL</button>
-            <button class="fchip" onclick="filterCalls(this,'all')">ALL</button>
-            <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
-          </div>
-          <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
-            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
+            <div style="grid-column:1/-1;text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading rejection audit...</div>
           </div>
         </div>
       </div>
