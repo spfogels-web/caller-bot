@@ -778,11 +778,31 @@ function mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, 
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
 // ─── LunarCrush Social Intelligence ──────────────────────────────────────────
+// In-memory cache keyed by CA — rescans of the same token don't re-hit LC.
+// Also a daily circuit breaker: once we see 429, we back off for the rest of
+// the hour so we don't keep burning retries against a rate-limited API.
+const _lcCache = new Map(); // ca -> { result, expiresAt }
+const LC_CACHE_TTL_MS = 45 * 60 * 1000; // 45 minutes
+let   _lcBreakerUntil = 0; // ms epoch — skip all calls until this time
+
 async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
   const result = { lunarCrushOk: false };
   const key = getLunarCrushKey();
   if (!key) {
     console.log('[enricher:lunarcrush] ✗ LUNARCRUSH_API_KEY not set');
+    return result;
+  }
+
+  // Cache hit — same CA scanned/rescanned within TTL gets the stored result
+  if (contractAddress) {
+    const hit = _lcCache.get(contractAddress);
+    if (hit && hit.expiresAt > Date.now()) {
+      return hit.result;
+    }
+  }
+
+  // Circuit breaker — if we hit rate-limit recently, skip entirely
+  if (Date.now() < _lcBreakerUntil) {
     return result;
   }
 
@@ -804,6 +824,12 @@ async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
         signal: AbortSignal.timeout(6000),
       });
       diagnostics.push(`${path}→${res.status}`);
+      if (res.status === 429) {
+        // Daily quota hit — back off for 1 hour before trying again
+        _lcBreakerUntil = Date.now() + 60 * 60 * 1000;
+        console.log('[enricher:lunarcrush] 🚧 429 rate-limit — circuit broken for 60min');
+        return result;
+      }
       if (!res.ok) continue;
       const data = await res.json();
       const d = data?.data;
@@ -838,13 +864,16 @@ async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
       }
 
       console.log(`[enricher:lunarcrush] ✓ ${shape} ${path} → score:${result.socialScore ?? '?'} sentiment:${result.socialSentiment ?? '?'} mentions:${result.twitterMentions ?? '?'}`);
+      if (contractAddress) _lcCache.set(contractAddress, { result, expiresAt: Date.now() + LC_CACHE_TTL_MS });
       return result;
     } catch (e) {
       diagnostics.push(`${path}→threw:${e.message?.slice(0,40)}`);
     }
   }
 
-  // No luck — surface the exact statuses so we can tell the user WHY
+  // No luck — cache the miss too so we don't keep asking for a token LC can't
+  // resolve. Shorter TTL (15 min) so newly-indexed tokens get picked up soon.
+  if (contractAddress) _lcCache.set(contractAddress, { result, expiresAt: Date.now() + 15 * 60 * 1000 });
   console.log(`[enricher:lunarcrush] ✗ no data for ${tokenSymbol ?? contractAddress?.slice(0,8) ?? '?'} · ${diagnostics.join(' · ')}`);
   return result;
 }
@@ -893,11 +922,24 @@ export async function enrichCandidate(candidate) {
     ? Promise.resolve({ bubblemapOk: false, bubbleMapRisk: 'PENDING' })
     : enrichWithBubbleMap(ca);
 
+  // Gate LunarCrush — skip for dead / low-traction tokens. LC doesn't index
+  // tokens with no social footprint, so calling on $2K-mcap freshies just
+  // burns our daily quota. Require either real volume OR real mcap before
+  // we spend a LunarCrush request.
+  const lcWorthCalling = (
+    (candidate.marketCap ?? 0) >= 15_000 ||
+    (candidate.volume1h  ?? 0) >= 5_000  ||
+    (candidate.buys1h    ?? 0) >= 20
+  );
+  const lunarPromise = lcWorthCalling
+    ? enrichWithLunarCrush(candidate.token, ca)
+    : Promise.resolve({ lunarCrushOk: false });
+
   const [birdeyeData, heliusData, bubblemapData, lunarData] = await Promise.all([
     enrichWithBirdeyeWithRetry(ca, candidate.pairAgeHours ?? ageHours),
     enrichWithHelius(ca, pairAddress),
     bubblemapPromise,
-    enrichWithLunarCrush(candidate.token, ca),
+    lunarPromise,
   ]);
 
   // ── DexScreener fallback — fill buys/sells/mcap if scanner didn't provide them ──
