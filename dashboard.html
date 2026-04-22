@@ -4891,6 +4891,20 @@ body::before {
           <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Loading usage data...</div>
         </div>
       </div>
+      <!-- ═══ CALL FUNNEL DIAGNOSTIC — where candidates die in the pipeline ═══ -->
+      <div class="card" style="margin-bottom:12px;border-color:rgba(156,39,176,0.3)">
+        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(156,39,176,0.08),transparent)">
+          <div class="card-title" style="color:var(--purple)"><span class="icon">🔬</span>CALL FUNNEL — where candidates drop (rolling 60min)</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" id="funnelWindowAge">—</span>
+            <button onclick="loadCallFunnel()" style="background:rgba(156,39,176,0.1);border:1px solid rgba(156,39,176,0.3);color:var(--purple);border-radius:5px;padding:5px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">↻ REFRESH</button>
+          </div>
+        </div>
+        <div class="card-body" id="callFunnelBody">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Loading funnel diagnostic...</div>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom:12px">
         <div class="card-header">⚙️ SCAN MODE</div>
         <div class="card-body" id="modeButtonList"><div class="spinner"><div class="spin-dot" style="background:var(--cyan)"></div></div></div>
@@ -8331,6 +8345,64 @@ async function markOutcome(id,outcome){
 }
 
 // ── SYSTEM ────────────────────────────────────────────────
+async function loadCallFunnel() {
+  const bodyEl  = document.getElementById('callFunnelBody');
+  const ageEl   = document.getElementById('funnelWindowAge');
+  if (!bodyEl) return;
+  try {
+    const res = await fetch('/api/diagnose/funnel');
+    if (!res.ok) {
+      bodyEl.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--red);padding:10px">⚠ Endpoint returned ' + res.status + '. The deployed server does not include the /api/diagnose/funnel route — redeploy needed.</div>';
+      return;
+    }
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'unknown');
+    if (ageEl) ageEl.textContent = 'Window: ' + data.windowAgeMinutes + 'min · Post rate: ' + data.postRate;
+    const s = data.stages || {};
+    const total = s.evaluated || 1;
+    const pct = (n) => ((n/total)*100).toFixed(1) + '%';
+    const rows = [
+      ['EVALUATED (entered pipeline)', s.evaluated,          '100%',                 'var(--cyan)',   'hdr'],
+      ['data_void_skip',               s.dataVoidSkip,       pct(s.dataVoidSkip),    'var(--red)',    'drop'],
+      ['SCORED',                       s.scored,             pct(s.scored),          'var(--green)',  'hdr'],
+      ['CLAUDE_EXTREME_VETO',          s.claudeExtremeVeto,  pct(s.claudeExtremeVeto),'var(--red)',   'drop'],
+      ['CONSENSUS_GATE (Claude no)',   s.consensusGate,      pct(s.consensusGate),   'var(--red)',    'drop'],
+      ['MOMENTUM_GATE',                s.momentumGate,       pct(s.momentumGate),    'var(--red)',    'drop'],
+      ['RUG_GUARD ($13-17.5K)',        s.rugGuard,           pct(s.rugGuard),        'var(--red)',    'drop'],
+      ['LIQUIDITY_FLOOR',              s.liquidityFloor,     pct(s.liquidityFloor),  'var(--red)',    'drop'],
+      ['FOUNDATION_TRUST',             s.foundationTrust,    pct(s.foundationTrust), 'var(--red)',    'drop'],
+      ['EARLY_MCAP_DEFER',             s.earlyMcapDefer,     pct(s.earlyMcapDefer),  'var(--orange)', 'drop'],
+      ['PAUSED_POSTING',               s.pausedPosting,      pct(s.pausedPosting),   'var(--text3)',  'drop'],
+      ['POSTED 🎉',                     s.posted,             pct(s.posted),          'var(--green)',  'hdr'],
+    ];
+    bodyEl.innerHTML =
+      '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:8px">Every AUTO_POST candidate passes through these gates. Whichever line has the highest count is where your calls are dying.</div>' +
+      '<div style="display:flex;flex-direction:column;gap:2px">' +
+      rows.map(([stage, n, p, col, kind]) => {
+        const isDrop = kind === 'drop';
+        const prefix = isDrop ? '  ↳ ' : '';
+        const weight = isDrop ? '400' : '700';
+        const size   = isDrop ? '10px' : '11px';
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 10px;background:' + (isDrop?'rgba(255,255,255,0.02)':col+'10') + ';border-left:2px solid ' + (isDrop?'rgba(255,255,255,0.1)':col) + ';border-radius:3px">' +
+          '<span style="font-family:var(--mono);font-size:' + size + ';font-weight:' + weight + ';color:' + (isDrop ? 'var(--text2)' : col) + ';letter-spacing:0.5px">' + prefix + stage + '</span>' +
+          '<span style="display:flex;gap:10px;align-items:center">' +
+            '<span style="font-family:var(--mono);font-size:' + size + ';font-weight:700;color:' + col + '">' + (n || 0) + '</span>' +
+            '<span style="font-family:var(--mono);font-size:8px;color:var(--text3);min-width:48px;text-align:right">' + p + '</span>' +
+          '</span>' +
+        '</div>';
+      }).join('') +
+      '</div>' +
+      '<div style="margin-top:10px;padding:6px 10px;background:rgba(0,0,0,0.3);border-radius:4px;font-family:var(--mono);font-size:8px;color:var(--text3)">' +
+        'Paused: <span style="color:' + (data.pausedPosting ? 'var(--red)' : 'var(--green)') + '">' + (data.pausedPosting ? 'YES' : 'NO') + '</span> · ' +
+        'minScoreToPost: <b>' + (data.scoringConfig?.minScoreToPost ?? '?') + '</b> · ' +
+        'noSignalCap: <b>' + (data.scoringConfig?.noSignalCap ?? '?') + '</b> · ' +
+        'winPeakMultiple: <b>' + (data.scoringConfig?.winPeakMultiple ?? '?') + 'x</b>' +
+      '</div>';
+  } catch (err) {
+    bodyEl.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--red);padding:10px">⚠ Failed to load: ' + (err.message || err) + '</div>';
+  }
+}
+
 async function loadApiUsage() {
   try {
     var data = await apiFetch('/api/usage');
@@ -8394,6 +8466,7 @@ async function loadApiUsage() {
 
 async function loadSystem(){
   loadApiUsage();
+  loadCallFunnel();
   const [statsData,modeData,v8Data]=await Promise.all([apiFetch('/api/stats'),apiFetch('/api/mode'),apiFetch('/api/v8/dashboard')]);
   if(statsData){
     const c=statsData.config||{},m=statsData.mode||{};
