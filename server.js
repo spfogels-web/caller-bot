@@ -1249,6 +1249,7 @@ const SCORING_CONFIG_DEFAULTS = {
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
+  lockedKnobs: ['winPeakMultiple', 'neutralDrawdownPct'],  // knobs auto-optimize cannot touch
   earlyMCapDeferMinutes:   3,   // defer AUTO_POST for $6K-$9K coins until N min after first-seen (lets us confirm real momentum); extreme-velocity bypasses
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
   earlyMCapDeferMax:    9000,   // upper edge of the defer band ($)
@@ -6092,9 +6093,25 @@ Respond ONLY with valid JSON:
       maxMarketCapOverride: [50000, 500000], minScoreOverride: [28, 55],
     };
 
+    // Locked-knobs list — user's strategic choices the auto-optimizer
+    // must NOT touch. Keeps the human in control of their target profile
+    // while letting Claude still optimize the surrounding knobs.
+    // winPeakMultiple is locked by default because it defines what
+    // "winning" means — that's a product decision, not a tuning lever.
+    const LOCKED_KNOBS = new Set(
+      Array.isArray(SCORING_CONFIG.lockedKnobs) && SCORING_CONFIG.lockedKnobs.length
+        ? SCORING_CONFIG.lockedKnobs
+        : ['winPeakMultiple', 'neutralDrawdownPct']
+    );
+
     // AUTO-APPLY every change Claude recommends — no approval needed
     for (const change of (result.changes || [])) {
       try {
+        // Skip locked knobs — user has explicitly pinned these
+        if (LOCKED_KNOBS.has(change.param)) {
+          console.log(`[auto-optimize] 🔒 skipped ${change.param} (user-locked at ${SCORING_CONFIG[change.param]})`);
+          continue;
+        }
         // Clamp to safety bounds
         if (typeof change.new_value === 'number' && BOUNDS[change.param]) {
           const [min, max] = BOUNDS[change.param];
