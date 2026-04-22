@@ -10536,6 +10536,7 @@ app.get('/api/diagnose/apis', async (req, res) => {
     solscan:     { keyPresent: !!process.env.SOLSCAN_API_KEY,   ok: false, ms: 0, status: null, error: null, sample: null },
     dexscreener: {                                              ok: false, ms: 0, status: null, error: null, sample: null },
     dune:        { keyPresent: !!process.env.DUNE_API_KEY,      ok: false, ms: 0, status: null, error: null, sample: null },
+    lunarcrush:  { keyPresent: !!process.env.LUNARCRUSH_API_KEY, ok: false, ms: 0, status: null, error: null, sample: null },
   };
 
   // Helius
@@ -10628,6 +10629,22 @@ app.get('/api/diagnose/apis', async (req, res) => {
       out.dune.ok = r.ok || r.status === 401 ? true : false; // 401 means key issue, anything else connectivity
       if (!r.ok) out.dune.error = 'HTTP ' + r.status;
     } catch (e) { out.dune.error = e.message; out.dune.ms = Date.now() - t0; }
+  }
+
+  // LunarCrush — hit a known topic (solana) to verify key + API reachability
+  if (out.lunarcrush.keyPresent) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch('https://lunarcrush.com/api4/public/topic/solana/v1', {
+        headers: { 'Authorization': `Bearer ${process.env.LUNARCRUSH_API_KEY}` },
+        signal: AbortSignal.timeout(8_000),
+      });
+      out.lunarcrush.status = r.status; out.lunarcrush.ms = Date.now() - t0;
+      const j = await r.json().catch(() => null);
+      out.lunarcrush.ok = r.ok && !!j?.data;
+      if (j?.data) out.lunarcrush.sample = { num_posts: j.data.num_posts, interactions_24h: j.data.interactions_24h, trend: j.data.trend };
+      if (!r.ok) out.lunarcrush.error = j?.error || j?.message || 'HTTP ' + r.status;
+    } catch (e) { out.lunarcrush.error = e.message; out.lunarcrush.ms = Date.now() - t0; }
   }
 
   const total = Date.now() - started;
