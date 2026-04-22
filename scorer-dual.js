@@ -404,13 +404,78 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   parts.liquidityHealth = p;
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // LATE-PUMP PENALTY — final deduction (tunable via setLatePumpConfig)
-  // Age<30min exempt: "late" doesn't apply to brand-new coins still priced in.
+  // FALLING KNIFE DETECTOR — we don't buy dips, we buy confirmed strength.
+  //
+  // Philosophy: Strength leads to more strength. Weakness leads to more weakness.
+  // We are momentum snipers, not bottom fishers. Most 10x coins come from clean
+  // breakouts, not from catching knives.
+  //
+  // KNIFE CONDITIONS (any 2+ = AUTO IGNORE):
+  //   - Price drops >25% in 5 minutes (sharp drawdown)
+  //   - Sells dominating 1h (buy ratio < 35%)
+  //   - No bounce after dump (5m still negative after big 1h drop)
+  //   - Volume UP but price DOWN (distribution signature)
+  //
+  // RECOVERY CONFIRMATION (bonuses if reclaimed):
+  //   - Price dropped AND recovered ≥50% of the drop
+  //   - 5m positive after 1h negative (higher low forming)
   // ═══════════════════════════════════════════════════════════════════════════
-  // Late-pump penalty REMOVED — was blocking quality coins still running.
-  // Volume Velocity already rewards early acceleration over extended moves.
-  const latePumpPenalty = 0;
-  parts.latePumpPenalty = 0;
+  const kP5m  = m.priceChange5m;
+  const kP1h  = m.priceChange1h;
+  const kBr   = m.buySellRatio1h;
+  const kV1   = m.volume1h;
+  const kV6   = m.volume6h;
+
+  let knifeSignals = 0;
+  const knifeRisks = [];
+
+  // Condition 1: Sharp drawdown in 5min
+  if (kP5m != null && kP5m < -25) {
+    knifeSignals++;
+    knifeRisks.push(`Sharp drawdown: ${kP5m.toFixed(0)}% in 5m — falling knife`);
+  }
+
+  // Condition 2: Sellers dominating
+  if (kBr != null && kBr < 0.35) {
+    knifeSignals++;
+    knifeRisks.push(`Sellers dominating: only ${(kBr*100).toFixed(0)}% buys`);
+  }
+
+  // Condition 3: No bounce — 5m still red after 1h drop
+  if (kP1h != null && kP1h < -15 && kP5m != null && kP5m < 0) {
+    knifeSignals++;
+    knifeRisks.push(`No bounce: 1h ${kP1h.toFixed(0)}% + 5m ${kP5m.toFixed(0)}% still bleeding`);
+  }
+
+  // Condition 4: Distribution signature — volume spike + price down
+  if (kV1 != null && kV6 != null && kV6 > 0 && kP1h != null) {
+    const volAccel = (kV1 / 1) / (kV6 / 6);
+    if (volAccel > 1.5 && kP1h < -10) {
+      knifeSignals++;
+      knifeRisks.push(`Distribution: volume ${volAccel.toFixed(1)}x normal + price ${kP1h.toFixed(0)}% down`);
+    }
+  }
+
+  let knifePenalty = 0;
+  if (knifeSignals >= 2) {
+    knifePenalty = 50;
+    risks.push(`🔪 FALLING KNIFE DETECTED (${knifeSignals} conditions) — ${knifeRisks[0]}`);
+  } else if (knifeSignals === 1) {
+    knifePenalty = 15;
+    risks.push(`⚠️ Weakness signal: ${knifeRisks[0]}`);
+  }
+
+  // RECOVERY BONUS — price dropped but reclaimed, showing strength return
+  let recoveryBonus = 0;
+  if (knifeSignals === 0 && kP1h != null && kP1h < -10 && kP5m != null && kP5m > 5) {
+    recoveryBonus = 8;
+    reasons.push(`✅ Recovery confirmed: 1h ${kP1h.toFixed(0)}% but 5m +${kP5m.toFixed(0)}% — buyers stepping in`);
+  } else if (knifeSignals === 0 && kBr != null && kBr > 0.65 && kP5m != null && kP5m > 2) {
+    recoveryBonus = 4;
+    reasons.push(`✅ Strength confirmed: ${(kBr*100).toFixed(0)}% buys + 5m +${kP5m.toFixed(0)}%`);
+  }
+
+  parts.latePumpPenalty = -knifePenalty + recoveryBonus;
 
   // ── DATA CONFIDENCE — how much of this score is based on real data ──────
   // Counts how many key fields have real values vs null/defaults.
@@ -436,7 +501,8 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   const foundationTotal = parts.volumeVelocity + parts.buyPressure +
                           parts.walletQuality + parts.holderDistribution +
                           parts.liquidityHealth;
-  const total = foundationTotal - latePumpPenalty;
+  const knifeAdjustment = parts.latePumpPenalty; // negative if knife, positive if recovery
+  const total = foundationTotal + knifeAdjustment;
 
   return {
     score: clamp(total),
@@ -445,7 +511,9 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
     risks,
     model: 'discovery',
     foundationTotal,
-    latePumpPenalty,
+    knifeSignals,
+    recoveryBonus,
+    knifePenalty,
     dataConfidence,
     dataCompleteness,
   };
