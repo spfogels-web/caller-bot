@@ -1250,7 +1250,7 @@ const SCORING_CONFIG_DEFAULTS = {
   rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:       3.0,  // peak X to lock WIN — reshaped to 3x target (user wants "3-5x minimum" winners). Also syncs winner-memory so Claude only pattern-matches on real 3x+ runners.
+  winPeakMultiple:       2.0,  // peak X to lock WIN — 2x minimum bar. Target: 2x floor, sweet spot 3-5x, >5x bonus. Below 2x is LOSS.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
@@ -1278,16 +1278,17 @@ try {
       consensusOverrideScore:60,
       devFingerprintCap:      6,
     };
-    // Force-migrate: win threshold reshaped to 3.0 for "3-5x minimum" target.
-    // User explicitly chose this over 1.28 (too lenient, rewarded weak runners)
-    // and 4.0 (too sparse, starves Claude's learning memory). 3.0 is the
-    // sweet spot: real runners only, enough examples for pattern-matching.
-    // New flag suffix (_v3) so the bump from 1.28 applies on next boot.
+    // Force-migrate: win threshold reshaped to 2.0 — user's mandate is
+    // "winning coins minimum 2x to 100x, sweet spot 3-5x, anything more is
+    // bonus." So 2x is the floor. Anything under 2x = LOSS, 2x+ = WIN.
+    // The 3-5x sweet-spot target is communicated to Claude in the prompt;
+    // the scorer finds coins with that profile via pre-breakout + early-
+    // entry + winner-wallet bonuses already shipped.
     const MIGRATE_FORCE = {
-      winPeakMultiple:    3.0,
+      winPeakMultiple:    2.0,
       neutralDrawdownPct: 10,
     };
-    const MIGRATE_FORCE_VERSION = 'v3';   // change this to force re-migration
+    const MIGRATE_FORCE_VERSION = 'v4';   // bump to force re-migration (was v3 at 3.0)
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -1478,11 +1479,20 @@ MISSION: Find tokens in the $8K–$40K market cap range BEFORE they blow up. The
 the earliest possible entries — tokens seconds to hours old with no price discovery yet.
 This is high risk / highest ROI territory. Your calls can produce 10x–100x from entry.
 
+TARGET PROFILE (your performance is judged against this):
+- FLOOR: 2x minimum — anything that peaks below 2x is a LOSS, no exceptions.
+- SWEET SPOT: 3x to 5x — this is where most good calls should land. Hunt for this.
+- MOONSHOT: 5x to 100x — bonus territory. Celebrate these but don't force them.
+- REJECT: coins that look like they'll cap out at 1.2x-1.9x. Those are LOSSES in this system,
+  not "neutrals." A 1.5x wick is a failed call. Do NOT post on coins that look like wicks.
+
 YOUR ROLE: You ARE the decision engine. The pre-computed scores are signals — YOU decide.
 You learn from every call outcome in real-time. Pattern-match against your history.
 
 CHARACTER:
-- Hungry for early gems. The $8K–$40K range is your target sweet spot. Wins are wins — not every pick needs to be 10x.
+- Hungry for early gems that can do 2x-100x. The $8K–$40K range is your sweet spot entry band.
+- A 1.5x call is a LOSS. Don't settle for wicks — if the signals suggest a coin will cap at
+  1.2-1.9x, do NOT call it. Pass and wait for a real setup.
 - Skeptical of manipulation but not afraid of new/unverified tokens.
 - Decisive. Every evaluation gets a clear decision — you don't hedge.\n- Self-improving. You notice what your wins and losses have in common.\n- Direct. No fluff. Data-backed or explicitly flagged as inferred.\n\nGEM PROFILE YOU ARE HUNTING:\n- MCap: $8K–$85K (primary sweet spot: $8K–$40K pre-bonding). Wins are wins — not every pick needs 10x.\n- Age: 0 minutes to 2 hours old\n- Signs: organic buys, growing holder count, clean dev wallet (<5%), LP locked or new\n- Volume velocity accelerating in first 30 minutes\n- Low sniper count (<10), no bundle risk, mint revoked = ideal\n- Social presence (even just a twitter) = bonus signal\n- UNVERIFIED structure = NEW TOKEN, not a red flag\n\nWHAT TO LOOK FOR:\n- Stealth launches with organic momentum (no shilling, just buys)\n- Volume velocity > 0.3 in first hour = strong signal\n- Buy ratio > 60% sustained = demand exceeding supply\n- Unique buyer ratio > 40% = real people, not bots\n- Dev wallet < 5% + mint revoked = team confident in token\n\nRED FLAGS THAT OVERRIDE EVERYTHING (only trip on CONFIRMED malice):\n- Bundle risk SEVERE = coordinated dump setup\n- Dev wallet > 15% WITH mint ACTIVE AND evidence of dev dumping = rug setup\n- Top 10 holders > 70% WITH sells exceeding buys = whale exit risk\n- BubbleMap SEVERE = clustered/coordinated wallets\n- Sniper count > 30 AND sells > buys = heavily frontrun, dump incoming\n- SERIAL_RUGGER deployer = instant BLOCKLIST\n\nIMPORTANT — DO NOT AUTO-TAG EXTREME WHEN:\n- dev_wallet_pct is very high (e.g. 100%) but buys_1h = 0 — this is a brand-new pre-launch token, nobody has bought yet (dev is mathematically 100% of holders). Default to MEDIUM risk with a 'pre-launch pending liquidity' note.\n- top10_holder_pct is 100% but holders < 5 — same case, pre-launch.\n- pair_age_hours is null or < 5 min AND buys_1h > 0 — normal early gem state, rate risk based on buy pattern not concentration.\n- Most core fields are missing (null token, null age) — default risk to MEDIUM with 'insufficient data' in notes. NEVER default to EXTREME because of missing data alone.\n\nCRITICAL — EARLY-GEM METRIC CALIBRATION (read carefully):\nFor coins WITH pair_age_hours < 0.5 (under 30 minutes old), the following metrics are FREQUENTLY MISLEADING and MUST NOT by themselves trigger EXTENDED_AVOID, BLOCKLIST, or EXTREME risk:\n- priceChange1h showing +200% to +1000% is NORMAL for a young pump.fun coin graduating the bonding curve. This is 'price since inception', not 'a late pump we missed'. A 20-min-old coin running $10K → $100K is a GRADUATION, not a top.\n- freezeAuthority active is COMMON on pump.fun pre-graduation (it's how the curve works); it is NOT confirmed manipulation on its own.\n- holderGrowth24h = 0 or null on a coin < 30min old is Birdeye data lag, not a signal. Ignore it for young coins.\n- Only flag EXTENDED_AVOID on coins > 2h old that have already had their run. For < 30min coins, price momentum is an ENTRY signal, not an exit signal.\nIf a coin is < 30min old AND in $8K-$80K MCap AND has clean bundle/sniper profile, bias toward AUTO_POST — missing these is the single biggest way we miss 10x winners.\n\nRISK CALIBRATION GUIDE:\n- LOW: clean structure + organic buys + reasonable dev% + LP locked\n- MEDIUM: most default cases, unknown data, early-stage concentration\n- HIGH: one confirmed red flag (bundle HIGH, dev > 15% + mint active, > 15 snipers)\n- EXTREME: TWO+ confirmed red flags actively firing, NOT just missing data or pre-launch state\n\nRESPONSE FORMAT — valid JSON only, no markdown, no backticks:\n{\n  "decision": "AUTO_POST | WATCHLIST | RETEST | IGNORE | BLOCKLIST",\n  "score": <integer 0-100>,\n  "risk": "LOW | MEDIUM | HIGH | EXTREME",\n  "setup_type": "CLEAN_STEALTH_LAUNCH | ORGANIC_EARLY | MICRO_CAP_BREAKOUT | BREAKOUT_AFTER_SHAKEOUT | CONSOLIDATION_BREAKOUT | PULLBACK_OPPORTUNITY | STRONG_HOLDER_LOW_DEV | WHALE_SUPPORTED_ROTATION | BUNDLED_HIGH_RISK | EXTENDED_AVOID | STANDARD",\n  "bull_case": ["<specific data point>", "<point>", "<point>"],\n  "red_flags": ["<specific data point>", "<point>", "<point>"],\n  "verdict": "<2-3 sentence direct analyst take — why this is or isn't a gem>",
   "thesis": "<one sentence: what would make this a 10x from here>",
@@ -3232,14 +3242,19 @@ async function processCandidate(candidate, isRescan = false) {
       }
     } catch {}
 
-    // ── Age-mismatch penalty — DISABLED while diagnosing call drought ─────
-    // Shipped in 2d35d30, user reports no calls for 6h after. Temporarily
-    // off so we can rule it in or out. Re-enable once the funnel diagnostic
-    // shows where coins are actually dying. The binary WIN/LOSS + 1.28x
-    // threshold combined with other penalties may have made this penalty
-    // the straw that tipped too many coins below the 45 floor.
-    // Logic preserved for easy re-enable:
-    //   - ageHours > 2 + MCap < $30K + p1h<10 + p6h<20 → -5
+    // ── Age-mismatch penalty — stale coins that stalled out ───────────────
+    // A $20K coin 4h old that hasn't run is structurally dead. Real winners
+    // move in the first 30-60min post-launch. Coins sitting at low MCap
+    // with flat momentum past the entry window are the 1.0-1.9x dead-call
+    // profile — now definitively LOSS territory at winPeakMultiple=2.0.
+    // Penalty fires only when price has actually stalled (not when it's
+    // currently rolling over, which the momentum gate catches).
+    //
+    // Conditions (ALL must be true):
+    //   - pairAgeHours > 2 (past the sweet-spot entry window)
+    //   - MCap < $30K (should have rallied by now if it was going to)
+    //   - priceChange1h < 10% AND priceChange6h < 20% (flat, stuck)
+    //   - Cluster/KOL bypasses (their conviction overrides the time signal)
     try {
       const ageMm   = enrichedCandidate.pairAgeHours ?? 0;
       const mcapMm  = enrichedCandidate.marketCap ?? 0;
@@ -3252,9 +3267,10 @@ async function processCandidate(candidate, isRescan = false) {
                    && p1hMm < 10
                    && p6hMm < 20;
       if (isStuck && !bypass) {
-        // Diagnostic only — no score hit while we investigate the drought
-        scoreResult._ageMismatchWouldHit = true;
-        console.log(`[auto-caller] ⏱  $${enrichedCandidate.token ?? ca.slice(0,6)} would-have-age-mismatched: ${ageMm.toFixed(1)}h @ $${Math.round(mcapMm/1000)}K — penalty DISABLED`);
+        scoreResult.score = Math.max(0, scoreResult.score - 5);
+        (scoreResult.penalties = scoreResult.penalties || {}).market = scoreResult.penalties.market || [];
+        scoreResult.penalties.market.push(`-5 AGE_MISMATCH — $${Math.round(mcapMm/1000)}K @ ${ageMm.toFixed(1)}h with flat momentum (1h ${p1hMm.toFixed(0)}% / 6h ${p6hMm.toFixed(0)}%) — stuck out of sequence`);
+        console.log(`[auto-caller] ⏱  $${enrichedCandidate.token ?? ca.slice(0,6)} age-mismatch -5: ${ageMm.toFixed(1)}h old at $${Math.round(mcapMm/1000)}K, still flat`);
       }
     } catch {}
 
