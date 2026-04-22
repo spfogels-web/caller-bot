@@ -489,6 +489,9 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   }
 
   parts.latePumpPenalty = -knifePenalty + recoveryBonus;
+  parts._knifePenalty   = knifePenalty;
+  parts._recoveryBonus  = recoveryBonus;
+  parts._knifeSignals   = knifeSignals;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // DELTA SIGNALS — see the DIRECTION of change since last rescan
