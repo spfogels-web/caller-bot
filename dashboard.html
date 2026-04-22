@@ -8993,14 +8993,47 @@ async function sendAgentMessage() {
   _agentMsgs.push({ role: 'user', content: msgContent });
 
   showAgentTyping();
+  // Strip base64 image payloads from HISTORICAL messages before sending —
+  // keeping them balloons the request body past Express's 10MB JSON limit
+  // (each image is 1-5MB encoded) and causes the server to reject with an
+  // HTML error page that the frontend can't JSON.parse ("Unexpected token
+  // '<', '<!DOCTYPE '..." error). We keep image content on the MOST RECENT
+  // user message so Claude can still see it, but historical image blocks
+  // get replaced with a text placeholder "[previously uploaded image]".
+  const msgsForSend = _agentMsgs.slice(-20);
+  const lastUserIdx = (() => {
+    for (let i = msgsForSend.length - 1; i >= 0; i--) {
+      if (msgsForSend[i].role === 'user') return i;
+    }
+    return -1;
+  })();
+  const prunedMsgs = msgsForSend.map((m, idx) => {
+    if (!Array.isArray(m.content)) return m;
+    // Always keep text blocks. Keep image blocks only on the last user msg.
+    const filtered = m.content.map(block => {
+      if (block.type === 'image' && idx !== lastUserIdx) {
+        return { type: 'text', text: '[previously uploaded image]' };
+      }
+      return block;
+    });
+    return { ...m, content: filtered };
+  });
   try {
     const res  = await fetch('/api/agent', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ messages: _agentMsgs.slice(-20) }),
+      body: JSON.stringify({ messages: prunedMsgs }),
       signal: AbortSignal.timeout(35000),
     });
-    const data = await res.json();
+    // Safer parse — if server returned HTML (413, 502, 504 etc.), surface
+    // the real reason instead of the opaque JSON.parse error.
+    let data;
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      const txt = await res.text();
+      throw new Error(`server returned ${res.status} ${ct.split(';')[0]} — ${txt.slice(0, 120).replace(/\n/g, ' ')}`);
+    }
+    data = await res.json();
     removeAgentTyping();
     const reply = data.reply || data.error || 'No response';
     _agentMsgs.push({ role: 'assistant', content: reply });
@@ -9010,7 +9043,7 @@ async function sendAgentMessage() {
     }
   } catch (e) {
     removeAgentTyping();
-    appendAgentMessage('bot', '⚠ Error: ' + e.message + '. Check bot is running.');
+    appendAgentMessage('bot', '⚠ Error: ' + e.message);
   } finally {
     if (input) input.disabled = false;
     if (btn)   btn.disabled   = false;

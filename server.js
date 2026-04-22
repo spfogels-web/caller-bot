@@ -5214,7 +5214,24 @@ app.post('/api/agent/search', express.json(), async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.post('/api/agent', express.json({ limit: '10mb' }), async (req, res) => {
+app.post('/api/agent',
+  express.json({ limit: '25mb' }),
+  // JSON error handler — if express.json() rejects (payload too large,
+  // malformed JSON, etc.), Express default serves an HTML error page and
+  // the dashboard crashes trying to JSON.parse "<!DOCTYPE". Wrap with a
+  // middleware that coerces ANY error on this route into JSON.
+  (err, req, res, next) => {
+    if (err) {
+      console.warn(`[api/agent] body-parse error: ${err.type || err.name} — ${err.message}`);
+      return res.status(err.status || 400).json({
+        ok: false,
+        reply: `⚠ Request rejected: ${err.message}. Try sending a shorter message or fewer images at once.`,
+        error: err.message,
+      });
+    }
+    next();
+  },
+  async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) {
     return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured on server' });
