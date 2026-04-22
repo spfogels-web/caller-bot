@@ -7015,35 +7015,31 @@ function buildAuditDetail(c){
   function renderFoundationSignals(c) {
     var dp = c.dualParts || {};
     if (!dp || Object.keys(dp).length === 0) return '';
-    var reasons = Array.isArray(c.dualReasons) ? c.dualReasons : [];
-    var risks   = Array.isArray(c.dualRisks)   ? c.dualRisks   : [];
 
-    // Match reasons/risks to their signal by keyword — so each row shows the
-    // exact lines that contributed to its points total.
-    var matchers = {
-      volumeVelocity:     /velocity|buys\/min|acceleration|momentum|volume|social spike|twitter|sustained pressure|run[- ]rate/i,
-      buyPressure:        /buy dominance|buy pressure|buy ratio|buy edge|sellers|sell pressure|exit liquidity|transactions\/1h|micro buys|active:/i,
-      walletQuality:      /winner wallets|wallet|smart money|sniper|bundle|bubblemap|cluster|coordination|coord/i,
-      holderDistribution: /dev |dev wallet|dev allocation|top10|top 10|holder|distribution|whale-dominated|mint revoked|deployer|rugger/i,
-      liquidityHealth:    /liquidity|lp locked|liq(uidity)? ratio|mint authority|freeze authority|rug risk/i,
-    };
-    var collectLines = function(key) {
-      var out = [];
-      var rx = matchers[key];
-      for (var i = 0; i < reasons.length; i++) if (rx.test(reasons[i])) out.push({ txt: reasons[i], kind: 'pos' });
-      for (var i = 0; i < risks.length;  i++) if (rx.test(risks[i]))   out.push({ txt: risks[i],   kind: 'neg' });
-      return out;
-    };
+    // Pull the ledger — the authoritative, line-by-line breakdown from
+    // the scorer. Each entry: { k: key, l: label, i: input, f: formula,
+    // p: points, t: tone ('pos'|'neg') }. Persisted inside dualParts.
+    var ledger = Array.isArray(dp._ledger) ? dp._ledger : [];
 
     var signals = [
-      { key:'volumeVelocity',     label:'Volume Velocity',      icon:'\u26A1', max:35, color:'#00e676', desc:'Buys/min acceleration' },
-      { key:'buyPressure',        label:'Buy vs Sell Pressure',  icon:'\uD83D\uDCCA', max:25, color:'#18ffff', desc:'Demand vs manipulation' },
-      { key:'walletQuality',      label:'Wallet Quality',        icon:'\uD83D\uDC5B', max:20, color:'#e040fb', desc:'Winner wallet conviction' },
-      { key:'holderDistribution', label:'Holder Distribution',   icon:'\uD83D\uDC65', max:12, color:'#ffd740', desc:'Dev ' + (dp._devWallet != null ? dp._devWallet : '?') + '/8  Top10 ' + (dp._top10Holders != null ? dp._top10Holders : '?') + '/4' },
-      { key:'liquidityHealth',    label:'Liquidity Health',      icon:'\uD83D\uDCA7', max:8,  color:'#448aff', desc:'LP ratio + lock status' },
+      { key:'volumeVelocity',     prefix:'vv.', label:'Volume Velocity',      icon:'\u26A1', max:35, color:'#00e676', desc:'Buys/min acceleration' },
+      { key:'buyPressure',        prefix:'bp.', label:'Buy vs Sell Pressure',  icon:'\uD83D\uDCCA', max:25, color:'#18ffff', desc:'Demand vs manipulation' },
+      { key:'walletQuality',      prefix:'wq.', label:'Wallet Quality',        icon:'\uD83D\uDC5B', max:20, color:'#e040fb', desc:'Winner wallet conviction' },
+      { key:'holderDistribution', prefix:'hd.', label:'Holder Distribution',   icon:'\uD83D\uDC65', max:12, color:'#ffd740', desc:'Dev ' + (dp._devWallet != null ? dp._devWallet : '?') + '/8  Top10 ' + (dp._top10Holders != null ? dp._top10Holders : '?') + '/4' },
+      { key:'liquidityHealth',    prefix:'lh.', label:'Liquidity Health',      icon:'\uD83D\uDCA7', max:8,  color:'#448aff', desc:'LP ratio + lock status' },
     ];
+    var foundationRaw = dp._foundationRaw != null ? dp._foundationRaw : null;
     var foundation = 0;
     for (var i = 0; i < signals.length; i++) foundation += (dp[signals[i].key] || 0);
+    var foundationDisplay = foundationRaw != null ? foundationRaw.toFixed(1) : foundation;
+
+    var linesForPrefix = function(prefix) {
+      var out = [];
+      for (var i = 0; i < ledger.length; i++) {
+        if (ledger[i].k && ledger[i].k.indexOf(prefix) === 0) out.push(ledger[i]);
+      }
+      return out;
+    };
 
     var rows = '';
     for (var i = 0; i < signals.length; i++) {
@@ -7051,19 +7047,25 @@ function buildAuditDetail(c){
       var val = dp[s.key] != null ? dp[s.key] : 0;
       var pctVal = Math.min(100, (val / s.max) * 100);
       var valCol = pctVal >= 70 ? 'var(--green)' : pctVal >= 40 ? 'var(--cyan)' : pctVal >= 20 ? 'var(--gold)' : 'var(--red)';
-      var matched = collectLines(s.key);
-      var lines = matched.slice(0,4).map(function(m){
-        var col = m.kind === 'pos' ? 'var(--green)' : 'var(--red)';
-        var bullet = m.kind === 'pos' ? '+' : '−';
-        return '<div style="font-family:var(--mono);font-size:8px;color:var(--text2);line-height:1.45;padding-left:24px">'
-             + '<span style="color:' + col + ';font-weight:700;margin-right:4px">' + bullet + '</span>'
-             + esc(String(m.txt).slice(0,140))
+
+      // Pull exact ledger entries for this signal — full breakdown math.
+      var entries = linesForPrefix(s.prefix);
+      var lines = entries.map(function(L){
+        var col = (L.t === 'neg' || L.p < 0) ? 'var(--red)' : 'var(--green)';
+        var sign = L.p >= 0 ? '+' : '';
+        var pts = sign + L.p.toFixed(2);
+        return '<div style="font-family:var(--mono);font-size:8.5px;color:var(--text2);line-height:1.5;padding:2px 0 2px 24px;display:flex;justify-content:space-between;gap:8px">'
+             + '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+             +   '<span style="color:' + col + ';font-weight:700;margin-right:6px;display:inline-block;min-width:36px">' + pts + '</span>'
+             +   '<span style="color:var(--text1);font-weight:600">' + esc(L.l) + '</span>'
+             +   (L.i ? '<span style="color:var(--text3);margin-left:6px">· ' + esc(String(L.i).slice(0,60)) + '</span>' : '')
+             + '</span>'
+             + (L.f ? '<span style="color:var(--text3);font-size:8px;flex-shrink:0">' + esc(String(L.f).slice(0,50)) + '</span>' : '')
              + '</div>';
       }).join('');
-      var moreCount = matched.length > 4 ? (matched.length - 4) : 0;
-      var moreLine = moreCount > 0 ? '<div style="font-family:var(--mono);font-size:7px;color:var(--text3);padding-left:24px;margin-top:1px">+' + moreCount + ' more</div>' : '';
+      var emptyNote = !entries.length ? '<div style="font-family:var(--mono);font-size:8px;color:var(--text3);padding-left:24px;font-style:italic">No ledger entries (fallback score or missing data)</div>' : '';
 
-      rows += '<div style="padding:6px 0;border-bottom:1px dashed rgba(255,255,255,0.04)">' +
+      rows += '<div style="padding:8px 0;border-bottom:1px dashed rgba(255,255,255,0.05)">' +
         '<div style="display:flex;align-items:center;gap:8px">' +
           '<div style="font-size:14px;width:20px;text-align:center;flex-shrink:0">' + s.icon + '</div>' +
           '<div style="width:130px;flex-shrink:0"><div style="font-family:var(--mono);font-size:9px;color:var(--text1);font-weight:700">' + s.label + '</div><div style="font-family:var(--mono);font-size:7px;color:var(--text3)">' + s.desc + '</div></div>' +
@@ -7072,14 +7074,37 @@ function buildAuditDetail(c){
             '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:Orbitron,var(--mono);font-size:11px;color:' + valCol + ';font-weight:700;text-shadow:0 0 8px ' + s.color + '">' + val + '/' + s.max + '</div>' +
           '</div>' +
         '</div>' +
-        (lines ? '<div style="margin-top:4px">' + lines + moreLine + '</div>' : '') +
+        '<div style="margin-top:4px">' + (lines || emptyNote) + '</div>' +
       '</div>';
     }
 
-    // ── Knife / recovery adjustment row ──
-    var knifePen = dp._knifePenalty  != null ? dp._knifePenalty  : (c.knifePenalty  != null ? c.knifePenalty  : 0);
-    var recovBon = dp._recoveryBonus != null ? dp._recoveryBonus : (c.recoveryBonus != null ? c.recoveryBonus : 0);
-    var knifeSig = dp._knifeSignals  != null ? dp._knifeSignals  : (c.knifeSignals  != null ? c.knifeSignals  : 0);
+    // ── Knife/Recovery and Delta entries from the ledger ──
+    var knifeEntries = ledger.filter(function(L){ return L.k && /^knife\./.test(L.k); });
+    var recovEntries = ledger.filter(function(L){ return L.k && /^recovery\./.test(L.k); });
+    var deltaEntries = ledger.filter(function(L){ return L.k && /^delta\./.test(L.k); });
+
+    // Helper: render ledger entries as inline lines
+    var renderLedgerLines = function(entries, indent) {
+      indent = indent || 12;
+      return entries.map(function(L){
+        var col = (L.t === 'neg' || L.p < 0) ? 'var(--red)' : 'var(--green)';
+        var sign = L.p >= 0 ? '+' : '';
+        var pts = sign + L.p.toFixed(2);
+        return '<div style="font-family:var(--mono);font-size:8.5px;color:var(--text2);line-height:1.5;padding:2px 0 2px ' + indent + 'px;display:flex;justify-content:space-between;gap:8px">'
+             + '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+             +   '<span style="color:' + col + ';font-weight:700;margin-right:6px;display:inline-block;min-width:36px">' + pts + '</span>'
+             +   '<span style="color:var(--text1);font-weight:600">' + esc(L.l) + '</span>'
+             +   (L.i ? '<span style="color:var(--text3);margin-left:6px">· ' + esc(String(L.i).slice(0,60)) + '</span>' : '')
+             + '</span>'
+             + (L.f ? '<span style="color:var(--text3);font-size:8px;flex-shrink:0">' + esc(String(L.f).slice(0,50)) + '</span>' : '')
+             + '</div>';
+      }).join('');
+    };
+
+    // ── Knife / recovery row ──
+    var knifePen = dp._knifePenalty  != null ? dp._knifePenalty  : 0;
+    var recovBon = dp._recoveryBonus != null ? dp._recoveryBonus : 0;
+    var knifeSig = dp._knifeSignals  != null ? dp._knifeSignals  : 0;
     var knifeAdj = -(knifePen) + recovBon;
     var knifeRow = '';
     if (knifePen > 0 || recovBon > 0) {
@@ -7088,32 +7113,27 @@ function buildAuditDetail(c){
                  : knifePen >= 30 ? '⚠️ Weakness warning (' + knifeSig + ' conditions)'
                  : knifePen >= 15 ? '⚠️ Weakness signal (1 condition)'
                  : '✅ Recovery / Strength confirmed';
-      knifeRow = '<div style="padding:6px 10px;margin-top:4px;background:' + (knifePen>0?'rgba(255,23,68,0.06)':'rgba(0,230,118,0.06)') + ';border:1px solid ' + kCol + '33;border-radius:6px;display:flex;justify-content:space-between;align-items:center">' +
-        '<span style="font-family:var(--mono);font-size:9px;color:' + kCol + ';font-weight:700">' + kLabel + '</span>' +
-        '<span style="font-family:Orbitron,var(--mono);font-size:10px;color:' + kCol + ';font-weight:700">' + (knifeAdj >= 0 ? '+' : '') + knifeAdj + '</span>' +
+      var kEntries = knifePen > 0 ? knifeEntries : recovEntries;
+      knifeRow = '<div style="padding:8px 10px;margin-top:4px;background:' + (knifePen>0?'rgba(255,23,68,0.06)':'rgba(0,230,118,0.06)') + ';border:1px solid ' + kCol + '33;border-radius:6px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">' +
+          '<span style="font-family:var(--mono);font-size:9px;color:' + kCol + ';font-weight:700">' + kLabel + '</span>' +
+          '<span style="font-family:Orbitron,var(--mono);font-size:11px;color:' + kCol + ';font-weight:700">' + (knifeAdj >= 0 ? '+' : '') + knifeAdj.toFixed(2) + '</span>' +
+        '</div>' +
+        renderLedgerLines(kEntries, 0) +
       '</div>';
     }
 
-    // ── Delta (time-series) row ──
+    // ── Delta row ──
     var deltaScore = dp.deltaScore != null ? dp.deltaScore : 0;
     var deltaRow = '';
-    if (deltaScore !== 0) {
+    if (deltaEntries.length > 0) {
       var dCol = deltaScore > 0 ? 'var(--green)' : 'var(--red)';
-      var deltaMatches = [];
-      var deltaRx = /mcap|holders \+|holders −|holders -|dev selling|dev dumping|dev adding|buy pressure|velocity|liquidity|score trending|top10 concentration|top 10 concentration/i;
-      for (var j = 0; j < reasons.length; j++) if (deltaRx.test(reasons[j]) && /(\bsince\b|delta|accelerat|strengthen|trending|pumping now)/i.test(reasons[j])) deltaMatches.push({ txt: reasons[j], kind: 'pos' });
-      for (var j = 0; j < risks.length;   j++) if (deltaRx.test(risks[j])   && /(\bsince\b|delta|weakening|fading|trending|dumping)/i.test(risks[j]))   deltaMatches.push({ txt: risks[j],   kind: 'neg' });
-      var deltaLines = deltaMatches.slice(0,3).map(function(m){
-        var col = m.kind === 'pos' ? 'var(--green)' : 'var(--red)';
-        var bullet = m.kind === 'pos' ? '+' : '−';
-        return '<div style="font-family:var(--mono);font-size:8px;color:var(--text2);line-height:1.4;padding-left:12px"><span style="color:' + col + ';font-weight:700;margin-right:4px">' + bullet + '</span>' + esc(String(m.txt).slice(0,140)) + '</div>';
-      }).join('');
-      deltaRow = '<div style="padding:6px 10px;margin-top:4px;background:' + (deltaScore>0?'rgba(0,230,118,0.06)':'rgba(255,23,68,0.06)') + ';border:1px solid ' + dCol + '33;border-radius:6px">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+      deltaRow = '<div style="padding:8px 10px;margin-top:4px;background:' + (deltaScore>0?'rgba(0,230,118,0.06)':'rgba(255,23,68,0.06)') + ';border:1px solid ' + dCol + '33;border-radius:6px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">' +
           '<span style="font-family:var(--mono);font-size:9px;color:' + dCol + ';font-weight:700">📈 DELTA (change since last scan)</span>' +
-          '<span style="font-family:Orbitron,var(--mono);font-size:10px;color:' + dCol + ';font-weight:700">' + (deltaScore>=0?'+':'') + deltaScore + '</span>' +
+          '<span style="font-family:Orbitron,var(--mono);font-size:11px;color:' + dCol + ';font-weight:700">' + (deltaScore>=0?'+':'') + deltaScore.toFixed(2) + '</span>' +
         '</div>' +
-        (deltaLines ? '<div style="margin-top:4px">' + deltaLines + '</div>' : '') +
+        renderLedgerLines(deltaEntries, 0) +
       '</div>';
     }
 
@@ -7128,17 +7148,18 @@ function buildAuditDetail(c){
       '</div>';
     }
 
-    // ── Final math line ──
+    // ── Final math line — shows raw (1-decimal) numbers when available ──
     var finalScore = c.discoveryScore != null ? c.discoveryScore : (c.score != null ? c.score : '—');
-    var mathParts = [foundation];
-    var mathLabels = ['Foundation ' + foundation];
-    if (knifeAdj !== 0) { mathParts.push(knifeAdj); mathLabels.push((knifeAdj>=0?'+':'') + knifeAdj + ' Knife/Recovery'); }
-    if (deltaScore !== 0) { mathParts.push(deltaScore); mathLabels.push((deltaScore>=0?'+':'') + deltaScore + ' Delta'); }
-    var mathSum = mathParts.reduce(function(a,b){ return a+b; }, 0);
+    var totalRaw   = dp._totalRaw != null ? dp._totalRaw : null;
+    var foundStr = foundationRaw != null ? foundationRaw.toFixed(2) : String(foundation);
+    var mathLabels = ['Foundation ' + foundStr];
+    if (knifeAdj !== 0)  mathLabels.push((knifeAdj>=0?'+':'') + knifeAdj.toFixed(2) + ' Knife/Recov');
+    if (deltaScore !== 0) mathLabels.push((deltaScore>=0?'+':'') + deltaScore.toFixed(2) + ' Delta');
     var mathStr = mathLabels.join(' ');
+    var displayScore = totalRaw != null ? totalRaw.toFixed(2) + ' → ' + finalScore : finalScore;
     var mathLine = '<div style="padding:8px 12px;margin-top:6px;background:linear-gradient(90deg,rgba(24,255,255,0.08),rgba(0,230,118,0.08));border:1px solid rgba(24,255,255,0.25);border-radius:6px;display:flex;justify-content:space-between;align-items:center">' +
       '<span style="font-family:var(--mono);font-size:9px;color:var(--text2);letter-spacing:0.3px">' + mathStr + (capLine ? ' → CAP applied' : '') + '</span>' +
-      '<span style="font-family:Orbitron,var(--mono);font-size:13px;color:var(--cyan);font-weight:700">= ' + finalScore + '</span>' +
+      '<span style="font-family:Orbitron,var(--mono);font-size:13px;color:var(--cyan);font-weight:700">= ' + displayScore + '</span>' +
     '</div>';
 
     return '<div style="background:rgba(0,0,0,0.5);border:1px solid rgba(0,230,118,0.3);border-radius:10px;margin-bottom:10px;overflow:hidden">' +
@@ -7148,7 +7169,7 @@ function buildAuditDetail(c){
           '<span style="font-family:Orbitron,var(--mono);font-size:10px;font-weight:700;color:var(--green);letter-spacing:1.5px">SCORING BREAKDOWN — HOW THIS SCORE WAS BUILT</span>' +
         '</div>' +
         '<div style="display:flex;gap:8px;align-items:center">' +
-          '<span style="font-family:var(--mono);font-size:8px;color:var(--text3)">Foundation: <span style="color:var(--green);font-weight:700">' + foundation + '/100</span></span>' +
+          '<span style="font-family:var(--mono);font-size:8px;color:var(--text3)">Foundation: <span style="color:var(--green);font-weight:700">' + foundationDisplay + '/100</span></span>' +
           '<span style="font-family:Orbitron,var(--mono);font-size:10px;color:var(--cyan);font-weight:700">' + finalScore + '</span>' +
         '</div>' +
       '</div>' +

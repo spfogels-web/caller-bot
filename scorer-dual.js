@@ -166,9 +166,35 @@ export function calculateBehaviorMetrics(candidate) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DISCOVERY MODEL v3 — 5 FOUNDATION SIGNALS (100 points)
-// Focus on MOVEMENT and INTENT over static structure
+// DISCOVERY MODEL v4 — CONTINUOUS SCORING WITH AUDIT LEDGER
+//
+// Every point added is logged to a ledger as:
+//   { key, label, input, formula, points, tone: 'pos'|'neg' }
+// so the UI can show the full line-by-line math behind each score.
+//
+// Scoring is continuous (smooth curves) instead of tiered bands, so tiny
+// differences in input produce tiny differences in output. This eliminates
+// the clustering at 58/65/72 that happens when every coin falls into the
+// same bucket.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ── Continuous-curve primitives ─────────────────────────────────────────────
+// Smooth monotonic interpolation. `x` is the input, `x0`/`x1` bound the
+// meaningful range, and the result is scaled to [0..max] with a configurable
+// exponent (shape < 1 = concave/front-loaded, shape > 1 = convex/back-loaded).
+function curve(x, x0, x1, max, shape = 1) {
+  if (x == null || Number.isNaN(+x)) return 0;
+  const t = Math.max(0, Math.min(1, (x - x0) / (x1 - x0)));
+  return max * Math.pow(t, shape);
+}
+
+// Symmetric sweet-spot curve — max at `center`, falling off on both sides.
+function sweetSpot(x, center, halfWidth, max, tailShape = 1.2) {
+  if (x == null || Number.isNaN(+x)) return 0;
+  const dist = Math.abs(x - center) / halfWidth;
+  if (dist >= 1) return max * Math.max(0, Math.pow(1 - (dist - 1) / 2, tailShape));
+  return max * (1 - Math.pow(dist, 2) * 0.25); // quadratic plateau near center
+}
 
 export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) {
   const m = metricsIn || calculateBehaviorMetrics(candidate);
@@ -176,230 +202,299 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   const reasons = [];
   const risks = [];
   const parts = {};
+  const ledger = [];   // full audit trail: [{ key, label, input, formula, points, tone }]
   const veryEarly = (m.ageMinutes ?? 0) < 15;
 
+  // Helper: record a ledger line and return the points added (for accumulating).
+  // Uses 1-decimal precision internally then rounds at signal-level aggregate.
+  const add = (key, label, input, formula, points, tone = 'pos') => {
+    if (!Number.isFinite(points) || points === 0) return 0;
+    ledger.push({ key, label, input, formula, points: +points.toFixed(2), tone });
+    return points;
+  };
+
   // ═══════════════════════════════════════════════════════════════════════════
-  // 1. VOLUME VELOCITY (max: w.volumeVelocity, default 35)
-  //    Buys/minute acceleration in first 5-15 min.
-  //    Rapid volume increase vs baseline. Consistent buy pressure (not spikes).
-  //    THIS IS THE FOUNDATION. Real sends show acceleration patterns.
+  // 1. VOLUME VELOCITY (max: 35) — continuous curve over buys/min
+  //    bv=12+ → 35 (explosive), bv=5 → ~25, bv=1 → ~6, bv=0 → 0
+  //    Shape 0.6 is front-loaded: small increases at low bv matter more.
   // ═══════════════════════════════════════════════════════════════════════════
-  let p = 0;
   const maxVV = w.volumeVelocity || 35;
   const bv = m.buyVelocity ?? m.volumeVelocity;
+  let vvAcc = 0;
 
   if (bv == null) {
-    p = Math.round(maxVV * 0.20);
+    const est = maxVV * 0.20;
+    vvAcc += add('vv.base', 'Velocity base (unknown — very early)', 'bv=null', `=${est.toFixed(1)}`, est, 'neg');
     risks.push('Volume velocity unknown — very early');
-  } else if (bv >= 12)   { p = 35;                        reasons.push(`EXPLOSIVE velocity (${bv.toFixed(1)} buys/min) — STRONG BUY SIGNAL`); }
-  else if (bv >= 8)      { p = 32;                        reasons.push(`Very strong velocity (${bv.toFixed(1)} buys/min)`); }
-  else if (bv >= 5)      { p = 28;                        reasons.push(`Strong velocity (${bv.toFixed(1)} buys/min)`); }
-  else if (bv >= 3)      { p = 22;                        reasons.push(`Healthy velocity (${bv.toFixed(1)} buys/min)`); }
-  else if (bv >= 1.5)    { p = 15;                        reasons.push(`Developing velocity (${bv.toFixed(1)} buys/min)`); }
-  else if (bv >= 0.7)    { p = 8;                         risks.push(`Weak velocity (${bv.toFixed(1)} buys/min)`); }
-  else                   { p = 0;                         risks.push(`Dead volume (${bv.toFixed(1)} buys/min) — no momentum`); }
+  } else {
+    const base = curve(bv, 0, 12, maxVV * 0.82, 0.6); // up to ~28.7 from bv alone
+    vvAcc += add('vv.base', 'Velocity base', `bv=${bv.toFixed(2)}/min`, `curve(bv,0→12,28.7,s=0.6)=${base.toFixed(1)}`, base);
+    if (bv >= 8)        reasons.push(`EXPLOSIVE velocity (${bv.toFixed(1)} buys/min)`);
+    else if (bv >= 4)   reasons.push(`Strong velocity (${bv.toFixed(1)} buys/min)`);
+    else if (bv >= 1.5) reasons.push(`Developing velocity (${bv.toFixed(1)} buys/min)`);
+    else if (bv < 0.7)  risks.push(`Weak velocity (${bv.toFixed(1)} buys/min)`);
+  }
 
-  // Acceleration bonus: 5m run-rate exceeding 1h average = momentum building
+  // Acceleration bonus — continuous based on 5m vs 1h rate
   if (m.priceChange5m != null && m.priceChange1h != null) {
     const runRate5m = m.priceChange5m;
     const avgRate1h = m.priceChange1h / 12;
-    if (runRate5m > avgRate1h * 1.5 && runRate5m > 0) {
-      p = Math.min(maxVV, p + Math.round(maxVV * 0.10));
-      reasons.push('Accelerating — 5m run-rate exceeds 1h avg');
+    if (avgRate1h > -50 && runRate5m > 0) {
+      const ratio = avgRate1h !== 0 ? runRate5m / Math.max(0.01, Math.abs(avgRate1h)) : runRate5m;
+      if (ratio > 1.2) {
+        const pts = curve(ratio, 1.2, 3.0, maxVV * 0.10, 0.8);
+        vvAcc += add('vv.accel5m', '5m accel vs 1h avg', `ratio=${ratio.toFixed(2)}x`, `curve=${pts.toFixed(1)}`, pts);
+        reasons.push(`Accelerating — 5m rate ${ratio.toFixed(1)}x of 1h avg`);
+      }
     }
   }
 
-  // Momentum shift bonus — price is accelerating RIGHT NOW
-  if (m.momentumShift != null && m.momentumShift > 0.5) {
-    p = Math.min(maxVV, p + Math.round(maxVV * 0.08));
-    reasons.push(`Momentum shift +${m.momentumShift.toFixed(2)}%/min — breakout forming`);
-  } else if (m.momentumShift != null && m.momentumShift < -1.0) {
-    p = Math.max(0, p - Math.round(maxVV * 0.06));
-    risks.push(`Momentum fading ${m.momentumShift.toFixed(2)}%/min — deceleration`);
+  // Momentum shift — continuous
+  if (m.momentumShift != null) {
+    if (m.momentumShift > 0) {
+      const pts = curve(m.momentumShift, 0, 2.0, maxVV * 0.08, 0.7);
+      if (pts > 0.1) {
+        vvAcc += add('vv.momentum', 'Momentum shift (breakout forming)', `+${m.momentumShift.toFixed(2)}%/min`, `curve=${pts.toFixed(1)}`, pts);
+        reasons.push(`Momentum shift +${m.momentumShift.toFixed(2)}%/min`);
+      }
+    } else if (m.momentumShift < -0.5) {
+      const pts = -curve(Math.abs(m.momentumShift), 0.5, 3.0, maxVV * 0.08, 0.8);
+      vvAcc += add('vv.momentum.neg', 'Momentum fading', `${m.momentumShift.toFixed(2)}%/min`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+      risks.push(`Momentum fading ${m.momentumShift.toFixed(2)}%/min`);
+    }
   }
 
-  // Volume acceleration — volume1h outpacing volume6h rate
-  if (m.volumeAcceleration != null && m.volumeAcceleration > 2.0) {
-    p = Math.min(maxVV, p + Math.round(maxVV * 0.06));
-    reasons.push(`Volume accelerating ${m.volumeAcceleration.toFixed(1)}x vs 6h avg`);
+  // Volume acceleration — vol1h vs vol6h hourly rate
+  if (m.volumeAcceleration != null && m.volumeAcceleration > 1.2) {
+    const pts = curve(m.volumeAcceleration, 1.2, 4.0, maxVV * 0.08, 0.7);
+    vvAcc += add('vv.volAccel', 'Volume accelerating vs 6h avg', `${m.volumeAcceleration.toFixed(2)}x`, `curve=${pts.toFixed(1)}`, pts);
+    if (m.volumeAcceleration > 2) reasons.push(`Volume accelerating ${m.volumeAcceleration.toFixed(1)}x vs 6h avg`);
   }
 
-  // Consistency check: high buys count = sustained, not just a spike
-  if (m.buys1h >= 80 && bv != null && bv >= 0.3) {
-    p = Math.min(maxVV, p + Math.round(maxVV * 0.06));
-    reasons.push(`Sustained pressure: ${m.buys1h} buys in 1h`);
+  // Sustained pressure
+  if ((m.buys1h ?? 0) >= 30 && bv != null && bv >= 0.3) {
+    const pts = curve(m.buys1h, 30, 250, maxVV * 0.08, 0.6);
+    vvAcc += add('vv.sustained', 'Sustained buy pressure', `${m.buys1h} buys/1h`, `curve=${pts.toFixed(1)}`, pts);
+    if (m.buys1h >= 80) reasons.push(`Sustained pressure: ${m.buys1h} buys in 1h`);
   }
 
-  // Social spike bonus — Twitter buzz amplifies momentum
+  // Social spike
   if (m.socialSpike) {
-    p = Math.min(maxVV, p + Math.round(maxVV * 0.08));
-    reasons.push('Social spike detected — Twitter volume 2x+ above average');
-  } else if (m.twitterMentions > 20) {
-    p = Math.min(maxVV, p + Math.round(maxVV * 0.04));
+    const pts = maxVV * 0.08;
+    vvAcc += add('vv.socialSpike', 'Social spike detected (Twitter 2x+ baseline)', 'spike=true', `+${pts.toFixed(1)}`, pts);
+    reasons.push('Social spike detected');
+  } else if ((m.twitterMentions ?? 0) > 20) {
+    const pts = curve(m.twitterMentions, 20, 200, maxVV * 0.05, 0.7);
+    vvAcc += add('vv.social', 'Active Twitter presence', `${m.twitterMentions} mentions`, `curve=${pts.toFixed(1)}`, pts);
     reasons.push(`Active Twitter presence (${m.twitterMentions} mentions)`);
   }
-  parts.volumeVelocity = p;
+
+  parts.volumeVelocity = Math.round(Math.max(0, Math.min(maxVV, vvAcc)));
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // 2. BUY vs SELL PRESSURE (max: w.buyPressure, default 25)
-  //    More buys than sells (frequency). Larger buy sizes vs sell sizes (value).
-  //    RED FLAG: Micro buys + large sells = exit liquidity setup.
+  // 2. BUY vs SELL PRESSURE (max: 25) — continuous over buy ratio
   // ═══════════════════════════════════════════════════════════════════════════
-  p = 0;
   const maxBP = w.buyPressure || 25;
   const br = m.buySellRatio1h;
-  const totalTxns = m.buys1h + m.sells1h;
+  const totalTxns = (m.buys1h ?? 0) + (m.sells1h ?? 0);
+  let bpAcc = 0;
 
   if (br == null) {
-    p = Math.round(maxBP * 0.30);
-  } else if (br >= 0.85) { p = maxBP;                    reasons.push(`Overwhelming buy dominance (${(br*100).toFixed(0)}% buys)`); }
-  else if (br >= 0.75)   { p = Math.round(maxBP * 0.88); reasons.push(`Strong buy pressure (${(br*100).toFixed(0)}% buys)`); }
-  else if (br >= 0.65)   { p = Math.round(maxBP * 0.72); reasons.push(`Healthy buy ratio (${(br*100).toFixed(0)}% buys)`); }
-  else if (br >= 0.55)   { p = Math.round(maxBP * 0.52); reasons.push(`Slight buy edge (${(br*100).toFixed(0)}% buys)`); }
-  else if (br >= 0.45)   { p = Math.round(maxBP * 0.28); }
-  else if (br >= 0.35)   { p = Math.round(maxBP * 0.10); risks.push(`Sell pressure building (${(br*100).toFixed(0)}% buys)`); }
-  else                   { p = 0;                        risks.push(`Sellers dominating (${(br*100).toFixed(0)}% buys) — EXIT LIQUIDITY RISK`); }
-
-  // Volume depth: high txn count = real activity, not just a few wallets
-  if (totalTxns >= 150)     { p = Math.min(maxBP, p + 3); reasons.push(`Very active: ${totalTxns} transactions/1h`); }
-  else if (totalTxns >= 80) { p = Math.min(maxBP, p + 2); }
-  else if (totalTxns >= 40) { p = Math.min(maxBP, p + 1); }
-
-  // Red flag: lots of micro buys + fewer but larger sells = exit liquidity trap
-  if (m.buys1h > 50 && m.sells1h > 0 && m.buys1h / m.sells1h > 10 && br != null && br < 0.60) {
-    p = Math.max(0, p - 5);
-    risks.push('Micro buys + large sells pattern — possible exit liquidity');
+    const est = maxBP * 0.30;
+    bpAcc += add('bp.base', 'Buy pressure base (unknown)', 'br=null', `=${est.toFixed(1)}`, est);
+  } else {
+    // Continuous: 0.35 → 0 pts, 0.50 → ~8 pts, 0.65 → ~16 pts, 0.85+ → 25 pts
+    const base = curve(br, 0.35, 0.85, maxBP, 1.4);
+    bpAcc += add('bp.base', 'Buy ratio base', `br=${(br*100).toFixed(1)}%`, `curve(br,0.35→0.85,s=1.4)=${base.toFixed(1)}`, base);
+    if (br >= 0.85)      reasons.push(`Overwhelming buy dominance (${(br*100).toFixed(0)}%)`);
+    else if (br >= 0.65) reasons.push(`Strong buy pressure (${(br*100).toFixed(0)}%)`);
+    else if (br >= 0.55) reasons.push(`Healthy buy edge (${(br*100).toFixed(0)}%)`);
+    else if (br < 0.40)  risks.push(`Sellers dominating (${(br*100).toFixed(0)}% buys) — EXIT LIQUIDITY RISK`);
+    else if (br < 0.50)  risks.push(`Sell pressure building (${(br*100).toFixed(0)}% buys)`);
   }
-  parts.buyPressure = p;
+
+  // Volume depth — continuous
+  if (totalTxns >= 20) {
+    const pts = curve(totalTxns, 20, 300, 3.0, 0.6);
+    bpAcc += add('bp.depth', 'Transaction depth', `${totalTxns} txns/1h`, `curve=${pts.toFixed(1)}`, pts);
+    if (totalTxns >= 150) reasons.push(`Very active: ${totalTxns} transactions/1h`);
+  }
+
+  // Exit liquidity trap
+  if ((m.buys1h ?? 0) > 50 && (m.sells1h ?? 0) > 0 && m.buys1h / m.sells1h > 10 && br != null && br < 0.60) {
+    const pts = -5;
+    bpAcc += add('bp.exitLiq', 'Micro buys + large sells (exit liq risk)', `buys/sells=${(m.buys1h/m.sells1h).toFixed(1)}`, `=${pts}`, pts, 'neg');
+    risks.push('Micro buys + large sells — possible exit liquidity');
+  }
+
+  parts.buyPressure = Math.round(Math.max(0, Math.min(maxBP, bpAcc)));
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // 3. WALLET QUALITY (max: w.walletQuality, default 20)
-  //    Known profitable wallets entering early. 2-5 strong wallets buying and
-  //    holding (not instant flipping). Smart money behavior patterns.
-  //    Measures: Conviction from experienced traders.
+  // 3. WALLET QUALITY (max: 20) — continuous blend of winners + smart money
+  //    + cluster/coord + behavioral defaults. No more hard tiers that cluster
+  //    every fresh coin at exactly 9 pts.
   // ═══════════════════════════════════════════════════════════════════════════
-  p = 0;
   const maxWQ = w.walletQuality || 20;
-  const winners = m.knownWinnerCount ?? 0;
+  const winners  = m.knownWinnerCount ?? 0;
   const clusters = m.clusterWalletCount ?? 0;
-  const coord = m.coordinationIntensity ?? 0;
+  const coord    = m.coordinationIntensity ?? 0;
+  const smartMoney = m.smartMoneyScore ?? 0;
+  let wqAcc = 0;
 
-  // Winner wallets are the strongest conviction signal.
-  //   4-5 winners = max + bonus (+5)
-  //   3 winners = max
-  //   2 winners = near-max
-  //   1 winner = meaningful
-  //   0 winners = smart money + clean wallets fallback
-  if (winners >= 4)       { p = Math.min(maxWQ + 5, 25);   reasons.push(`${winners} winner wallets — EXCEPTIONAL conviction +5 bonus`); }
-  else if (winners >= 3)  { p = maxWQ;                     reasons.push(`${winners} winner wallets in early — HIGHEST CONVICTION`); }
-  else if (winners >= 2)  { p = Math.round(maxWQ * 0.90);  reasons.push(`${winners} winner wallets — very strong signal`); }
-  else if (winners >= 1)  { p = Math.round(maxWQ * 0.70);  reasons.push(`${winners} winner wallet early — meaningful signal`); }
-  else {
-    // No known winners — fall back to smart money + behavioral signals
-    const smartMoney = m.smartMoneyScore ?? 0;
-    const hasSmartMoney = smartMoney >= 30;
-
-    if (hasSmartMoney && clusters === 0)     { p = Math.round(maxWQ * 0.55); reasons.push(`Smart money present (score ${smartMoney}) + clean wallets`); }
-    else if (hasSmartMoney)                  { p = Math.round(maxWQ * 0.40); reasons.push(`Smart money signals (score ${smartMoney})`); }
-    else if (clusters === 0 && coord < 0.2)  { p = 9;                        reasons.push('Clean wallet behavior — no coordination'); }
-    else if (clusters <= 2)                  { p = Math.round(maxWQ * 0.20); }
-    else if (clusters <= 5)                  { p = Math.round(maxWQ * 0.10); risks.push(`${clusters} cluster wallets — coordination concern`); }
-    else                                     { p = 0;                        risks.push(`Heavy coordination: ${clusters} cluster wallets`); }
+  // Winner contribution — continuous, 0 winners = 0, 5 winners = ~22 (cap 20)
+  if (winners > 0) {
+    const pts = curve(winners, 0, 5, maxWQ + 2, 0.65); // allow slight overshoot that clamps later
+    wqAcc += add('wq.winners', 'Known winner wallets (early)', `${winners} winners`, `curve=${pts.toFixed(1)}`, pts);
+    if (winners >= 4)      reasons.push(`${winners} winner wallets — EXCEPTIONAL conviction`);
+    else if (winners >= 2) reasons.push(`${winners} winner wallets — very strong signal`);
+    else                   reasons.push(`${winners} winner wallet — meaningful signal`);
   }
 
-  // Smart money overlay
-  if (m.smartMoneyScore != null && m.smartMoneyScore >= 60) {
-    p = Math.min(maxWQ, p + 3);
-    reasons.push('Smart money signal detected');
+  // Smart money score — continuous, applied alongside winners (not as fallback)
+  // Weighted lower when winners are already present to avoid double-counting.
+  if (smartMoney > 0) {
+    const weight = winners >= 2 ? 0.15 : winners >= 1 ? 0.30 : 0.55;
+    const pts = curve(smartMoney, 20, 90, maxWQ * weight, 0.8);
+    if (pts > 0.1) {
+      wqAcc += add('wq.smart', 'Smart money score', `sm=${smartMoney}`, `curve*${weight}=${pts.toFixed(1)}`, pts);
+      if (smartMoney >= 60) reasons.push(`Smart money signal (score ${smartMoney})`);
+    }
   }
 
-  // Bundle cross-reference: only SEVERE bundles with no winners = coordinated
-  // dump risk. HIGH bundles on new coins are common before the wallet DB
-  // populates — penalizing them kills legit early launches. Also skip the
-  // penalty for very-early coins (ageMinutes < 15) entirely.
+  // Clean wallet fallback — only applies when no strong positive signal yet
+  // Awards continuous points based on "cleanliness" (low clusters + low coord)
+  if (winners === 0 && smartMoney < 20) {
+    const cleanScore = Math.max(0, 1 - (clusters * 0.15 + coord * 0.6));
+    // 4-9 pts based on how clean — not a flat 9 for everyone
+    const pts = cleanScore * maxWQ * 0.45;
+    wqAcc += add('wq.clean', 'Wallet cleanliness (cold DB fallback)', `clusters=${clusters} coord=${coord.toFixed(2)}`, `clean=${cleanScore.toFixed(2)} → ${pts.toFixed(1)}`, pts);
+    if (cleanScore > 0.85) reasons.push('Clean wallet behavior — no coordination');
+    else if (cleanScore < 0.4) risks.push(`${clusters} cluster wallets + coord ${coord.toFixed(2)}`);
+  }
+
+  // Cluster penalty — continuous (soft, since clusters can be neutral)
+  if (clusters > 3) {
+    const pts = -curve(clusters, 3, 15, maxWQ * 0.35, 0.9);
+    wqAcc += add('wq.clusters', 'Cluster wallet penalty', `${clusters} clusters`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+    if (clusters > 6) risks.push(`${clusters} cluster wallets — coordination concern`);
+  }
+
+  // Bundle risk — only SEVERE with no winners penalizes (and not very-early)
   if (m.bundleRisk === 'SEVERE' && winners < 1 && !veryEarly) {
-    p = Math.max(0, p - Math.round(maxWQ * 0.30));
-    risks.push(`Bundle SEVERE + no winners — coordinated dump risk`);
+    const pts = -maxWQ * 0.30;
+    wqAcc += add('wq.bundleSevere', 'Bundle SEVERE + no winners', 'bundle=SEVERE', `=${pts.toFixed(1)}`, pts, 'neg');
+    risks.push('Bundle SEVERE + no winners — coordinated dump risk');
   } else if (m.bundleRisk === 'HIGH' && winners < 1 && !veryEarly) {
-    risks.push(`Bundle HIGH detected — monitor but no score penalty (wallet DB may be cold)`);
+    risks.push('Bundle HIGH detected — monitoring (no score penalty)');
   }
 
-  // Sniper awareness — snipers often find good coins early. Don't punish their
-  // presence heavily; instead flag it as a watch-item and only penalize when
-  // sniper share is extreme (>30 = truly overrun).
+  // Sniper flag (only penalize at extreme levels)
   const snipers = m.sniperWalletCount ?? 0;
-  if (snipers > 30)       { p = Math.max(0, p - 3); risks.push(`${snipers} sniper wallets — watch share closely, possible dump wave`); }
-  else if (snipers > 20)  { risks.push(`${snipers} snipers — monitor their share`); }
-  else if (snipers > 10)  { /* normal early-launch presence, no flag */ }
-  else if (snipers <= 3 && snipers >= 0) { /* clean */ }
+  if (snipers > 30) {
+    const pts = -curve(snipers, 30, 80, 4, 0.8);
+    wqAcc += add('wq.snipers', 'Sniper overload', `${snipers} snipers`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+    risks.push(`${snipers} sniper wallets — watch share, possible dump wave`);
+  } else if (snipers > 20) {
+    risks.push(`${snipers} snipers — monitor their share`);
+  }
 
-  // BubbleMap risk — clustered/coordinated wallets
-  if (m.bubbleMapRisk === 'SEVERE')      { p = Math.max(0, p - 8); risks.push('BubbleMap SEVERE — coordinated wallet cluster'); }
-  else if (m.bubbleMapRisk === 'HIGH')   { p = Math.max(0, p - 4); risks.push('BubbleMap HIGH — suspicious wallet patterns'); }
+  // BubbleMap penalty
+  if (m.bubbleMapRisk === 'SEVERE') {
+    wqAcc += add('wq.bubbleSev', 'BubbleMap SEVERE', 'bubbleMap=SEVERE', '=-8', -8, 'neg');
+    risks.push('BubbleMap SEVERE — coordinated wallet cluster');
+  } else if (m.bubbleMapRisk === 'HIGH') {
+    wqAcc += add('wq.bubbleHigh', 'BubbleMap HIGH', 'bubbleMap=HIGH', '=-4', -4, 'neg');
+    risks.push('BubbleMap HIGH — suspicious wallet patterns');
+  }
 
-  parts.walletQuality = p;
+  parts.walletQuality = Math.round(Math.max(0, Math.min(maxWQ, wqAcc)));
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // 4. HOLDER DISTRIBUTION (max: w.holderDistribution, default 12)
-  //    Split: Dev Wallet (8 pts) + Top 10 Holders (4 pts)
+  // 4. HOLDER DISTRIBUTION (max: 12) — continuous dev + top10
   // ═══════════════════════════════════════════════════════════════════════════
   const maxHD = w.holderDistribution || 12;
-  const devMax = Math.round(maxHD * 0.667);  // ~8 of 12
-  const top10Max = maxHD - devMax;            // ~4 of 12
+  const devMax = maxHD * 0.667;   // ~8 of 12
+  const top10Max = maxHD - devMax; // ~4 of 12
+  const mintRevoked = m.mintAuthority === 0;
 
-  // ── Dev Wallet (8 pts) ──
+  // ── Dev Wallet — continuous, 0% = max, 20%+ = 0 ──
   let devPts = 0;
   const dev = m.devWalletPct;
-  const mintRevoked = m.mintAuthority === 0;
   if (dev == null) {
-    devPts = veryEarly ? Math.round(devMax * 0.60) : Math.round(devMax * 0.35);
-  } else if (dev <= 2)  { devPts = devMax;                   reasons.push(`Clean dev: ${dev.toFixed(1)}%${mintRevoked ? ', mint revoked' : ''}`); }
-  else if (dev <= 5)    { devPts = Math.round(devMax * 0.75); reasons.push(`Low dev allocation (${dev.toFixed(1)}%)`); }
-  else if (dev <= 10)   { devPts = Math.round(devMax * 0.50); }
-  else if (dev <= 15)   { devPts = Math.round(devMax * 0.25); risks.push(`Dev holds ${dev.toFixed(1)}% — heavy allocation`); }
-  else                  { devPts = 0;                         risks.push(`Dev wallet ${dev.toFixed(1)}% — INSTANT DISQUALIFIER`); }
-  if (m.deployerHistoryRisk === 'SERIAL_RUGGER') { devPts = 0; risks.push('Serial rugger deployer — AVOID'); }
+    devPts = veryEarly ? devMax * 0.60 : devMax * 0.35;
+    add('hd.dev', 'Dev wallet (unknown)', 'dev=null', `=${devPts.toFixed(1)}`, devPts);
+  } else {
+    // Inverse curve: dev=0 → devMax, dev=20 → 0
+    devPts = Math.max(0, devMax * Math.pow(1 - Math.min(1, dev / 20), 1.4));
+    add('hd.dev', 'Dev wallet %', `dev=${dev.toFixed(2)}%`, `(1-dev/20)^1.4 * 8 = ${devPts.toFixed(1)}`, devPts);
+    if (dev <= 2)       reasons.push(`Clean dev: ${dev.toFixed(1)}%${mintRevoked ? ', mint revoked' : ''}`);
+    else if (dev <= 5)  reasons.push(`Low dev allocation (${dev.toFixed(1)}%)`);
+    else if (dev <= 10) reasons.push(`Moderate dev allocation (${dev.toFixed(1)}%)`);
+    else if (dev <= 15) risks.push(`Dev holds ${dev.toFixed(1)}% — heavy allocation`);
+    else                risks.push(`Dev wallet ${dev.toFixed(1)}% — INSTANT DISQUALIFIER`);
+  }
+  if (m.deployerHistoryRisk === 'SERIAL_RUGGER') {
+    add('hd.rugger', 'Serial rugger deployer', 'rugger=true', '= -dev points', -devPts, 'neg');
+    devPts = 0;
+    risks.push('Serial rugger deployer — AVOID');
+  }
 
-  // ── Top 10 Holders (4 pts) ──
+  // ── Top 10 Holders — continuous, <25% = max, 85%+ = near-zero ──
   let top10Pts = 0;
   const top10 = m.top10HolderPct;
   if (top10 == null) {
-    top10Pts = veryEarly ? Math.round(top10Max * 0.60) : Math.round(top10Max * 0.40);
-  } else if (top10 < 30)  { top10Pts = top10Max;                    reasons.push(`Healthy distribution (top10: ${top10.toFixed(0)}%)`); }
-  else if (top10 < 50)    { top10Pts = Math.round(top10Max * 0.75); }
-  else if (top10 < 70)    { top10Pts = Math.round(top10Max * 0.50); risks.push(`Concentrated (top10: ${top10.toFixed(0)}%)`); }
-  else                    { top10Pts = Math.round(top10Max * 0.25); risks.push(`Whale-dominated (top10: ${top10.toFixed(0)}%)`); }
+    top10Pts = veryEarly ? top10Max * 0.60 : top10Max * 0.40;
+    add('hd.top10', 'Top10 holders (unknown)', 'top10=null', `=${top10Pts.toFixed(1)}`, top10Pts);
+  } else {
+    // 0-25% = full, 25-85% = decaying
+    if (top10 <= 25) {
+      top10Pts = top10Max;
+      add('hd.top10', 'Top10 holders (healthy)', `top10=${top10.toFixed(1)}%`, `=${top10Pts.toFixed(1)}`, top10Pts);
+      reasons.push(`Healthy distribution (top10: ${top10.toFixed(0)}%)`);
+    } else {
+      const decay = Math.max(0, 1 - (top10 - 25) / 60);
+      top10Pts = top10Max * Math.pow(decay, 1.2);
+      add('hd.top10', 'Top10 holders', `top10=${top10.toFixed(1)}%`, `decay^1.2 * 4 = ${top10Pts.toFixed(1)}`, top10Pts);
+      if (top10 >= 70)      risks.push(`Whale-dominated (top10: ${top10.toFixed(0)}%)`);
+      else if (top10 >= 50) risks.push(`Concentrated (top10: ${top10.toFixed(0)}%)`);
+    }
+  }
 
-  parts.holderDistribution = devPts + top10Pts;
-  parts._devWallet = devPts;
-  parts._top10Holders = top10Pts;
+  parts.holderDistribution = Math.round(devPts + top10Pts);
+  parts._devWallet = Math.round(devPts);
+  parts._top10Holders = Math.round(top10Pts);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // 5. LIQUIDITY HEALTH (max: w.liquidityHealth, default 8)
-  //    Optimal liq = 15-40% of mcap. <10% = easy rug. LP locked = premium.
+  // 5. LIQUIDITY HEALTH (max: 8) — sweet-spot curve around 20-30% ratio
   // ═══════════════════════════════════════════════════════════════════════════
-  p = 0;
   const maxLH = w.liquidityHealth || 8;
   const lr = m.liqMcapRatio;
+  let lhAcc = 0;
 
   if (lr == null) {
-    p = Math.round(maxLH * 0.30);
-  } else if (lr >= 0.15 && lr <= 0.40) { p = maxLH;                    reasons.push(`Optimal liquidity ratio (${(lr*100).toFixed(0)}%)`); }
-  else if (lr >= 0.10)                 { p = Math.round(maxLH * 0.80); reasons.push(`Healthy liquidity (${(lr*100).toFixed(0)}%)`); }
-  else if (lr > 0.40)                  { p = Math.round(maxLH * 0.70); reasons.push(`High liquidity ratio (${(lr*100).toFixed(0)}%)`); }
-  else if (lr >= 0.05)                 { p = Math.round(maxLH * 0.45); risks.push(`Below-average liquidity (${(lr*100).toFixed(0)}%)`); }
-  else if (lr >= 0.02)                 { p = Math.round(maxLH * 0.15); risks.push(`Thin liquidity (${(lr*100).toFixed(0)}%) — rug risk`); }
-  else                                 { p = 0;                        risks.push('Dangerously low liquidity — easy rug'); }
+    const est = maxLH * 0.30;
+    lhAcc += add('lh.base', 'Liquidity ratio (unknown)', 'ratio=null', `=${est.toFixed(1)}`, est);
+  } else {
+    // Sweet spot at 25% ratio, plateau 10-40%, decay outside
+    const pts = sweetSpot(lr, 0.25, 0.20, maxLH, 1.3);
+    lhAcc += add('lh.base', 'Liq/MCap ratio', `ratio=${(lr*100).toFixed(1)}%`, `sweetSpot(25±20%)=${pts.toFixed(1)}`, pts);
+    if (lr >= 0.15 && lr <= 0.40)      reasons.push(`Optimal liquidity ratio (${(lr*100).toFixed(0)}%)`);
+    else if (lr >= 0.10)               reasons.push(`Healthy liquidity (${(lr*100).toFixed(0)}%)`);
+    else if (lr >= 0.05)               risks.push(`Below-average liquidity (${(lr*100).toFixed(0)}%)`);
+    else if (lr >= 0.02)               risks.push(`Thin liquidity (${(lr*100).toFixed(0)}%) — rug risk`);
+    else                               risks.push('Dangerously low liquidity — easy rug');
+  }
 
   // LP locked = safety premium
   if (m.lpLocked === 1) {
-    p = Math.min(maxLH, p + Math.round(maxLH * 0.20));
+    const pts = maxLH * 0.20;
+    lhAcc += add('lh.lpLock', 'LP locked', 'lpLocked=1', `+${pts.toFixed(1)}`, pts);
     reasons.push('LP locked');
   }
 
   // Mint authority — if still active, dev can print tokens (rug vector)
   if (m.mintAuthority === 1) {
-    p = Math.max(0, p - 2);
+    lhAcc += add('lh.mintActive', 'Mint authority ACTIVE (rug vector)', 'mint=1', '=-2', -2, 'neg');
     risks.push('Mint authority ACTIVE — dev can inflate supply');
   } else if (m.mintAuthority === 0) {
     reasons.push('Mint revoked');
@@ -407,11 +502,11 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
 
   // Freeze authority — dev can freeze your tokens
   if (m.freezeAuthority === 1) {
-    p = Math.max(0, p - 1);
+    lhAcc += add('lh.freezeActive', 'Freeze authority ACTIVE', 'freeze=1', '=-1', -1, 'neg');
     risks.push('Freeze authority ACTIVE — tokens can be frozen');
   }
 
-  parts.liquidityHealth = p;
+  parts.liquidityHealth = Math.round(Math.max(0, Math.min(maxLH, lhAcc)));
 
   // ═══════════════════════════════════════════════════════════════════════════
   // FALLING KNIFE DETECTOR — we don't buy dips, we buy confirmed strength.
@@ -469,12 +564,15 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   let knifePenalty = 0;
   if (knifeSignals >= 3) {
     knifePenalty = 50;
+    add('knife.3plus', `FALLING KNIFE (${knifeSignals} conditions)`, knifeRisks.join(' · '), '=-50', -50, 'neg');
     risks.push(`🔪 FALLING KNIFE DETECTED (${knifeSignals} conditions) — ${knifeRisks[0]}`);
   } else if (knifeSignals === 2) {
     knifePenalty = 30;
+    add('knife.2', `Weakness warning (${knifeSignals} conditions)`, knifeRisks.join(' · '), '=-30', -30, 'neg');
     risks.push(`⚠️ Weakness warning (${knifeSignals} conditions) — ${knifeRisks[0]}`);
   } else if (knifeSignals === 1) {
     knifePenalty = 15;
+    add('knife.1', 'Weakness signal (1 condition)', knifeRisks[0] ?? '', '=-15', -15, 'neg');
     risks.push(`⚠️ Weakness signal: ${knifeRisks[0]}`);
   }
 
@@ -482,9 +580,11 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   let recoveryBonus = 0;
   if (knifeSignals === 0 && kP1h != null && kP1h < -10 && kP5m != null && kP5m > 5) {
     recoveryBonus = 8;
+    add('recovery.full', 'Recovery confirmed (1h drop + 5m strong bounce)', `1h=${kP1h.toFixed(1)}% 5m=+${kP5m.toFixed(1)}%`, '=+8', 8);
     reasons.push(`✅ Recovery confirmed: 1h ${kP1h.toFixed(0)}% but 5m +${kP5m.toFixed(0)}% — buyers stepping in`);
   } else if (knifeSignals === 0 && kBr != null && kBr > 0.65 && kP5m != null && kP5m > 2) {
     recoveryBonus = 4;
+    add('recovery.strength', 'Strength confirmed (high buys + 5m up)', `br=${(kBr*100).toFixed(0)}% 5m=+${kP5m.toFixed(1)}%`, '=+4', 4);
     reasons.push(`✅ Strength confirmed: ${(kBr*100).toFixed(0)}% buys + 5m +${kP5m.toFixed(0)}%`);
   }
 
@@ -501,65 +601,107 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   if (m.deltas && m.deltas.minutesAgo >= 0.5 && m.deltas.minutesAgo <= 30) {
     const d = m.deltas;
 
-    // MCap growing between rescans = momentum confirmed
+    // MCap delta — continuous
     if (d.mcapDelta != null) {
-      if (d.mcapDelta > 30)       { deltaScore += 8; reasons.push(`📈 MCap +${d.mcapDelta.toFixed(0)}% since ${d.minutesAgo.toFixed(0)}m ago — pumping now`); }
-      else if (d.mcapDelta > 10)  { deltaScore += 4; reasons.push(`MCap +${d.mcapDelta.toFixed(0)}% since last scan — climbing`); }
-      else if (d.mcapDelta < -20) { deltaScore -= 10; risks.push(`📉 MCap ${d.mcapDelta.toFixed(0)}% since ${d.minutesAgo.toFixed(0)}m ago — dumping`); }
-      else if (d.mcapDelta < -10) { deltaScore -= 5; risks.push(`MCap ${d.mcapDelta.toFixed(0)}% since last scan — weakening`); }
+      if (d.mcapDelta > 0) {
+        const pts = curve(d.mcapDelta, 3, 60, 10, 0.7);
+        if (pts > 0.3) {
+          deltaScore += add('delta.mcap', 'MCap climbing since last scan', `+${d.mcapDelta.toFixed(1)}% in ${d.minutesAgo.toFixed(0)}m`, `curve=${pts.toFixed(1)}`, pts);
+          if (d.mcapDelta > 30) reasons.push(`📈 MCap +${d.mcapDelta.toFixed(0)}% since ${d.minutesAgo.toFixed(0)}m ago — pumping now`);
+          else if (d.mcapDelta > 10) reasons.push(`MCap +${d.mcapDelta.toFixed(0)}% since last scan — climbing`);
+        }
+      } else if (d.mcapDelta < -5) {
+        const pts = -curve(Math.abs(d.mcapDelta), 5, 50, 12, 0.8);
+        deltaScore += add('delta.mcap.neg', 'MCap dropping since last scan', `${d.mcapDelta.toFixed(1)}% in ${d.minutesAgo.toFixed(0)}m`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+        if (d.mcapDelta < -20) risks.push(`📉 MCap ${d.mcapDelta.toFixed(0)}% — dumping`);
+        else if (d.mcapDelta < -10) risks.push(`MCap ${d.mcapDelta.toFixed(0)}% — weakening`);
+      }
     }
 
-    // Holder growth acceleration — new buyers entering = organic interest
+    // Holder delta — continuous
     if (d.holderDelta != null) {
-      if (d.holderDelta > 50)     { deltaScore += 6; reasons.push(`👥 Holders +${d.holderDelta.toFixed(0)}% — explosive adoption`); }
-      else if (d.holderDelta > 20){ deltaScore += 3; reasons.push(`Holders +${d.holderDelta.toFixed(0)}% — growing organically`); }
-      else if (d.holderDelta < -5){ deltaScore -= 3; risks.push(`Holders ${d.holderDelta.toFixed(0)}% — exits detected`); }
+      if (d.holderDelta > 5) {
+        const pts = curve(d.holderDelta, 5, 100, 7, 0.65);
+        deltaScore += add('delta.holders', 'Holder growth acceleration', `+${d.holderDelta.toFixed(1)}%`, `curve=${pts.toFixed(1)}`, pts);
+        if (d.holderDelta > 50) reasons.push(`👥 Holders +${d.holderDelta.toFixed(0)}% — explosive adoption`);
+        else if (d.holderDelta > 20) reasons.push(`Holders +${d.holderDelta.toFixed(0)}% — growing organically`);
+      } else if (d.holderDelta < -3) {
+        const pts = -curve(Math.abs(d.holderDelta), 3, 30, 5, 0.8);
+        deltaScore += add('delta.holders.neg', 'Holders exiting', `${d.holderDelta.toFixed(1)}%`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+        risks.push(`Holders ${d.holderDelta.toFixed(0)}% — exits detected`);
+      }
     }
 
-    // Dev wallet INCREASING = dev might be buying own supply (sus) or moved tokens
-    // Dev wallet DECREASING = dev is selling (rug signal)
-    // Only penalize MATERIAL drops (>2%) — small moves (multisig, team payouts,
-    // LP seeding) are normal dev wallet activity and shouldn't kill the score.
+    // Dev wallet delta — only material drops (>2%) matter
     if (d.devPctDelta != null) {
-      if (d.devPctDelta < -5)        { deltaScore -= 20; risks.push(`🚨 DEV DUMPING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}% — heavy distribution`); }
-      else if (d.devPctDelta < -2)   { deltaScore -= 10; risks.push(`🚨 DEV SELLING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}% — active distribution`); }
-      else if (d.devPctDelta > 2)    { deltaScore -= 5;  risks.push(`Dev adding: dev% grew +${d.devPctDelta.toFixed(1)}% — suspicious`); }
+      if (d.devPctDelta < -5) {
+        const pts = -20;
+        deltaScore += add('delta.devDump', 'DEV DUMPING', `dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}%`, `=${pts}`, pts, 'neg');
+        risks.push(`🚨 DEV DUMPING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}%`);
+      } else if (d.devPctDelta < -2) {
+        const pts = -curve(Math.abs(d.devPctDelta), 2, 5, 10, 0.9);
+        deltaScore += add('delta.devSell', 'DEV SELLING', `dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}%`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+        risks.push(`🚨 DEV SELLING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}%`);
+      } else if (d.devPctDelta > 2) {
+        const pts = -curve(d.devPctDelta, 2, 10, 5, 0.9);
+        deltaScore += add('delta.devAdd', 'Dev adding (suspicious)', `+${d.devPctDelta.toFixed(1)}%`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+        risks.push(`Dev adding: +${d.devPctDelta.toFixed(1)}% — suspicious`);
+      }
     }
 
-    // Top10 concentration increasing = whale accumulation or cluster buying
-    if (d.top10Delta != null && d.top10Delta > 10) {
-      deltaScore -= 4;
-      risks.push(`Top10 concentration +${d.top10Delta.toFixed(0)}% — whale accumulation`);
+    // Top10 concentration rising
+    if (d.top10Delta != null && d.top10Delta > 5) {
+      const pts = -curve(d.top10Delta, 5, 30, 6, 0.8);
+      deltaScore += add('delta.top10', 'Top10 concentration rising', `+${d.top10Delta.toFixed(1)}%`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+      if (d.top10Delta > 10) risks.push(`Top10 concentration +${d.top10Delta.toFixed(0)}% — whale accumulation`);
     }
 
-    // Buy ratio improving = demand strengthening
+    // Buy ratio delta — continuous
     if (d.buyRatioDelta != null) {
-      if (d.buyRatioDelta > 0.15)      { deltaScore += 5; reasons.push(`Buy pressure strengthening +${(d.buyRatioDelta*100).toFixed(0)}pp`); }
-      else if (d.buyRatioDelta < -0.15){ deltaScore -= 5; risks.push(`Buy pressure weakening ${(d.buyRatioDelta*100).toFixed(0)}pp — sellers taking over`); }
+      if (d.buyRatioDelta > 0.05) {
+        const pts = curve(d.buyRatioDelta, 0.05, 0.30, 6, 0.7);
+        deltaScore += add('delta.buyRatio', 'Buy pressure strengthening', `+${(d.buyRatioDelta*100).toFixed(1)}pp`, `curve=${pts.toFixed(1)}`, pts);
+        if (d.buyRatioDelta > 0.15) reasons.push(`Buy pressure strengthening +${(d.buyRatioDelta*100).toFixed(0)}pp`);
+      } else if (d.buyRatioDelta < -0.05) {
+        const pts = -curve(Math.abs(d.buyRatioDelta), 0.05, 0.30, 6, 0.8);
+        deltaScore += add('delta.buyRatio.neg', 'Buy pressure weakening', `${(d.buyRatioDelta*100).toFixed(1)}pp`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+        if (d.buyRatioDelta < -0.15) risks.push(`Buy pressure weakening — sellers taking over`);
+      }
     }
 
-    // Velocity acceleration between scans
+    // Velocity delta
     if (d.velocityDelta != null) {
-      if (d.velocityDelta > 2)       { deltaScore += 4; reasons.push(`Velocity accelerating +${d.velocityDelta.toFixed(1)} buys/min`); }
-      else if (d.velocityDelta < -2) { deltaScore -= 3; risks.push(`Velocity fading ${d.velocityDelta.toFixed(1)} buys/min`); }
+      if (d.velocityDelta > 0.5) {
+        const pts = curve(d.velocityDelta, 0.5, 8, 5, 0.7);
+        deltaScore += add('delta.velocity', 'Velocity accelerating', `+${d.velocityDelta.toFixed(2)} buys/min`, `curve=${pts.toFixed(1)}`, pts);
+        if (d.velocityDelta > 2) reasons.push(`Velocity accelerating +${d.velocityDelta.toFixed(1)} buys/min`);
+      } else if (d.velocityDelta < -0.5) {
+        const pts = -curve(Math.abs(d.velocityDelta), 0.5, 8, 4, 0.8);
+        deltaScore += add('delta.velocity.neg', 'Velocity fading', `${d.velocityDelta.toFixed(2)} buys/min`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+        if (d.velocityDelta < -2) risks.push(`Velocity fading ${d.velocityDelta.toFixed(1)} buys/min`);
+      }
     }
 
-    // Liquidity delta — warn only on large drops, no score penalty.
-    // LP rebalancing / migration / single-sided adds all look like drops
-    // but aren't rugs. Let the falling knife detector handle real rugs
-    // via price+volume signatures, not raw LP %.
+    // Liquidity delta — warn only
     if (d.liquidityDelta != null && d.liquidityDelta < -25) {
-      risks.push(`⚠️ Liquidity dropped ${d.liquidityDelta.toFixed(0)}% — watch closely (LP move or rebalance)`);
+      risks.push(`⚠️ Liquidity dropped ${d.liquidityDelta.toFixed(0)}% — watch closely`);
     }
 
-    // Score trend between rescans — is the bot growing more confident?
+    // Score trend between rescans
     if (d.prevScore != null) {
       const scoreTrend = (parts.volumeVelocity + parts.buyPressure + parts.walletQuality + parts.holderDistribution + parts.liquidityHealth) - d.prevScore;
-      if (scoreTrend > 8)       { deltaScore += 3; reasons.push(`Score trending up (+${scoreTrend}) — improving fundamentals`); }
-      else if (scoreTrend < -8) { deltaScore -= 3; risks.push(`Score trending down (${scoreTrend}) — deteriorating`); }
+      if (scoreTrend > 4) {
+        const pts = curve(scoreTrend, 4, 25, 4, 0.7);
+        deltaScore += add('delta.trend', 'Score trending up', `+${scoreTrend.toFixed(0)} vs prev`, `curve=${pts.toFixed(1)}`, pts);
+        if (scoreTrend > 8) reasons.push(`Score trending up (+${scoreTrend}) — improving fundamentals`);
+      } else if (scoreTrend < -4) {
+        const pts = -curve(Math.abs(scoreTrend), 4, 25, 4, 0.8);
+        deltaScore += add('delta.trend.neg', 'Score trending down', `${scoreTrend.toFixed(0)} vs prev`, `curve=${pts.toFixed(1)}`, pts, 'neg');
+        if (scoreTrend < -8) risks.push(`Score trending down (${scoreTrend}) — deteriorating`);
+      }
     }
   }
-  parts.deltaScore = deltaScore;
+  parts.deltaScore = +deltaScore.toFixed(1);
 
   // ── DATA CONFIDENCE — how much of this score is based on real data ──────
   // Counts how many key fields have real values vs null/defaults.
@@ -582,19 +724,33 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   }
 
   // ── FINAL SCORE ───────────────────────────────────────────────────────────
-  const foundationTotal = parts.volumeVelocity + parts.buyPressure +
-                          parts.walletQuality + parts.holderDistribution +
-                          parts.liquidityHealth;
-  const knifeAdjustment = parts.latePumpPenalty; // negative if knife, positive if recovery
-  const total = foundationTotal + knifeAdjustment + (parts.deltaScore ?? 0);
+  // Sum continuous raw values (not rounded signal buckets) for higher score
+  // granularity. This is the single biggest change that breaks up clustering:
+  // every coin's final score carries the fractional precision of the ledger.
+  const foundationRaw = ledger
+    .filter(L => /^(vv|bp|wq|hd|lh)\./.test(L.key))
+    .reduce((a, L) => a + L.points, 0);
+  const knifeAdjustment = parts.latePumpPenalty;
+  const totalRaw = foundationRaw + knifeAdjustment + (parts.deltaScore ?? 0);
+
+  // Stash 1-decimal foundation/total for display so the UI can show
+  // "Foundation 68.4/100" rather than just integers that cluster.
+  parts._foundationRaw = +foundationRaw.toFixed(1);
+  parts._totalRaw      = +totalRaw.toFixed(1);
+  // Persist the full ledger inside parts so the dashboard can render the
+  // line-by-line breakdown straight from the saved candidate record.
+  parts._ledger = ledger.map(L => ({ k: L.key, l: L.label, i: L.input, f: L.formula, p: L.points, t: L.tone }));
 
   return {
-    score: clamp(total),
+    score: clamp(Math.round(totalRaw)),
+    scoreRaw: +totalRaw.toFixed(1),
     parts,
     reasons,
     risks,
+    ledger,
     model: 'discovery',
-    foundationTotal,
+    foundationTotal: Math.round(foundationRaw),
+    foundationRaw: +foundationRaw.toFixed(1),
     knifeSignals,
     recoveryBonus,
     knifePenalty,
