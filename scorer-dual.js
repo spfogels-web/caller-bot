@@ -153,6 +153,8 @@ export function calculateBehaviorMetrics(candidate) {
       return (v1/1)/(v6/6); // normalize to per-hour
     })(),
     holderGrowthRate:     safeNum(c.holderGrowth24h ?? c.holder_growth_24h),
+    // DELTAS — change since last snapshot (populated by server.js before scoring)
+    deltas:               c._deltas ?? null,
     // LunarCrush social data
     socialScore:          safeNum(c.socialScore ?? c.galaxyScore),
     socialVolume24h:      safeNum(c.socialVolume24h),
@@ -477,6 +479,69 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
 
   parts.latePumpPenalty = -knifePenalty + recoveryBonus;
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DELTA SIGNALS — see the DIRECTION of change since last rescan
+  // Lets the bot detect patterns that only emerge over time.
+  // ═══════════════════════════════════════════════════════════════════════════
+  let deltaScore = 0;
+  if (m.deltas && m.deltas.minutesAgo >= 0.5 && m.deltas.minutesAgo <= 30) {
+    const d = m.deltas;
+
+    // MCap growing between rescans = momentum confirmed
+    if (d.mcapDelta != null) {
+      if (d.mcapDelta > 30)       { deltaScore += 8; reasons.push(`📈 MCap +${d.mcapDelta.toFixed(0)}% since ${d.minutesAgo.toFixed(0)}m ago — pumping now`); }
+      else if (d.mcapDelta > 10)  { deltaScore += 4; reasons.push(`MCap +${d.mcapDelta.toFixed(0)}% since last scan — climbing`); }
+      else if (d.mcapDelta < -20) { deltaScore -= 10; risks.push(`📉 MCap ${d.mcapDelta.toFixed(0)}% since ${d.minutesAgo.toFixed(0)}m ago — dumping`); }
+      else if (d.mcapDelta < -10) { deltaScore -= 5; risks.push(`MCap ${d.mcapDelta.toFixed(0)}% since last scan — weakening`); }
+    }
+
+    // Holder growth acceleration — new buyers entering = organic interest
+    if (d.holderDelta != null) {
+      if (d.holderDelta > 50)     { deltaScore += 6; reasons.push(`👥 Holders +${d.holderDelta.toFixed(0)}% — explosive adoption`); }
+      else if (d.holderDelta > 20){ deltaScore += 3; reasons.push(`Holders +${d.holderDelta.toFixed(0)}% — growing organically`); }
+      else if (d.holderDelta < -5){ deltaScore -= 3; risks.push(`Holders ${d.holderDelta.toFixed(0)}% — exits detected`); }
+    }
+
+    // Dev wallet INCREASING = dev might be buying own supply (sus) or moved tokens
+    // Dev wallet DECREASING = dev is selling (rug signal)
+    if (d.devPctDelta != null) {
+      if (d.devPctDelta < -0.5)   { deltaScore -= 15; risks.push(`🚨 DEV SELLING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}% — active distribution`); }
+      else if (d.devPctDelta > 2) { deltaScore -= 5;  risks.push(`Dev adding: dev% grew +${d.devPctDelta.toFixed(1)}% — suspicious`); }
+    }
+
+    // Top10 concentration increasing = whale accumulation or cluster buying
+    if (d.top10Delta != null && d.top10Delta > 10) {
+      deltaScore -= 4;
+      risks.push(`Top10 concentration +${d.top10Delta.toFixed(0)}% — whale accumulation`);
+    }
+
+    // Buy ratio improving = demand strengthening
+    if (d.buyRatioDelta != null) {
+      if (d.buyRatioDelta > 0.15)      { deltaScore += 5; reasons.push(`Buy pressure strengthening +${(d.buyRatioDelta*100).toFixed(0)}pp`); }
+      else if (d.buyRatioDelta < -0.15){ deltaScore -= 5; risks.push(`Buy pressure weakening ${(d.buyRatioDelta*100).toFixed(0)}pp — sellers taking over`); }
+    }
+
+    // Velocity acceleration between scans
+    if (d.velocityDelta != null) {
+      if (d.velocityDelta > 2)       { deltaScore += 4; reasons.push(`Velocity accelerating +${d.velocityDelta.toFixed(1)} buys/min`); }
+      else if (d.velocityDelta < -2) { deltaScore -= 3; risks.push(`Velocity fading ${d.velocityDelta.toFixed(1)} buys/min`); }
+    }
+
+    // Liquidity dropping = rug preparation
+    if (d.liquidityDelta != null && d.liquidityDelta < -15) {
+      deltaScore -= 12;
+      risks.push(`🚨 Liquidity dropping ${d.liquidityDelta.toFixed(0)}% — possible LP pull`);
+    }
+
+    // Score trend between rescans — is the bot growing more confident?
+    if (d.prevScore != null) {
+      const scoreTrend = (parts.volumeVelocity + parts.buyPressure + parts.walletQuality + parts.holderDistribution + parts.liquidityHealth) - d.prevScore;
+      if (scoreTrend > 8)       { deltaScore += 3; reasons.push(`Score trending up (+${scoreTrend}) — improving fundamentals`); }
+      else if (scoreTrend < -8) { deltaScore -= 3; risks.push(`Score trending down (${scoreTrend}) — deteriorating`); }
+    }
+  }
+  parts.deltaScore = deltaScore;
+
   // ── DATA CONFIDENCE — how much of this score is based on real data ──────
   // Counts how many key fields have real values vs null/defaults.
   // HIGH = most fields present, score is reliable
@@ -502,7 +567,7 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
                           parts.walletQuality + parts.holderDistribution +
                           parts.liquidityHealth;
   const knifeAdjustment = parts.latePumpPenalty; // negative if knife, positive if recovery
-  const total = foundationTotal + knifeAdjustment;
+  const total = foundationTotal + knifeAdjustment + (parts.deltaScore ?? 0);
 
   return {
     score: clamp(total),

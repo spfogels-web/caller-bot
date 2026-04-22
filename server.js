@@ -2701,6 +2701,30 @@ async function processCandidate(candidate, isRescan = false) {
       enrichedAtMs,
     };
 
+    // Fetch previous snapshot and calculate DELTAS — lets scorer see direction of change
+    try {
+      const prev = dbInstance.prepare(`
+        SELECT * FROM token_metrics_history
+        WHERE contract_address=? AND snapshot_at_ms < ?
+        ORDER BY snapshot_at_ms DESC LIMIT 1
+      `).get(ca, Date.now());
+      if (prev) {
+        const minutesAgo = (Date.now() - prev.snapshot_at_ms) / 60_000;
+        enrichedCandidate._deltas = {
+          minutesAgo: Math.round(minutesAgo * 10) / 10,
+          mcapDelta: enrichedCandidate.marketCap != null && prev.market_cap ? ((enrichedCandidate.marketCap - prev.market_cap) / prev.market_cap) * 100 : null,
+          liquidityDelta: enrichedCandidate.liquidity != null && prev.liquidity ? ((enrichedCandidate.liquidity - prev.liquidity) / prev.liquidity) * 100 : null,
+          volumeDelta: enrichedCandidate.volume1h != null && prev.volume_1h ? ((enrichedCandidate.volume1h - prev.volume_1h) / prev.volume_1h) * 100 : null,
+          buyRatioDelta: enrichedCandidate.buySellRatio1h != null && prev.buy_sell_ratio_1h ? (enrichedCandidate.buySellRatio1h - prev.buy_sell_ratio_1h) : null,
+          velocityDelta: enrichedCandidate.buyVelocity != null && prev.buy_velocity ? (enrichedCandidate.buyVelocity - prev.buy_velocity) : null,
+          holderDelta: enrichedCandidate.holders != null && prev.holders ? ((enrichedCandidate.holders - prev.holders) / prev.holders) * 100 : null,
+          devPctDelta: enrichedCandidate.devWalletPct != null && prev.dev_wallet_pct != null ? (enrichedCandidate.devWalletPct - prev.dev_wallet_pct) : null,
+          top10Delta: enrichedCandidate.top10HolderPct != null && prev.top10_holder_pct != null ? (enrichedCandidate.top10HolderPct - prev.top10_holder_pct) : null,
+          prevScore: prev.composite_score,
+        };
+      }
+    } catch {}
+
     let scoreResult;
     try {
       scoreResult = computeFullScore(enrichedCandidate, TUNING_CONFIG?.discovery);
@@ -3680,6 +3704,36 @@ async function processCandidate(candidate, isRescan = false) {
         scoreResult.modelUsed ?? null,
         candidateId);
     } catch {}
+
+    // Save metrics snapshot for time-series analysis — lets scorer see DELTAS on rescans
+    try {
+      dbInstance.prepare(`
+        INSERT INTO token_metrics_history (
+          contract_address, snapshot_at_ms, market_cap, liquidity, price_usd,
+          volume_1h, volume_24h, buys_1h, sells_1h, buy_sell_ratio_1h,
+          volume_velocity, buy_velocity, price_change_5m, price_change_1h,
+          holders, dev_wallet_pct, top10_holder_pct, composite_score
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        ca, scoredAtMs,
+        enrichedCandidate.marketCap ?? null,
+        enrichedCandidate.liquidity ?? null,
+        enrichedCandidate.priceUsd ?? null,
+        enrichedCandidate.volume1h ?? null,
+        enrichedCandidate.volume24h ?? null,
+        enrichedCandidate.buys1h ?? null,
+        enrichedCandidate.sells1h ?? null,
+        enrichedCandidate.buySellRatio1h ?? null,
+        enrichedCandidate.volumeVelocity ?? null,
+        enrichedCandidate.buyVelocity ?? null,
+        enrichedCandidate.priceChange5m ?? null,
+        enrichedCandidate.priceChange1h ?? null,
+        enrichedCandidate.holders ?? null,
+        enrichedCandidate.devWalletPct ?? null,
+        enrichedCandidate.top10HolderPct ?? null,
+        scoreResult.score ?? null,
+      );
+    } catch (e) { /* non-critical */ }
 
     // Persist confidence meter values (0-100 % + label + breakdown JSON)
     try {
