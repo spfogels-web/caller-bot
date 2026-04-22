@@ -6416,19 +6416,39 @@ async function loadAudit(){
     apiFetch('/api/scanner?limit=500'),
     apiFetch('/api/scanner-feed?limit=300'),
   ]);
-  const candRows = (cdata?.rows||[]).map(normalizeCandidate);
+  const candRowsRaw = (cdata?.rows||[]).map(normalizeCandidate);
+
+  // Dedupe by contract address — every rescan inserts a new candidate row,
+  // so the raw list often has the same $TICKER 2-5 times. Keep the most
+  // recent entry (highest id) per CA so the UI shows one card per coin.
+  const candByCA = new Map();
+  for (const c of candRowsRaw) {
+    const ca = c.contractAddress;
+    if (!ca) continue;
+    const existing = candByCA.get(ca);
+    if (!existing || (c.id || 0) > (existing.id || 0)) candByCA.set(ca, c);
+  }
+  const candRows = [...candByCA.values()];
   const candCAs = new Set(candRows.map(c=>c.contractAddress).filter(Boolean));
-  const feedRows = (sdata?.rows||[])
-    .filter(r=>!candCAs.has(r.contract_address))
-    .filter(r=>{var mc=r.market_cap||r.marketCap||0; return mc===0||mc>=7000;}) // hide sub-$7K noise
-    .map(r=>normalizeCandidate({...r,
-      finalDecision:(r.filter_action||r.filterAction)==='PROMOTE'?'AUTO_POST':'PENDING',
-      // Don't conflate quick_score with the real composite score. quick_score
-      // is a fast pre-screening number that often hits 100 for any token
-      // passing basic checks. Leave compositeScore null until full scoring
-      // runs — the row will show '⏳ SCORING' instead of a misleading 100.
-      compositeScore: null
-    }));
+
+  const feedByCA = new Map();
+  for (const r of (sdata?.rows||[])) {
+    const ca = r.contract_address;
+    if (!ca || candCAs.has(ca)) continue;
+    const mc = r.market_cap || r.marketCap || 0;
+    if (mc !== 0 && mc < 7000) continue; // hide sub-$7K noise
+    const existing = feedByCA.get(ca);
+    // scanner-feed uses `id` or `scanned_at` for recency — prefer higher id
+    if (!existing || (r.id || 0) > (existing.id || 0)) feedByCA.set(ca, r);
+  }
+  const feedRows = [...feedByCA.values()].map(r=>normalizeCandidate({...r,
+    finalDecision:(r.filter_action||r.filterAction)==='PROMOTE'?'AUTO_POST':'PENDING',
+    // Don't conflate quick_score with the real composite score. quick_score
+    // is a fast pre-screening number that often hits 100 for any token
+    // passing basic checks. Leave compositeScore null until full scoring
+    // runs — the row will show '⏳ SCORING' instead of a misleading 100.
+    compositeScore: null
+  }));
   allCandidatesData = [...candRows, ...feedRows];
   setText('tb-audit-badge', allCandidatesData.length);
 
