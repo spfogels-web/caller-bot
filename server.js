@@ -4417,7 +4417,30 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
 // ─── Express App ──────────────────────────────────────────────────────────────
 
 const app = express();
-app.use(express.json());
+// Default body-parse limit raised from Express's built-in 100KB to 30MB so
+// the AI Brain's image uploads (screenshots + URL attachments) can flow
+// through. The /api/agent route had a per-route 25MB override but this
+// global was rejecting first — "Payload Too Large" HTML page was what
+// the user saw. Global JSON error handler further down coerces any
+// remaining body-parse rejection into a JSON response.
+app.use(express.json({ limit: '30mb' }));
+
+// Global JSON error handler — ANY body-parse failure (payload too large,
+// malformed JSON, etc.) on ANY route gets a JSON response instead of
+// Express's default HTML error page. Prevents "Unexpected token '<'" on
+// the frontend forever.
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.type === 'entity.parse.failed' || err.status === 413 || err.statusCode === 413)) {
+    setCors(res);
+    console.warn(`[body-parse] ${req.method} ${req.path} — ${err.type || err.name}: ${err.message}`);
+    return res.status(err.status || 413).json({
+      ok: false,
+      error: err.message,
+      reply: `⚠ Request rejected: ${err.message}. Image or payload too big — try a smaller file or fewer items.`,
+    });
+  }
+  next(err);
+});
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');

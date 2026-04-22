@@ -8895,23 +8895,60 @@ function removeAgentTyping() {
 // ── Agent file upload handling ──────────────────────────────────────
 let _agentUploadData = null; // { base64, mediaType, fileName, isImage }
 
-function handleAgentUpload(input) {
+// Downsample an image File to max 1600px wide/tall and re-encode as JPEG
+// at 85% quality before base64. A 4K screenshot PNG can be 15-20MB raw
+// (→ 20-27MB base64), easily blowing past even a 30MB request limit.
+// Downsampling keeps Claude's vision-model quality (it processes at ~1092
+// anyway) while cutting payload to 0.5-2MB.
+function downsampleImage(file, maxDim = 1600, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = e => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          const ratio = Math.min(maxDim / width, maxDim / height);
+          width  = Math.round(width  * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        const base64  = dataUrl.split(',')[1];
+        resolve({ dataUrl, base64, mediaType: 'image/jpeg', width, height, bytes: Math.round(base64.length * 0.75) });
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleAgentUpload(input) {
   const file = input.files?.[0];
   if (!file) return;
-  const reader = new FileReader();
   const isImage = file.type.startsWith('image/');
 
-  reader.onload = function(e) {
-    if (isImage) {
-      const base64 = e.target.result.split(',')[1];
-      _agentUploadData = { base64, mediaType: file.type, fileName: file.name, isImage: true };
+  if (isImage) {
+    try {
+      const img = await downsampleImage(file);
+      _agentUploadData = { base64: img.base64, mediaType: img.mediaType, fileName: file.name, isImage: true };
       const preview = document.getElementById('agentUploadPreview');
       const thumb = document.getElementById('agentUploadThumb');
       const name = document.getElementById('agentUploadName');
-      if (thumb) { thumb.src = e.target.result; thumb.style.display = ''; }
-      if (name) name.textContent = file.name + ' (' + (file.size / 1024).toFixed(0) + 'KB)';
+      if (thumb) { thumb.src = img.dataUrl; thumb.style.display = ''; }
+      if (name) name.textContent = file.name + ' → ' + img.width + 'x' + img.height + ' · ' + (img.bytes/1024).toFixed(0) + 'KB';
       if (preview) preview.style.display = '';
-    } else {
+    } catch (err) {
+      console.warn('[agent-upload] image downsample failed:', err.message);
+    }
+  } else {
+    const reader = new FileReader();
+    reader.onload = function(e) {
       _agentUploadData = { text: e.target.result, fileName: file.name, isImage: false };
       const preview = document.getElementById('agentUploadPreview');
       const thumb = document.getElementById('agentUploadThumb');
@@ -8919,10 +8956,9 @@ function handleAgentUpload(input) {
       if (thumb) thumb.style.display = 'none';
       if (name) name.textContent = '📄 ' + file.name + ' (' + (file.size / 1024).toFixed(0) + 'KB)';
       if (preview) preview.style.display = '';
-    }
-  };
-  if (isImage) reader.readAsDataURL(file);
-  else reader.readAsText(file);
+    };
+    reader.readAsText(file);
+  }
   input.value = '';
 }
 
