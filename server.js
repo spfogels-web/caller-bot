@@ -1058,6 +1058,7 @@ const _callFunnel = {
     momentumGate:       0,  // DUMPING/SEVERE
     rugGuard:           0,  // $13-17.5K band failed
     liquidityFloor:     0,  // <$3K liq
+    foundationTrust:    0,  // foundation signals < 15/100 (scorer had no data)
     earlyMcapDefer:     0,  // $6-9K defer
     bundleVeto:         0,
     extendedAvoid:      0,
@@ -3836,6 +3837,34 @@ async function processCandidate(candidate, isRescan = false) {
       logEvent('INFO', 'LIQUIDITY_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} liq=$${Math.round(liqNow)} < $${minLiq} → WATCHLIST`);
       console.log(`[auto-caller] 💧 $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — liquidity $${Math.round(liqNow)} below floor $${minLiq} (can't sustain a 2.5x run)`);
       finalDecision = 'WATCHLIST';
+    }
+
+    // ── FOUNDATION-TRUST GATE ──────────────────────────────────────────────
+    // When scorer-dual can't compute the 5 foundation signals (data missing
+    // or ledger not populated yet), it returns dualParts with all zeros.
+    // The composite still gets a score from bonuses + baseline structure,
+    // but that's not a real read on the coin's quality.
+    // Example: $MARS AUTO_POSTed at 58 with Foundation 0/100 — 0/35 vol
+    // velocity, 0/25 buy pressure, 0/20 wallet, etc. All fallback values.
+    // Block AUTO_POST when foundation is functionally empty so we don't
+    // call on coins the scorer literally couldn't evaluate.
+    // Cluster/KOL bypasses (their conviction trumps data completeness).
+    if (finalDecision === 'AUTO_POST' && !bypassRugGuard) {
+      const dp = scoreResult.dualParts;
+      if (dp) {
+        const foundationTotal =
+          (dp.volumeVelocity      ?? 0) +
+          (dp.buyPressure         ?? 0) +
+          (dp.walletQuality       ?? 0) +
+          (dp.holderDistribution  ?? 0) +
+          (dp.liquidityHealth     ?? 0);
+        if (foundationTotal < 15) {
+          fnl('foundationTrust');
+          logEvent('INFO', 'FOUNDATION_TRUST', `${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 (score ${scoreResult.score}) → WATCHLIST (insufficient signal)`);
+          console.log(`[auto-caller] 📉 $${enrichedCandidate.token ?? ca.slice(0,6)} foundation=${foundationTotal}/100 — composite ${scoreResult.score} is mostly bonuses, not real signal → WATCHLIST`);
+          finalDecision = 'WATCHLIST';
+        }
+      }
     }
 
     // ── EARLY-MCAP DEFER: $6K-$9K coins wait N min to confirm momentum ──
@@ -10777,6 +10806,7 @@ app.get('/api/diagnose/funnel', (req, res) => {
     ['─ MOMENTUM_GATE',               s.momentumGate,      pct(s.momentumGate)],
     ['─ RUG_GUARD ($13-17.5K)',       s.rugGuard,          pct(s.rugGuard)],
     ['─ LIQUIDITY_FLOOR',             s.liquidityFloor,    pct(s.liquidityFloor)],
+    ['─ FOUNDATION_TRUST',            s.foundationTrust,   pct(s.foundationTrust)],
     ['─ EARLY_MCAP_DEFER',            s.earlyMcapDefer,    pct(s.earlyMcapDefer)],
     ['─ PAUSED_POSTING',              s.pausedPosting,     pct(s.pausedPosting)],
     ['🎉 POSTED',                      s.posted,            pct(s.posted)],
