@@ -2667,7 +2667,7 @@ async function processCandidate(candidate, isRescan = false) {
     return;
   }
 
-  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 85_000;
+  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 120_000;
   if ((candidate.marketCap ?? 0) > MCAP_HARD_CAP) {
     logEvent('INFO', 'MCAP_CEILING', `${candidate.token ?? ca.slice(0,6)} mcap=${Math.round(candidate.marketCap/1000)}K > ${MCAP_HARD_CAP/1000}K cap`);
     console.log(`[auto-caller] 🛑 $${candidate.token ?? ca.slice(0,6)} rejected — mcap ${Math.round(candidate.marketCap/1000)}K above $${MCAP_HARD_CAP/1000}K ceiling`);
@@ -3080,13 +3080,23 @@ async function processCandidate(candidate, isRescan = false) {
                         || (enrichedCandidate.smartMoneyScore  ?? 0) > 0
                         || (enrichedCandidate.knownWinnerWalletCount ?? 0) > 0
                         || enrichedCandidate._smartMoney;
+    // Momentum override: if the coin is genuinely exploding (velocity ≥12 buys/min
+    // or strong buy ratio + real volume), the cap is lifted. Our wallet DB is
+    // small and can't possibly hit every good coin — we shouldn't punish a
+    // coin running at 15 buys/min just because no tracked wallet is in it.
+    const buyVel = enrichedCandidate.buyVelocity ?? enrichedCandidate.buy_velocity ?? 0;
+    const brRatio = enrichedCandidate.buySellRatio1h ?? enrichedCandidate.buy_sell_ratio_1h ?? 0;
+    const v1h = enrichedCandidate.volume1h ?? enrichedCandidate.volume_1h ?? 0;
+    const strongMomentum = (buyVel >= 12) || (brRatio >= 0.75 && v1h >= 20_000);
     const CAP = SCORING_CONFIG.noSignalCap;
-    if (!hasWalletIntel && scoreResult.score > CAP) {
+    if (!hasWalletIntel && !strongMomentum && scoreResult.score > CAP) {
       const prior = scoreResult.score;
       scoreResult.score = CAP;
       (scoreResult.penalties = scoreResult.penalties || {}).wallet = scoreResult.penalties.wallet || [];
-      scoreResult.penalties.wallet.push(`-${prior - CAP} NO_ALPHA_SIGNAL cap — no smart money or wallet-intel signal`);
+      scoreResult.penalties.wallet.push(`-${prior - CAP} NO_ALPHA_SIGNAL cap — no smart money or strong momentum`);
       console.log(`[auto-caller] 🚧 $${enrichedCandidate.token??ca.slice(0,6)} capped at ${CAP} (was ${prior}) — structure-only, no alpha signal`);
+    } else if (!hasWalletIntel && strongMomentum && scoreResult.score > CAP) {
+      console.log(`[auto-caller] ✅ $${enrichedCandidate.token??ca.slice(0,6)} cap lifted — strong momentum (vel=${buyVel.toFixed(1)} br=${(brRatio*100).toFixed(0)}% vol=${Math.round(v1h/1000)}K)`);
     }
 
     let similarity = {};

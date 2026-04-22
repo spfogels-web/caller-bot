@@ -313,17 +313,25 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
     reasons.push('Smart money signal detected');
   }
 
-  // Bundle cross-reference: bundles with bad wallet quality = coordinated dump
-  if ((m.bundleRisk === 'SEVERE' || m.bundleRisk === 'HIGH') && winners < 2) {
-    p = Math.max(0, p - Math.round(maxWQ * 0.40));
-    risks.push(`Bundle ${m.bundleRisk} + weak wallets — coordinated dump risk`);
+  // Bundle cross-reference: only SEVERE bundles with no winners = coordinated
+  // dump risk. HIGH bundles on new coins are common before the wallet DB
+  // populates — penalizing them kills legit early launches. Also skip the
+  // penalty for very-early coins (ageMinutes < 15) entirely.
+  if (m.bundleRisk === 'SEVERE' && winners < 1 && !veryEarly) {
+    p = Math.max(0, p - Math.round(maxWQ * 0.30));
+    risks.push(`Bundle SEVERE + no winners — coordinated dump risk`);
+  } else if (m.bundleRisk === 'HIGH' && winners < 1 && !veryEarly) {
+    risks.push(`Bundle HIGH detected — monitor but no score penalty (wallet DB may be cold)`);
   }
 
-  // Sniper penalty — high sniper count = frontrun, dump incoming
+  // Sniper awareness — snipers often find good coins early. Don't punish their
+  // presence heavily; instead flag it as a watch-item and only penalize when
+  // sniper share is extreme (>30 = truly overrun).
   const snipers = m.sniperWalletCount ?? 0;
-  if (snipers > 20)       { p = Math.max(0, p - 6); risks.push(`${snipers} sniper wallets — heavily frontrun`); }
-  else if (snipers > 10)  { p = Math.max(0, p - 3); risks.push(`${snipers} snipers detected`); }
-  else if (snipers <= 3 && snipers >= 0) { /* clean — no penalty */ }
+  if (snipers > 30)       { p = Math.max(0, p - 3); risks.push(`${snipers} sniper wallets — watch share closely, possible dump wave`); }
+  else if (snipers > 20)  { risks.push(`${snipers} snipers — monitor their share`); }
+  else if (snipers > 10)  { /* normal early-launch presence, no flag */ }
+  else if (snipers <= 3 && snipers >= 0) { /* clean */ }
 
   // BubbleMap risk — clustered/coordinated wallets
   if (m.bubbleMapRisk === 'SEVERE')      { p = Math.max(0, p - 8); risks.push('BubbleMap SEVERE — coordinated wallet cluster'); }
@@ -459,9 +467,12 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   }
 
   let knifePenalty = 0;
-  if (knifeSignals >= 2) {
+  if (knifeSignals >= 3) {
     knifePenalty = 50;
     risks.push(`🔪 FALLING KNIFE DETECTED (${knifeSignals} conditions) — ${knifeRisks[0]}`);
+  } else if (knifeSignals === 2) {
+    knifePenalty = 30;
+    risks.push(`⚠️ Weakness warning (${knifeSignals} conditions) — ${knifeRisks[0]}`);
   } else if (knifeSignals === 1) {
     knifePenalty = 15;
     risks.push(`⚠️ Weakness signal: ${knifeRisks[0]}`);
@@ -504,9 +515,12 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
 
     // Dev wallet INCREASING = dev might be buying own supply (sus) or moved tokens
     // Dev wallet DECREASING = dev is selling (rug signal)
+    // Only penalize MATERIAL drops (>2%) — small moves (multisig, team payouts,
+    // LP seeding) are normal dev wallet activity and shouldn't kill the score.
     if (d.devPctDelta != null) {
-      if (d.devPctDelta < -0.5)   { deltaScore -= 15; risks.push(`🚨 DEV SELLING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}% — active distribution`); }
-      else if (d.devPctDelta > 2) { deltaScore -= 5;  risks.push(`Dev adding: dev% grew +${d.devPctDelta.toFixed(1)}% — suspicious`); }
+      if (d.devPctDelta < -5)        { deltaScore -= 20; risks.push(`🚨 DEV DUMPING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}% — heavy distribution`); }
+      else if (d.devPctDelta < -2)   { deltaScore -= 10; risks.push(`🚨 DEV SELLING: dev% dropped ${Math.abs(d.devPctDelta).toFixed(1)}% — active distribution`); }
+      else if (d.devPctDelta > 2)    { deltaScore -= 5;  risks.push(`Dev adding: dev% grew +${d.devPctDelta.toFixed(1)}% — suspicious`); }
     }
 
     // Top10 concentration increasing = whale accumulation or cluster buying
@@ -527,10 +541,12 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
       else if (d.velocityDelta < -2) { deltaScore -= 3; risks.push(`Velocity fading ${d.velocityDelta.toFixed(1)} buys/min`); }
     }
 
-    // Liquidity dropping = rug preparation
-    if (d.liquidityDelta != null && d.liquidityDelta < -15) {
-      deltaScore -= 12;
-      risks.push(`🚨 Liquidity dropping ${d.liquidityDelta.toFixed(0)}% — possible LP pull`);
+    // Liquidity delta — warn only on large drops, no score penalty.
+    // LP rebalancing / migration / single-sided adds all look like drops
+    // but aren't rugs. Let the falling knife detector handle real rugs
+    // via price+volume signatures, not raw LP %.
+    if (d.liquidityDelta != null && d.liquidityDelta < -25) {
+      risks.push(`⚠️ Liquidity dropped ${d.liquidityDelta.toFixed(0)}% — watch closely (LP move or rebalance)`);
     }
 
     // Score trend between rescans — is the bot growing more confident?
