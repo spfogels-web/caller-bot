@@ -1110,9 +1110,64 @@ function getMissedOpportunityMemory() {
   ].join('\n');
 }
 
+// ─── Winner-memory feedback ─────────────────────────────────────────────
+// Mirror of the missed-opportunity cache but for WINS. Tells Claude
+// "here are the coins we posted that actually ran ≥2x — pattern-match
+// new candidates against these". The positive half of the learning loop.
+// Pulled directly from the calls table (peak_multiple is authoritative);
+// no DexScreener calls needed. Rebuilt every 30min same as misses.
+const _winnerCache = { rows: [], refreshedAt: 0 };
+
+function refreshWinnerMemory() {
+  try {
+    const rows = dbInstance.prepare(`
+      SELECT token, contract_address,
+             market_cap_at_call as scan_mcap,
+             peak_mcap,
+             peak_multiple,
+             score_at_call,
+             structure_grade_at_call as structure_grade,
+             setup_type_at_call as setup_type,
+             risk_at_call as risk,
+             called_at
+      FROM calls
+      WHERE peak_multiple IS NOT NULL
+        AND peak_multiple >= 2
+        AND called_at > datetime('now', '-7 days')
+      ORDER BY peak_multiple DESC
+      LIMIT 10
+    `).all();
+    _winnerCache.rows = rows;
+    _winnerCache.refreshedAt = Date.now();
+    console.log(`[winner-memory] Refreshed — ${rows.length} recent ≥2x winners (7d)`);
+  } catch (err) {
+    console.warn(`[winner-memory] Refresh failed: ${err.message}`);
+  }
+}
+
+function getWinnerMemory() {
+  if (_winnerCache.rows.length === 0) return '';
+  const lines = _winnerCache.rows.slice(0, 5).map(r => {
+    const mcK = r.scan_mcap ? `$${Math.round(r.scan_mcap/1000)}K` : '?';
+    const feat = [
+      r.structure_grade && `${r.structure_grade}`,
+      r.setup_type && r.setup_type.replace(/_/g,' '),
+      r.risk && `${r.risk} risk`,
+    ].filter(Boolean).join(' · ');
+    return `  - $${r.token || '?'} — entry ${mcK} · ${feat} · score ${r.score_at_call ?? '?'} → peak ${r.peak_multiple.toFixed(2)}x`;
+  });
+  return [
+    'RECENT WINS — coins we POSTED that ran ≥2x in the last 7 days. This is what winning calls look like:',
+    ...lines,
+    'If this candidate has similar structure (grade, setup type, MCap band, score range) to these winners, bias toward AUTO_POST. Reference these as "winning patterns".',
+  ].join('\n');
+}
+
 // Initial refresh 60s after boot (let DB settle), then every 30 min
 setTimeout(() => { refreshMissedOpportunities().catch(() => {}); }, 60_000);
+setTimeout(() => { refreshWinnerMemory(); }, 65_000);
 setInterval(() => { refreshMissedOpportunities().catch(() => {}); }, MISSED_REFRESH_MS);
+setInterval(() => { refreshWinnerMemory(); }, MISSED_REFRESH_MS);
 
 
 
@@ -1411,6 +1466,7 @@ async function callClaudeForAnalysis(candidate, scoreResult, options = {}) {
   const botMemory   = options.includeHistory !== false ? getBotMemory() : '';
   const aiCfg       = getAIConfigSummary();
   const missedMemo  = options.includeHistory !== false ? getMissedOpportunityMemory() : '';
+  const winnerMemo  = options.includeHistory !== false ? getWinnerMemory() : '';
 
   // Micro-cap gem context
   const mcap = candidate.marketCap ?? 0;
@@ -1427,6 +1483,7 @@ ${botMemory}
 
 ${history}
 
+${winnerMemo ? winnerMemo + '\n' : ''}
 ${missedMemo ? missedMemo + '\n' : ''}
 ${aiCfg}
 
@@ -3127,6 +3184,38 @@ async function processCandidate(candidate, isRescan = false) {
       }
     } catch {}
 
+    // ── Age-mismatch penalty — stale coins that stalled out ───────────────
+    // A $20K coin that's 4 hours old and hasn't run is probably done. Real
+    // winners move in the first 30-60 min post-launch. Coins sitting at low
+    // MCap but elevated age with flat momentum are the 1.0-1.3x dead-call
+    // profile — the NEUTRAL wave we've been fighting. Penalty fires only
+    // when price has actually stalled (not when it's currently rolling
+    // over, which the momentum gate already catches).
+    //
+    // Conditions (ALL must be true):
+    //   - pairAgeHours > 2 (past the sweet-spot entry window)
+    //   - MCap < $30K (should have rallied by now if it was going to)
+    //   - priceChange1h < 10% AND priceChange6h < 20% (flat, stuck)
+    //   - Cluster/KOL bypasses (their conviction overrides the time signal)
+    try {
+      const ageMm   = enrichedCandidate.pairAgeHours ?? 0;
+      const mcapMm  = enrichedCandidate.marketCap ?? 0;
+      const p1hMm   = enrichedCandidate.priceChange1h ?? 0;
+      const p6hMm   = enrichedCandidate.priceChange6h ?? 0;
+      const smMm    = enrichedCandidate._smartMoney?.kind;
+      const bypass  = smMm === 'cluster' || smMm === 'kol';
+      const isStuck = ageMm > 2
+                   && mcapMm > 0 && mcapMm < 30_000
+                   && p1hMm < 10
+                   && p6hMm < 20;
+      if (isStuck && !bypass) {
+        scoreResult.score = Math.max(0, scoreResult.score - 5);
+        (scoreResult.penalties = scoreResult.penalties || {}).market = scoreResult.penalties.market || [];
+        scoreResult.penalties.market.push(`-5 AGE_MISMATCH — $${Math.round(mcapMm/1000)}K @ ${ageMm.toFixed(1)}h with flat momentum (1h ${p1hMm.toFixed(0)}% / 6h ${p6hMm.toFixed(0)}%) — stuck out of sequence`);
+        console.log(`[auto-caller] ⏱  $${enrichedCandidate.token ?? ca.slice(0,6)} age-mismatch -5: ${ageMm.toFixed(1)}h old at $${Math.round(mcapMm/1000)}K, still flat`);
+      }
+    } catch {}
+
     // ── Score trajectory bonus ──────────────────────────────────────────
     // If this coin has been rescanned and the score is climbing 20+ points
     // across the last 3 scans, that trajectory itself is alpha (real
@@ -3239,6 +3328,20 @@ async function processCandidate(candidate, isRescan = false) {
         if (walletIntel.knownWinnerWalletCount > 0) {
           console.log(`[wallet-intel] $${enrichedCandidate.token}: ${walletIntel.knownWinnerWalletCount}× WINNER wallets, ${walletIntel.sniperWalletCount} snipers → ${walletIntel.walletVerdict}`);
           logEvent('INFO', 'WINNER_WALLETS_DETECTED', `${enrichedCandidate.token} winners=${walletIntel.knownWinnerWalletCount} snipers=${walletIntel.sniperWalletCount} score=${walletIntel.smartMoneyScore}`);
+
+          // Direct score bonus for ANY winner wallet buying this coin.
+          // Previously single winners only soft-promoted WATCHLIST decisions
+          // — but that's a gate, not a signal. A Dune-flagged WINNER wallet
+          // choosing to buy a micro-cap is alpha worth +4 straight into
+          // the composite (through global bonus budget). Stacks with the
+          // cluster auto-post override if ≥3 winners show up.
+          const nWinners = walletIntel.knownWinnerWalletCount;
+          const winBonus = nWinners >= 3 ? 6 : nWinners >= 2 ? 5 : 4;
+          const applied = addBonusCapped(winBonus);
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).wallet = scoreResult.signals.wallet || [];
+            scoreResult.signals.wallet.push(`+${applied} WINNER_WALLET_BUY — ${nWinners} Dune-flagged winner${nWinners > 1 ? 's' : ''} holding this coin`);
+          }
         }
 
         // Hard block: rug wallets present = not worth risking
