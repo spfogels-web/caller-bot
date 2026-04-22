@@ -407,17 +407,10 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
   // LATE-PUMP PENALTY — final deduction (tunable via setLatePumpConfig)
   // Age<30min exempt: "late" doesn't apply to brand-new coins still priced in.
   // ═══════════════════════════════════════════════════════════════════════════
-  const p1h    = m.priceChange1h;
-  const p24h   = m.priceChange24h;
-  const ageHrs = m.pairAgeHours;
-  const lp = applyLatePumpPenalty(p1h, p24h, ageHrs);
-  let latePumpPenalty = lp.penalty;
-  if (lp.exempt && (p1h > _latePumpConfig.p1hThreshold || p24h > _latePumpConfig.p24hThreshold)) {
-    reasons.push(`Early-gem exemption: +${(p1h??p24h).toFixed(0)}% but age<${_latePumpConfig.ageExemptHours*60}min`);
-  } else if (lp.risk) {
-    risks.push(lp.risk);
-  }
-  parts.latePumpPenalty = -latePumpPenalty;
+  // Late-pump penalty REMOVED — was blocking quality coins still running.
+  // Volume Velocity already rewards early acceleration over extended moves.
+  const latePumpPenalty = 0;
+  parts.latePumpPenalty = 0;
 
   // ── DATA CONFIDENCE — how much of this score is based on real data ──────
   // Counts how many key fields have real values vs null/defaults.
@@ -550,18 +543,8 @@ export function scoreRunnerCoin(candidate, metricsIn = null) {
   if (p > 0) reasons.push(`${socials} social channel(s) active`);
   parts.attentionSignal = p;
 
-  // 9. Late-pump penalty (shared tunable config with Discovery, age<30min exempt)
-  const rp1h  = m.priceChange1h;
-  const rp24h = m.priceChange24h;
-  const rAge  = m.pairAgeHours;
-  const lpR   = applyLatePumpPenalty(rp1h, rp24h, rAge);
-  let runnerLatePenalty = lpR.penalty;
-  if (lpR.exempt && (rp1h > _latePumpConfig.p1hThreshold || rp24h > _latePumpConfig.p24hThreshold)) {
-    reasons.push(`Early-runner exemption: +${(rp1h??rp24h).toFixed(0)}% but age<${_latePumpConfig.ageExemptHours*60}min`);
-  } else if (lpR.risk) {
-    risks.push(lpR.risk);
-  }
-  parts.latePumpPenalty = -runnerLatePenalty;
+  // Late-pump penalty REMOVED — was blocking quality runners.
+  parts.latePumpPenalty = 0;
 
   const total = Object.values(parts).reduce((a, b) => a + b, 0);
   return { score: clamp(total), parts, reasons, risks, model: 'runner' };
