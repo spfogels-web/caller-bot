@@ -32,7 +32,7 @@ const TICK_MS               = 12 * 60 * 60 * 1000;    // twice daily
 const BOOT_DELAY_MS         = 8 * 60 * 1000;          // 8 min after boot
 const TOP_N_HOLDERS         = 20;
 const INTER_COIN_DELAY_MS   = 400;
-const MIN_VOLUME_USD        = 500_000;                // $500K 24h vol ≈ $250K+ MCap
+const MIN_VOLUME_USD        = 250_000;                // $250K 24h vol — broader net per user request (was $500K)
 const LOOKBACK_HOURS        = 24;
 const DUNE_EXEC_TIMEOUT_MS  = 120_000;                // 2min
 

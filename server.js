@@ -1244,8 +1244,8 @@ function persistAIConfig() {
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
   minScoreToPost:         35,   // UNBLOCK — dropped to scorer hard floor. Any passing score should be able to post.
-  sweetSpotBonus:          4,   // $13K-$40K MCap
-  secondaryBonus:          2,   // $40K-$80K MCap
+  sweetSpotBonus:          0,   // DISABLED — hitting an MCap range isn't signal. Was +4 for $13K-$40K.
+  secondaryBonus:          0,   // DISABLED — same reason. Was +2 for $40K-$80K.
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
   devFingerprintCap:       6,   // max positive delta from dev history
@@ -1300,8 +1300,10 @@ try {
     const MIGRATE_FORCE = {
       winPeakMultiple:    2.0,
       neutralDrawdownPct: 10,
+      sweetSpotBonus:     0,   // user disabled: MCap range isn't a signal
+      secondaryBonus:     0,   // user disabled: MCap range isn't a signal
     };
-    const MIGRATE_FORCE_VERSION = 'v4';   // bump to force re-migration (was v3 at 3.0)
+    const MIGRATE_FORCE_VERSION = 'v5';   // bump to force re-migration (was v4)
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
