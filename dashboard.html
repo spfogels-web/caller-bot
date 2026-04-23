@@ -3692,7 +3692,10 @@ body::before {
 
       <!-- AI recommendations -->
       <div class="card">
-        <div class="card-header">🤖 AI RECOMMENDATIONS — What should we change?</div>
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span>🤖 AI RECOMMENDATIONS — What should we change?</span>
+          <button onclick="generateAIRecommendations(this)" style="background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:4px;padding:5px 12px;font-family:var(--mono);font-size:9px;cursor:pointer;letter-spacing:1px">⚡ GENERATE NOW</button>
+        </div>
         <div class="card-body" id="aiRecommendations">
           <div class="spinner"><div class="spin-dot" style="background:var(--blue)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>
         </div>
@@ -8276,9 +8279,46 @@ function renderLearningStats(data){
     // renderer normalizes those.
     renderMissedWinners(topMissedWinners);
   }
+  const recEl=document.getElementById('aiRecommendations');
+  if(!recEl)return;
   if(latestRecommendations?.recommendations?.length){
-    const recEl=document.getElementById('aiRecommendations');
-    if(recEl)recEl.innerHTML=latestRecommendations.recommendations.slice(0,5).map(r=>`<div style="padding:12px 14px;border-left:3px solid ${r.priority==='HIGH'?'var(--red)':r.priority==='MEDIUM'?'var(--gold)':'var(--cyan)'};background:rgba(0,0,0,0.2);border-radius:0 8px 8px 0;margin-bottom:10px"><div style="font-family:var(--mono);font-size:8px;color:${r.priority==='HIGH'?'var(--red)':'var(--gold)'};letter-spacing:1px;margin-bottom:5px">${r.priority} PRIORITY · ${r.target||'?'} · Confidence: ${r.confidence||'?'}%</div><div style="font-family:var(--mono);font-size:10px;color:var(--text1);margin-bottom:4px">${esc(r.component||'?')} — ${esc((r.suggested||'').slice(0,100))}</div><div style="font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.4">${esc((r.rationale||'').slice(0,120))} · FP risk: ${r.falsePositiveRisk||'?'}</div></div>`).join('');
+    recEl.innerHTML=latestRecommendations.recommendations.slice(0,5).map(r=>`<div style="padding:12px 14px;border-left:3px solid ${r.priority==='HIGH'?'var(--red)':r.priority==='MEDIUM'?'var(--gold)':'var(--cyan)'};background:rgba(0,0,0,0.2);border-radius:0 8px 8px 0;margin-bottom:10px"><div style="font-family:var(--mono);font-size:8px;color:${r.priority==='HIGH'?'var(--red)':'var(--gold)'};letter-spacing:1px;margin-bottom:5px">${r.priority} PRIORITY · ${r.target||'?'} · Confidence: ${r.confidence||'?'}%</div><div style="font-family:var(--mono);font-size:10px;color:var(--text1);margin-bottom:4px">${esc(r.component||'?')} — ${esc((r.suggested||'').slice(0,100))}</div><div style="font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.4">${esc((r.rationale||'').slice(0,120))} · FP risk: ${r.falsePositiveRisk||'?'}</div></div>`).join('');
+  } else {
+    // No recs yet — explain why + invite user to generate on demand.
+    recEl.innerHTML = `
+      <div style="font-family:var(--mono);font-size:10px;color:var(--text3);padding:22px;text-align:center;line-height:1.6">
+        No recommendations yet.<br>
+        <span style="color:var(--text2);font-size:9px">Claude reviews missed winners every 6 hours. Click <b style="color:var(--cyan)">⚡ GENERATE NOW</b> above to run the analysis on demand — needs ≥1 resolved WIN in the last 7 days to produce useful output.</span>
+      </div>`;
+  }
+}
+
+// Manual trigger: ask Claude to analyze missed winners + write recs right now.
+async function generateAIRecommendations(btn){
+  const recEl = document.getElementById('aiRecommendations');
+  const orig = btn?.textContent;
+  if(btn){btn.disabled=true;btn.textContent='⏳ CLAUDE THINKING…';}
+  if(recEl){recEl.innerHTML='<div style="padding:20px;text-align:center;color:var(--cyan);font-family:var(--mono);font-size:10px">Claude is reviewing missed winners + recent calls…</div>';}
+  try{
+    const res = await fetch('/api/v8/generate-recommendations',{method:'POST'});
+    const data = await res.json();
+    if(!data.ok) throw new Error(data.error || 'generation failed');
+    if(!data.recommendations || data.recommendations.length===0){
+      if(recEl){
+        recEl.innerHTML = `
+          <div style="font-family:var(--mono);font-size:10px;color:var(--text3);padding:22px;text-align:center;line-height:1.6">
+            <div style="color:var(--gold);margin-bottom:8px">No analysis available yet</div>
+            <span style="color:var(--text2);font-size:9px">${esc(data.note || 'Needs resolved WINs in the calls table.')}</span>
+          </div>`;
+      }
+    } else {
+      // Re-render via the existing pipeline
+      renderLearningStats({ ok:true, latestRecommendations: { recommendations: data.recommendations } });
+    }
+  } catch(err) {
+    if(recEl){recEl.innerHTML = `<div style="padding:18px;text-align:center;color:var(--red);font-family:var(--mono);font-size:10px">✕ ${esc(err.message)}</div>`;}
+  } finally {
+    if(btn){btn.disabled=false;btn.textContent=orig||'⚡ GENERATE NOW';}
   }
 }
 

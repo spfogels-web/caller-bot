@@ -672,6 +672,34 @@ export function startLearningLoop(dbInstance, claudeApiKey) {
   setTimeout(() => runOutcomeTracker(dbInstance).catch(() => {}), 5_000);
   setTimeout(() => detectMissedWinners(dbInstance).catch(() => {}), 30_000);
 
+  // First full analysis cycle runs at +10min (not +6h). Ensures AI
+  // recommendations populate shortly after boot so the Analytics tab
+  // isn't empty for hours. Only writes if missed winners are found.
+  setTimeout(async () => {
+    try {
+      const missed = await detectMissedWinners(dbInstance);
+      if (!missed?.length) return;
+      let recentCalls = [];
+      try {
+        recentCalls = dbInstance.prepare(`
+          SELECT * FROM calls WHERE called_at > datetime('now', '-7 days')
+          ORDER BY called_at DESC LIMIT 50
+        `).all();
+      } catch {}
+      const analysis = await analyzeMissedWinners(missed, recentCalls, claudeApiKey);
+      if (!analysis) return;
+      try {
+        dbInstance.prepare(`
+          INSERT INTO learning_recommendations (analysis_json, missed_count, generated_at)
+          VALUES (?, ?, datetime('now'))
+        `).run(JSON.stringify(analysis), missed.length);
+        console.log(`[learning-loop] boot+10min analysis complete — ${analysis.recommendations?.length ?? 0} recs stored`);
+      } catch {}
+    } catch (err) {
+      console.warn('[learning-loop] boot+10min analysis failed:', err.message);
+    }
+  }, 10 * 60_000);
+
   return { outcomeInterval, missedWinnerInterval };
 }
 

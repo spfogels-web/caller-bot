@@ -10901,6 +10901,54 @@ app.get('/api/v8/learning-stats', (req, res) => {
   res.json({ ok: true, ...getLearningStats(dbInstance) });
 });
 
+// Manually trigger the learning loop — detects missed winners + asks
+// Claude to write scoring recommendations. Normally runs every 6h, but
+// fresh instances / users hitting the Analytics tab want feedback NOW.
+app.post('/api/v8/generate-recommendations', async (req, res) => {
+  setCors(res);
+  try {
+    if (!CLAUDE_API_KEY) {
+      return res.status(400).json({ ok: false, error: 'CLAUDE_API_KEY not set — cannot generate recommendations' });
+    }
+    const { detectMissedWinners, analyzeMissedWinners } = await import('./missed-winner-tracker.js');
+    const missed = await detectMissedWinners(dbInstance);
+    if (!missed || missed.length === 0) {
+      return res.json({
+        ok: true,
+        recommendations: [],
+        note: 'No missed winners detected in the current window. Analytics needs a few resolved WINs in the calls table for meaningful analysis — come back after a few days of calls have resolved.',
+      });
+    }
+    let recentCalls = [];
+    try {
+      recentCalls = dbInstance.prepare(`
+        SELECT * FROM calls WHERE called_at > datetime('now', '-7 days')
+        ORDER BY called_at DESC LIMIT 50
+      `).all();
+    } catch {}
+    const analysis = await analyzeMissedWinners(missed, recentCalls, CLAUDE_API_KEY);
+    if (!analysis) {
+      return res.status(502).json({ ok: false, error: 'Claude returned no analysis (rate limit or API error)' });
+    }
+    try {
+      dbInstance.prepare(`
+        INSERT INTO learning_recommendations (analysis_json, missed_count, generated_at)
+        VALUES (?, ?, datetime('now'))
+      `).run(JSON.stringify(analysis), missed.length);
+    } catch (err) { console.warn('[learning-recs] insert failed:', err.message); }
+    res.json({
+      ok: true,
+      missedCount: missed.length,
+      recommendations: analysis.recommendations ?? [],
+      topPattern: analysis.topPattern,
+      keySignalsMissed: analysis.keySignalsMissed,
+    });
+  } catch (err) {
+    console.error('[learning-recs] manual trigger failed:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/api/v8/check-wallet', (req, res) => {
   setCors(res);
   const { address } = req.body ?? {};
