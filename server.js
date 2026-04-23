@@ -10909,6 +10909,21 @@ app.post('/api/midcap-harvester/run', async (req, res) => {
   }
 });
 
+// Harvester cleanup — batch-scan SOL balance of every harvester-touched
+// wallet, delete <8 SOL (harvester sources) or demote to NEUTRAL (curated
+// sources), recategorize survivors by SOL tier (≥100=WINNER, 8-99=SMART_MONEY).
+app.post('/api/harvester-cleanup/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { cleanupHarvesterDust } = await import('./harvester-cleanup.js');
+    const summary = await cleanupHarvesterDust(dbInstance, HELIUS_API_KEY);
+    res.json({ ok: true, summary });
+  } catch (err) {
+    console.error('[harvester-cleanup] failed:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Call-funnel diagnostic — shows where candidates drop in the pipeline
 // during the rolling 60-min window. Hit this endpoint during a call
 // drought to see exactly which gate is blocking everything.
@@ -12207,6 +12222,31 @@ app.listen(PORT, async () => {
     startMidcapHarvester(dbInstance, HELIUS_API_KEY);
   } catch (err) {
     console.warn('[midcap-harvester] failed to start:', err.message);
+  }
+
+  // ── One-time cleanup of harvester wallets inserted WITHOUT SOL check ──
+  // Previous harvester versions wrote every top-holder straight into
+  // tracked_wallets as WINNER regardless of SOL balance, polluting the
+  // WHALE tier with ~1000+ dust wallets. Run cleanup ONCE (kv_store flag)
+  // to batch-scan every harvester-touched wallet, delete <8 SOL dust,
+  // and recategorize survivors by SOL tier (≥100=WINNER, 8-99=SMART_MONEY).
+  try {
+    const flagRow = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='harvester_cleanup_sol_tier_v1'`).get();
+    if (!flagRow || flagRow.value !== 'done') {
+      setTimeout(async () => {
+        try {
+          const { cleanupHarvesterDust } = await import('./harvester-cleanup.js');
+          console.log('[boot] harvester-cleanup: starting one-time SOL-tier cleanup...');
+          const summary = await cleanupHarvesterDust(dbInstance, HELIUS_API_KEY);
+          dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES ('harvester_cleanup_sol_tier_v1', 'done', datetime('now'))`).run();
+          console.log('[boot] harvester-cleanup: ✓ done', summary);
+        } catch (err) {
+          console.error('[boot] harvester-cleanup failed:', err.message);
+        }
+      }, 30_000); // 30s after boot — let DB settle
+    }
+  } catch (err) {
+    console.warn('[boot] harvester-cleanup check failed:', err.message);
   }
 
   try {

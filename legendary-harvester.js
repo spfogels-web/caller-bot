@@ -183,11 +183,13 @@ async function resolveTokenAccountOwners(tokenAccounts, heliusKey) {
   } catch { return []; }
 }
 
-// Insert a legendary-tier wallet directly as WINNER. If it already exists
-// with a weaker category (HARVESTED, MOMENTUM, etc.) upgrade to WINNER.
-// WINNER-class wallets flow into knownWinnerWalletCount which drives the
-// Wallet Quality score (scorer-dual.js:343-354).
-function upsertLegendaryWallet(dbInstance, address, mintContract) {
+// SOL-tier categorized upsert. Candidate carries sol + category:
+//   ≥100 SOL → WINNER, 8-99 → SMART_MONEY. Dust (<8) filtered upstream.
+// Even though legendary coins attract proven whales, we still enforce the
+// SOL bar so the WINNER tier stays SOL-backed (matches user convention).
+// Upgrade category only if SOL tier is higher; never downgrade.
+function upsertLegendaryWallet(dbInstance, candidate, mintContract) {
+  const { address, sol, category: newCategory } = candidate;
   try {
     const existing = dbInstance.prepare(
       `SELECT id, category FROM tracked_wallets WHERE address = ?`
@@ -195,43 +197,33 @@ function upsertLegendaryWallet(dbInstance, address, mintContract) {
 
     if (!existing) {
       dbInstance.prepare(`
-        INSERT INTO tracked_wallets (address, category, source, wins_found_in, last_seen, added_by, updated_at, notes)
-        VALUES (?, 'WINNER', 'legendary-harvester', 1, datetime('now'), 'auto', datetime('now'), ?)
-      `).run(address, `Top holder of legendary coin ${mintContract.slice(0, 8)}`);
+        INSERT INTO tracked_wallets (address, category, source, sol_balance, wins_found_in, last_seen, added_by, updated_at, notes)
+        VALUES (?, ?, 'legendary-harvester', ?, 1, datetime('now'), 'auto', datetime('now'), ?)
+      `).run(address, newCategory, sol, `Top holder of legendary coin ${mintContract.slice(0, 8)}`);
       _stats.walletsAdded++;
       return { added: true, upgraded: false };
     }
 
-    // Don't downgrade KOL or touch RUG_ASSOCIATED
     if (existing.category === 'KOL' || existing.category === 'RUG_ASSOCIATED') {
       return { added: false, upgraded: false };
     }
 
-    // Already WINNER — just bump counters + last_seen
-    if (existing.category === 'WINNER') {
-      dbInstance.prepare(`
-        UPDATE tracked_wallets
-        SET wins_found_in = COALESCE(wins_found_in, 0) + 1,
-            last_seen     = datetime('now'),
-            updated_at    = datetime('now')
-        WHERE id = ?
-      `).run(existing.id);
-      return { added: false, upgraded: false };
-    }
-
-    // Upgrade weaker category to WINNER
+    // Refresh sol_balance + bump counter
     dbInstance.prepare(`
       UPDATE tracked_wallets
-      SET category='WINNER',
-          source=CASE WHEN source IS NULL OR source='' THEN 'legendary-harvester' ELSE source END,
+      SET sol_balance   = ?,
           wins_found_in = COALESCE(wins_found_in, 0) + 1,
           last_seen     = datetime('now'),
-          updated_at    = datetime('now'),
-          notes         = 'upgraded to WINNER by legendary-harvester (top holder of 30M+ vol coin)'
+          updated_at    = datetime('now')
       WHERE id = ?
-    `).run(existing.id);
-    _stats.walletsUpgraded++;
-    return { added: false, upgraded: true };
+    `).run(sol, existing.id);
+
+    if (newCategory === 'WINNER' && existing.category !== 'WINNER') {
+      dbInstance.prepare(`UPDATE tracked_wallets SET category='WINNER', updated_at=datetime('now') WHERE id = ?`).run(existing.id);
+      _stats.walletsUpgraded++;
+      return { added: false, upgraded: true };
+    }
+    return { added: false, upgraded: false };
   } catch (err) {
     console.warn(`[legendary-harvester] upsert ${address.slice(0,8)}: ${err.message}`);
     return { added: false, upgraded: false };

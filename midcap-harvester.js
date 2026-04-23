@@ -34,7 +34,6 @@ const TOP_N_HOLDERS         = 20;
 const INTER_COIN_DELAY_MS   = 400;
 const MIN_VOLUME_USD        = 500_000;                // $500K 24h vol ≈ $250K+ MCap
 const LOOKBACK_HOURS        = 24;
-const PROMOTE_APPEARANCES   = 2;                      // 2+ midcap hits → WINNER
 const DUNE_EXEC_TIMEOUT_MS  = 120_000;                // 2min
 
 let _tickTimer = null;
@@ -183,60 +182,47 @@ async function resolveTokenAccountOwners(tokenAccounts, heliusKey) {
   } catch { return []; }
 }
 
-// New wallets land as SMART_MONEY (not HARVESTED — the $250K+ filter is
-// stronger than passive harvester's 2x-from-our-calls). After 2+ midcap
-// appearances, promote to WINNER. Don't touch KOL or RUG_ASSOCIATED.
-function upsertMidcapWallet(dbInstance, address) {
+// SOL-tier categorized upsert. Category is derived from SOL balance:
+//   ≥100 → WINNER, 8-99 → SMART_MONEY. Wallets <8 SOL never reach here
+//   (filter happens in runMidcapTick via filterAndClassifyBySol).
+// Don't touch KOL or RUG_ASSOCIATED. Never downgrade existing WINNER.
+function upsertMidcapWallet(dbInstance, candidate) {
+  const { address, sol, category: newCategory } = candidate;
   try {
     const existing = dbInstance.prepare(
-      `SELECT id, category, wins_found_in FROM tracked_wallets WHERE address = ?`
+      `SELECT id, category, sol_balance FROM tracked_wallets WHERE address = ?`
     ).get(address);
 
     if (!existing) {
       dbInstance.prepare(`
-        INSERT INTO tracked_wallets (address, category, source, wins_found_in, last_seen, added_by, updated_at)
-        VALUES (?, 'SMART_MONEY', 'midcap-harvester', 1, datetime('now'), 'auto', datetime('now'))
-      `).run(address);
+        INSERT INTO tracked_wallets (address, category, source, sol_balance, wins_found_in, last_seen, added_by, updated_at)
+        VALUES (?, ?, 'midcap-harvester', ?, 1, datetime('now'), 'auto', datetime('now'))
+      `).run(address, newCategory, sol);
       _stats.walletsAdded++;
       return { added: true, promoted: false };
     }
 
-    if (existing.category === 'KOL' || existing.category === 'RUG_ASSOCIATED' || existing.category === 'WINNER') {
-      // Don't downgrade/touch these. Just bump counters for WINNER.
-      if (existing.category === 'WINNER') {
-        dbInstance.prepare(`
-          UPDATE tracked_wallets
-          SET wins_found_in = COALESCE(wins_found_in, 0) + 1,
-              last_seen     = datetime('now'),
-              updated_at    = datetime('now')
-          WHERE id = ?
-        `).run(existing.id);
-      }
+    if (existing.category === 'KOL' || existing.category === 'RUG_ASSOCIATED') {
       return { added: false, promoted: false };
     }
 
-    // Bump appearance count
-    const newCount = (existing.wins_found_in || 0) + 1;
-    if (newCount >= PROMOTE_APPEARANCES) {
-      dbInstance.prepare(`
-        UPDATE tracked_wallets
-        SET category='WINNER',
-            wins_found_in = ?,
-            last_seen     = datetime('now'),
-            updated_at    = datetime('now'),
-            notes         = 'promoted to WINNER by midcap-harvester ('||?||' midcap appearances)'
-        WHERE id = ?
-      `).run(newCount, newCount, existing.id);
-      _stats.walletsPromoted++;
-      return { added: false, promoted: true };
-    }
+    // Refresh sol_balance + bump counters
     dbInstance.prepare(`
       UPDATE tracked_wallets
-      SET wins_found_in = ?,
+      SET sol_balance   = ?,
+          wins_found_in = COALESCE(wins_found_in, 0) + 1,
           last_seen     = datetime('now'),
           updated_at    = datetime('now')
       WHERE id = ?
-    `).run(newCount, existing.id);
+    `).run(sol, existing.id);
+
+    // Upgrade only if SOL tier is higher than current category warrants.
+    // Never downgrade WINNER (protects curated high-SOL wallets).
+    if (newCategory === 'WINNER' && existing.category !== 'WINNER') {
+      dbInstance.prepare(`UPDATE tracked_wallets SET category='WINNER', updated_at=datetime('now') WHERE id = ?`).run(existing.id);
+      _stats.walletsPromoted++;
+      return { added: false, promoted: true };
+    }
     return { added: false, promoted: false };
   } catch (err) {
     console.warn(`[midcap-harvester] upsert ${address.slice(0,8)}: ${err.message}`);
@@ -280,6 +266,10 @@ async function runMidcapTick(dbInstance, heliusKey) {
     }
     console.log(`[midcap-harvester] harvesting ${newMints.length} new midcap coins (of ${rows.length} total)...`);
 
+    // SOL-tier filter: only wallets ≥ 8 SOL become candidates.
+    // ≥100 SOL = WINNER, 8-99 = SMART_MONEY. Dust wallets are dropped.
+    const { filterAndClassifyBySol } = await import('./harvester-cleanup.js');
+
     let coinsHarvested = 0;
     for (const coin of newMints) {
       const ca = coin.contract_address;
@@ -287,9 +277,12 @@ async function runMidcapTick(dbInstance, heliusKey) {
       if (tokenAccounts.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
 
       const owners = await resolveTokenAccountOwners(tokenAccounts, heliusKey);
+      if (owners.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
+
+      const qualified = await filterAndClassifyBySol(owners, heliusKey);
       let added = 0, promoted = 0;
-      for (const owner of owners) {
-        const r = upsertMidcapWallet(dbInstance, owner);
+      for (const cand of qualified) {
+        const r = upsertMidcapWallet(dbInstance, cand);
         if (r.added) added++;
         if (r.promoted) promoted++;
       }
@@ -304,7 +297,7 @@ async function runMidcapTick(dbInstance, heliusKey) {
       coinsHarvested++;
       if (coinsHarvested % 20 === 0) {
         const volK = ((coin.vol_24h_usd || 0) / 1000).toFixed(0);
-        console.log(`[midcap-harvester]   [${coinsHarvested}/${newMints.length}] ${ca.slice(0,8)}… ($${volK}K 24h): +${added} new, ${promoted} promoted`);
+        console.log(`[midcap-harvester]   [${coinsHarvested}/${newMints.length}] ${ca.slice(0,8)}… ($${volK}K 24h): ${qualified.length}/${owners.length} ≥8 SOL, +${added} new, ${promoted} promoted`);
       }
       await sleep(INTER_COIN_DELAY_MS);
     }

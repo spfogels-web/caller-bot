@@ -27,7 +27,6 @@ const TICK_MS    = 30 * 60 * 1000;        // 30 minutes
 const TOP_N_HOLDERS = 20;
 const MIN_PEAK_MULTIPLE = 2.0;             // coin must have done ≥2x to count
 const LOOKBACK_HOURS = 48;                  // harvest recent WINs
-const AUTO_PROMOTE_APPEARANCES = 3;         // 3+ wins → auto-promote to WINNER
 const INTER_COIN_DELAY_MS = 500;            // be gentle on Helius
 
 let _tickTimer = null;
@@ -94,40 +93,42 @@ async function resolveTokenAccountOwners(tokenAccounts, heliusKey) {
   } catch { return []; }
 }
 
-function upsertHarvestedWallet(dbInstance, address) {
+// SOL-tier categorized upsert. Candidate carries sol + category derived
+// from SOL balance: ≥100 → WINNER, 8-99 → SMART_MONEY. Dust (<8 SOL)
+// never reaches here (filtered in runHarvestTick). Don't downgrade
+// existing WINNER or touch KOL/RUG_ASSOCIATED.
+function upsertHarvestedWallet(dbInstance, candidate) {
+  const { address, sol, category: newCategory } = candidate;
   try {
     const existing = dbInstance.prepare(
-      `SELECT id, category, wins_found_in FROM tracked_wallets WHERE address = ?`
+      `SELECT id, category FROM tracked_wallets WHERE address = ?`
     ).get(address);
 
     if (!existing) {
       dbInstance.prepare(`
-        INSERT INTO tracked_wallets (address, category, source, wins_found_in, last_seen, added_by, updated_at)
-        VALUES (?, 'HARVESTED', 'wallet-harvester', 1, datetime('now'), 'auto', datetime('now'))
-      `).run(address);
+        INSERT INTO tracked_wallets (address, category, source, sol_balance, wins_found_in, last_seen, added_by, updated_at)
+        VALUES (?, ?, 'wallet-harvester', ?, 1, datetime('now'), 'auto', datetime('now'))
+      `).run(address, newCategory, sol);
       _stats.walletsAdded++;
       return { added: true, promoted: false };
     }
 
-    // Bump the appearance counter
+    if (existing.category === 'KOL' || existing.category === 'RUG_ASSOCIATED') {
+      return { added: false, promoted: false };
+    }
+
+    // Refresh sol_balance + bump counter; only upgrade category, never downgrade
     dbInstance.prepare(`
       UPDATE tracked_wallets
-      SET wins_found_in = COALESCE(wins_found_in, 0) + 1,
+      SET sol_balance   = ?,
+          wins_found_in = COALESCE(wins_found_in, 0) + 1,
           last_seen     = datetime('now'),
           updated_at    = datetime('now')
       WHERE id = ?
-    `).run(existing.id);
+    `).run(sol, existing.id);
 
-    // Auto-promote after N confirmed winner-appearances
-    const newCount = (existing.wins_found_in || 0) + 1;
-    if (newCount >= AUTO_PROMOTE_APPEARANCES &&
-        existing.category !== 'WINNER' &&
-        existing.category !== 'KOL') {
-      dbInstance.prepare(`
-        UPDATE tracked_wallets
-        SET category='WINNER', updated_at=datetime('now'), notes='auto-promoted from HARVESTED after '||wins_found_in||' winner appearances'
-        WHERE id = ?
-      `).run(existing.id);
+    if (newCategory === 'WINNER' && existing.category !== 'WINNER') {
+      dbInstance.prepare(`UPDATE tracked_wallets SET category='WINNER', updated_at=datetime('now') WHERE id = ?`).run(existing.id);
       _stats.walletsPromoted++;
       return { added: false, promoted: true };
     }
@@ -165,6 +166,10 @@ async function runHarvestTick(dbInstance, heliusKey) {
     }
     console.log(`[wallet-harvester] harvesting ${coins.length} new winner coins...`);
 
+    // SOL-tier filter: only wallets ≥ 8 SOL become candidates.
+    // ≥100 SOL = WINNER, 8-99 = SMART_MONEY. Dust wallets are dropped.
+    const { filterAndClassifyBySol } = await import('./harvester-cleanup.js');
+
     let coinsHarvested = 0;
     for (const coin of coins) {
       const ca = coin.contract_address;
@@ -172,9 +177,12 @@ async function runHarvestTick(dbInstance, heliusKey) {
       if (tokenAccounts.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
 
       const owners = await resolveTokenAccountOwners(tokenAccounts, heliusKey);
+      if (owners.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
+
+      const qualified = await filterAndClassifyBySol(owners, heliusKey);
       let wallets = 0;
-      for (const owner of owners) {
-        const r = upsertHarvestedWallet(dbInstance, owner);
+      for (const cand of qualified) {
+        const r = upsertHarvestedWallet(dbInstance, cand);
         if (r.added || r.promoted) wallets++;
       }
 
@@ -186,7 +194,7 @@ async function runHarvestTick(dbInstance, heliusKey) {
       } catch {}
 
       coinsHarvested++;
-      console.log(`[wallet-harvester]   $${coin.token ?? ca.slice(0,6)} (${coin.peak_multiple.toFixed(2)}x): ${owners.length} owners → ${wallets} new/promoted`);
+      console.log(`[wallet-harvester]   $${coin.token ?? ca.slice(0,6)} (${coin.peak_multiple.toFixed(2)}x): ${qualified.length}/${owners.length} ≥8 SOL → ${wallets} new/promoted`);
       await sleep(INTER_COIN_DELAY_MS);
     }
 
