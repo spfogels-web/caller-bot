@@ -10842,6 +10842,29 @@ app.get('/api/diagnose/holders/:ca', async (req, res) => {
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
+// Wallet harvester — passive growth of tracked_wallets from our own winners.
+// GET returns current stats, POST triggers an on-demand run.
+app.get('/api/wallet-harvester/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getHarvesterStats } = await import('./wallet-harvester.js');
+    res.json({ ok: true, ...getHarvesterStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/wallet-harvester/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerHarvest } = await import('./wallet-harvester.js');
+    // Fire-and-forget — this can take 30-60s with many coins
+    triggerHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[harvester] run err:', err.message));
+    res.json({ ok: true, message: 'Harvest triggered — check logs for progress' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Call-funnel diagnostic — shows where candidates drop in the pipeline
 // during the rolling 60-min window. Hit this endpoint during a call
 // drought to see exactly which gate is blocking everything.
@@ -12105,6 +12128,18 @@ app.listen(PORT, async () => {
   // emits an alert when one (or a cluster of 3+) buys a fresh coin. The alert
   // runs that coin through the normal scoring pipeline with a forced tag so
   // the TG message is prefixed with a BIG WALLET / WHALE CLUSTER header.
+  // ── Passive Wallet Harvester ───────────────────────────────────────────
+  // Every 30min: find coins we called that hit peak >=2x, pull their top
+  // 20 holders via Helius, add to tracked_wallets. After 3+ appearances
+  // across winners, auto-promote to WINNER tier. Grows Dune DB organically
+  // without manual CA input.
+  try {
+    const { startWalletHarvester } = await import('./wallet-harvester.js');
+    startWalletHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[wallet-harvester] failed to start:', err.message);
+  }
+
   try {
     const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
     startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {

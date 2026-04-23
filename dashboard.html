@@ -4007,6 +4007,16 @@ body::before {
               </div>
               <div id="csDuneStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:12px"></div>
               <div id="csDuneStatus" style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:10px;min-height:12px;letter-spacing:0.5px"></div>
+              <!-- Passive wallet harvester — grows DB from our own WINs automatically -->
+              <div style="margin-top:14px;padding-top:10px;border-top:1px dashed rgba(156,39,176,0.2)">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <span style="font-family:var(--mono);font-size:8px;color:var(--purple);letter-spacing:1px;font-weight:700">🌱 PASSIVE WALLET HARVESTER</span>
+                  <button class="cs-btn" style="font-size:7px;padding:3px 8px" onclick="csHarvesterRun(this)">⚡ RUN NOW</button>
+                </div>
+                <div id="csHarvesterStats" style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:0.5px">
+                  Loading harvester stats…
+                </div>
+              </div>
             </div>
             <div class="cs-knob-grid" data-grid="wallets"></div>
             <div class="cs-status" data-status="wallets"></div>
@@ -5717,6 +5727,58 @@ async function csDuneRefresh() {
     dot.style.background = 'var(--red)';
     subtitle.textContent = '✕ ' + err.message;
     subtitle.style.color = 'var(--red)';
+  }
+  // Harvester stats load alongside Dune refresh
+  loadHarvesterStats();
+}
+
+async function loadHarvesterStats() {
+  const el = document.getElementById('csHarvesterStats');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/wallet-harvester/status');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'harvester status failed');
+    const s = data; // stats are spread at top level by the server
+    const last = s.lastRunAt ? csTimeAgo(s.lastRunAt) : 'never';
+    const err  = s.lastError ? ` · <span style="color:var(--red)">${csEscape(String(s.lastError).slice(0,40))}</span>` : '';
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(156,39,176,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">HARVESTED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--purple)">${(s.totalWallets||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(76,175,80,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">PROMOTED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--green)">${(s.winnerWallets||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(0,188,212,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">COINS SCAN'D</div>
+          <div style="font-size:13px;font-weight:700;color:var(--cyan)">${(s.coinsHarvested||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">RUNS</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text2)">${(s.runsCompleted||0).toLocaleString()}</div>
+        </div>
+      </div>
+      <div style="color:var(--text3)">Last run: ${last}${err}</div>`;
+  } catch (err) {
+    el.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function csHarvesterRun(btn) {
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ RUNNING…'; }
+  try {
+    const res = await fetch('/api/wallet-harvester/run', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'run failed');
+    loadHarvesterStats();
+  } catch (err) {
+    alert('Harvester run failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
   }
 }
 
