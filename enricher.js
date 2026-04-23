@@ -996,6 +996,29 @@ export async function enrichCandidate(candidate) {
 
   const enriched = mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, lunarData);
 
+  // ── Pump.fun graduation check ──────────────────────────────────────────
+  // Only poll pump.fun for coins that plausibly came from it (<72h old or
+  // unknown age). If the coin graduated the bonding curve (~$69K MCap) and
+  // migrated to Raydium, that's proven organic demand — ~1% of pump.fun
+  // launches make it. Adds pumpFunMigrated / pumpFunStage / pumpFunBondingPct
+  // / pumpFunReplyCount / pumpFunKOTH fields for scorer consumption.
+  try {
+    const ageH = Number(enriched.pairAgeHours ?? 0);
+    if ((ageH > 0 && ageH < 72) || enriched.pairAgeHours == null) {
+      const { fetchPumpFunCoin } = await import('./helius-listener.js');
+      const pf = await fetchPumpFunCoin(enriched.contractAddress);
+      if (pf) {
+        enriched.pumpFunStage        = pf.stage;                    // 'PRE_BOND' | 'MIGRATED'
+        enriched.pumpFunMigrated     = pf.bondingCurveComplete === true;
+        enriched.pumpFunBondingPct   = pf.bondingCurvePct ?? null;
+        enriched.pumpFunReplyCount   = pf.replyCount ?? 0;
+        enriched.pumpFunKOTH         = pf.pumpRank === 'KOTH';
+      }
+    }
+  } catch (err) {
+    console.warn(`[enricher:pump.fun] check failed: ${err.message}`);
+  }
+
   // Derived tags / flags
   enriched.narrativeTags = uniq([
     ...inferNarrativeTags(enriched),

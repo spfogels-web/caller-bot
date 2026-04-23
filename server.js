@@ -1220,6 +1220,11 @@ let AI_CONFIG_OVERRIDES = {};
 // Persist AI_CONFIG_OVERRIDES to SQLite so pausePosting survives restarts.
 try {
   dbInstance.exec(`CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)`);
+  // Ensure meta-signals schema (liquidity_snapshots) exists before first scan
+  try {
+    const { ensureMetaSignalsSchema } = await import('./meta-signals.js');
+    ensureMetaSignalsSchema(dbInstance);
+  } catch (err) { console.warn('[meta-signals] schema init:', err.message); }
   const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='ai_config_overrides'`).get();
   if (row?.value) {
     AI_CONFIG_OVERRIDES = JSON.parse(row.value);
@@ -3087,8 +3092,116 @@ async function processCandidate(candidate, isRescan = false) {
             }
           }
         } catch {}
+
+        // Deployer reputation: historical track record of this deployer.
+        // ELITE (3+ wins, 0 rugs) → +3 bonus · FLAGGED (1+ rug) → -4 penalty
+        // · SERIAL_RUGGER (3+ rugs) → -8 penalty · NEUTRAL → no change.
+        // Signal is only as good as our outcome-tracking feedback loop
+        // (updateDeployerOutcome called when a call resolves WIN/LOSS).
+        try {
+          const rep = getDeployerReputation(deployer);
+          if (rep && rep.reputation_grade) {
+            const grade = rep.reputation_grade;
+            if (grade === 'SERIAL_RUGGER') {
+              scoreResult.score = Math.max(0, scoreResult.score - 8);
+              (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `-8 SERIAL_RUGGER (${rep.rugged_launches} prior rugs)`];
+              console.log(`[auto-caller] ⚠ SERIAL_RUGGER — $${enrichedCandidate.token ?? ca.slice(0,6)} deployer rugged ${rep.rugged_launches}x`);
+            } else if (grade === 'FLAGGED') {
+              scoreResult.score = Math.max(0, scoreResult.score - 4);
+              (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `-4 FLAGGED (${rep.rugged_launches} prior rug)`];
+            } else if (grade === 'ELITE') {
+              const applied = addBonusCapped(3);
+              if (applied > 0) {
+                (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+                scoreResult.signals.launch.push(`+${applied} ELITE_DEV — ${rep.successful_launches} prior wins, 0 rugs`);
+                console.log(`[auto-caller] 🏆 ELITE DEV — $${enrichedCandidate.token ?? ca.slice(0,6)} deployer has ${rep.successful_launches} prior wins`);
+              }
+            } else if (grade === 'CLEAN') {
+              const applied = addBonusCapped(1);
+              if (applied > 0) {
+                (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+                scoreResult.signals.launch.push(`+${applied} CLEAN_DEV — ${rep.successful_launches} prior win(s), 0 rugs`);
+              }
+            }
+          }
+        } catch {}
       }
     } catch {}
+
+    // ── NEW SIGNALS BLOCK (meta-signals.js) ──────────────────────────────
+    // 4 signals consolidated: pump.fun graduation, volume acceleration,
+    // narrative/meta match (self-learned from our 3x+ WINs in last 7d),
+    // and liquidity trajectory (growing vs shrinking). All bonuses share
+    // the globalBonusCap budget. Penalties (LIQ_DRAINING) bypass the cap.
+    try {
+      const {
+        recordLiquiditySnapshot, getLiquidityTrajectory,
+        scoreLiquidityTrajectory, scorePumpFunGraduation,
+        scoreVolumeAcceleration, getCurrentMetaKeywords, scoreNarrativeMatch,
+      } = await import('./meta-signals.js');
+
+      // Always snapshot current liquidity (throttled to 5min per CA)
+      recordLiquiditySnapshot(
+        dbInstance, ca,
+        Number(enrichedCandidate.liquidityUsd ?? enrichedCandidate.liquidity) || null,
+        Number(enrichedCandidate.marketCap) || null,
+        Number(enrichedCandidate.volume1h) || null,
+      );
+
+      // #1 Pump.fun graduation
+      const pf = scorePumpFunGraduation(enrichedCandidate);
+      if (pf.bonus > 0) {
+        const applied = addBonusCapped(pf.bonus);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+          scoreResult.signals.launch.push(`+${applied} PUMP_GRADUATED (${pf.tag})`);
+          console.log(`[auto-caller] 🎓 $${enrichedCandidate.token ?? ca.slice(0,6)} graduated pump.fun → Raydium · +${applied}`);
+        }
+      }
+
+      // #2 Volume acceleration
+      const vacc = scoreVolumeAcceleration(enrichedCandidate);
+      if (vacc.bonus > 0) {
+        const applied = addBonusCapped(vacc.bonus);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+          scoreResult.signals.market.push(`+${applied} ${vacc.tag}`);
+        }
+      }
+
+      // #3 Narrative / meta match
+      const metaKw = getCurrentMetaKeywords(dbInstance);
+      const narr = scoreNarrativeMatch(enrichedCandidate, metaKw);
+      if (narr.bonus > 0) {
+        const applied = addBonusCapped(narr.bonus);
+        if (applied > 0) {
+          const words = narr.matched.map(m => m.word).join(', ');
+          (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+          scoreResult.signals.market.push(`+${applied} META_MATCH — matches current winning narrative: ${words}`);
+          console.log(`[auto-caller] 🎯 META $${enrichedCandidate.token ?? ca.slice(0,6)} matched: ${words} · +${applied}`);
+        }
+      }
+
+      // #5 Liquidity trajectory (needs ≥2 snapshots, so first scans won't trigger)
+      const traj = getLiquidityTrajectory(dbInstance, ca);
+      if (traj) {
+        const ls = scoreLiquidityTrajectory(traj);
+        if (ls.delta > 0) {
+          const applied = addBonusCapped(ls.delta);
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+            scoreResult.signals.market.push(`+${applied} ${ls.tag}`);
+          }
+        } else if (ls.delta < 0) {
+          // Penalties bypass the cap per existing convention
+          scoreResult.score = Math.max(0, scoreResult.score + ls.delta);
+          (scoreResult.penalties = scoreResult.penalties || {}).market = [...(scoreResult.penalties.market || []), `${ls.delta} ${ls.tag}`];
+          console.log(`[auto-caller] 💧 LIQ_DRAIN $${enrichedCandidate.token ?? ca.slice(0,6)} ${traj.deltaPct.toFixed(0)}% in ${traj.spanMins.toFixed(0)}min · ${ls.delta}`);
+        }
+      }
+    } catch (err) {
+      console.warn('[meta-signals] block failed:', err.message);
+    }
 
     // ── Pre-launch suspect: this dev was just funded by an exchange? ──
     try {
