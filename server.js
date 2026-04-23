@@ -10888,6 +10888,27 @@ app.post('/api/legendary-harvester/run', async (req, res) => {
   }
 });
 
+// Midcap harvester — twice-daily $250K+ MCap winner sweep
+app.get('/api/midcap-harvester/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getMidcapStats } = await import('./midcap-harvester.js');
+    res.json({ ok: true, ...getMidcapStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/midcap-harvester/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerMidcapHarvest } = await import('./midcap-harvester.js');
+    triggerMidcapHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[midcap] run err:', err.message));
+    res.json({ ok: true, message: 'Midcap harvest triggered — Dune query (~1min) + Helius holder fetches. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Call-funnel diagnostic — shows where candidates drop in the pipeline
 // during the rolling 60-min window. Hit this endpoint during a call
 // drought to see exactly which gate is blocking everything.
@@ -12173,6 +12194,19 @@ app.listen(PORT, async () => {
     startLegendaryHarvester(dbInstance, HELIUS_API_KEY);
   } catch (err) {
     console.warn('[legendary-harvester] failed to start:', err.message);
+  }
+
+  // ── Midcap Harvester (twice-daily mid-tier sweep) ──────────────────────
+  // Every 12h: Dune query finds Solana tokens with $500K+ 24h volume
+  // (proxy for $250K+ MCap). Pulls top 20 holders, auto-adds to the
+  // wallet DB as SMART_MONEY. Wallets appearing across 2+ midcap runs
+  // get promoted to WINNER. Fills the gap between passive (our own wins)
+  // and legendary (only blue-chip runs).
+  try {
+    const { startMidcapHarvester } = await import('./midcap-harvester.js');
+    startMidcapHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[midcap-harvester] failed to start:', err.message);
   }
 
   try {

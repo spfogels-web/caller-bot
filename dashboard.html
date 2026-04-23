@@ -4491,6 +4491,43 @@ body::before {
         <span id="smScanStatus" style="display:none"></span>
 
         <!-- ═══════════════════════════════════════════════════════════════
+             🎯 MIDCAP HARVESTER — twice-daily $250K+ MCap sweep
+             Dune query returns Solana tokens doing $500K+ in 24h volume.
+             Top 20 holders of each → wallet DB as SMART_MONEY, promoted
+             to WINNER after 2+ appearances. Fills the middle tier
+             between passive harvester (our wins) + legendary harvester.
+             ═══════════════════════════════════════════════════════════════ -->
+        <div id="midcapHarvesterCard" class="wallet-scanner" style="--ws-accent:#ff9800;margin-top:16px;border-color:rgba(255,152,0,0.25);background:linear-gradient(135deg,rgba(255,152,0,0.04),rgba(255,87,34,0.02))">
+          <div class="ws-top">
+            <div class="ws-visual">
+              <div class="ws-orbit ws-orbit-1" style="border-color:rgba(255,152,0,0.6)"></div>
+              <div class="ws-orbit ws-orbit-2" style="border-color:rgba(255,152,0,0.4)"></div>
+              <div class="ws-orbit ws-orbit-3" style="border-color:rgba(255,152,0,0.2)"></div>
+              <div class="ws-orb" style="background:radial-gradient(circle,rgba(255,152,0,0.4),rgba(255,87,34,0.1));box-shadow:0 0 30px rgba(255,152,0,0.5)"><div class="ws-orb-icon">🎯</div></div>
+            </div>
+            <div class="ws-info">
+              <div class="ws-title">
+                <span class="ws-title-glow" style="color:#ff9800">MIDCAP HARVESTER</span>
+                <span class="ws-status-pill" id="mhStatusPill">IDLE</span>
+              </div>
+              <div class="ws-subtitle">Runs a Dune query <b>twice a day</b> for Solana tokens doing $500K+ 24h volume (≈ $250K+ MCap). Top 20 holders of each go straight into the wallet database as SMART_MONEY · wallets seen across 2+ midcap runs auto-promote to WINNER. Fills the gap between passive harvester (our own WINs) and legendary harvester ($30M+ only).</div>
+              <div class="ws-stats">
+                <div class="ws-stat"><div class="ws-stat-label">COINS FOUND</div><div class="ws-stat-val" style="color:#ff9800" id="mhStatFound">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">WALLETS ADDED</div><div class="ws-stat-val" style="color:var(--green)" id="mhStatAdded">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">PROMOTED</div><div class="ws-stat-val" style="color:var(--cyan)" id="mhStatPromoted">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">COINS SCAN'D</div><div class="ws-stat-val" id="mhStatScanned">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">LAST SCAN</div><div class="ws-stat-val" style="font-size:11px" id="mhStatLast">—</div></div>
+              </div>
+              <div class="ws-actions" style="margin-top:10px">
+                <button class="ws-btn ws-btn-primary" id="mhRunBtn" onclick="midcapRun(this)" style="background:linear-gradient(135deg,#ff9800,#ff5722);border-color:#ff9800">⚡ RUN NOW</button>
+                <button class="ws-btn ws-btn-tertiary" onclick="loadMidcapStats()">↻ REFRESH</button>
+                <span id="mhStatusLine" class="ws-status-line" style="margin-left:auto"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════════
              🧠 BRAIN ANALYZER — futuristic wallet intel scanner
              For the big winners ($500M, $3M+ historic). Feed it a CA, the
              brain scans every holder, classifies them, and harvests PnL.
@@ -5826,6 +5863,70 @@ async function loadLegendaryStats() {
       <div style="color:var(--text3)">Last run: ${last} · Dune: ${lastDune}${err}</div>`;
   } catch (err) {
     el.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function loadMidcapStats() {
+  const pill = document.getElementById('mhStatusPill');
+  const found = document.getElementById('mhStatFound');
+  const added = document.getElementById('mhStatAdded');
+  const promo = document.getElementById('mhStatPromoted');
+  const scan  = document.getElementById('mhStatScanned');
+  const last  = document.getElementById('mhStatLast');
+  const line  = document.getElementById('mhStatusLine');
+  if (!found) return;
+  try {
+    const res  = await fetch('/api/midcap-harvester/status');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'midcap status failed');
+    const s = data;
+    found.textContent = (s.midcapCoinsFound||0).toLocaleString();
+    added.textContent = (s.walletsAdded||0).toLocaleString();
+    promo.textContent = (s.walletsPromoted||0).toLocaleString();
+    scan.textContent  = (s.totalScanned||0).toLocaleString();
+    last.textContent  = s.lastRunAt ? csTimeAgo(s.lastRunAt) : 'never';
+    if (pill) {
+      const ok = s.runsCompleted > 0 && !s.lastError;
+      pill.textContent = s.lastError ? 'ERROR' : (s.runsCompleted > 0 ? 'ACTIVE' : 'IDLE');
+      pill.style.background = s.lastError ? 'rgba(244,67,54,0.15)' : (ok ? 'rgba(76,175,80,0.15)' : 'rgba(255,152,0,0.15)');
+      pill.style.color      = s.lastError ? 'var(--red)' : (ok ? 'var(--green)' : '#ff9800');
+    }
+    if (line) {
+      if (s.lastError) {
+        line.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(String(s.lastError).slice(0,80))}</span>`;
+      } else if (s.lastDuneRunAt) {
+        line.innerHTML = `<span style="color:var(--text3)">Last Dune: ${csTimeAgo(s.lastDuneRunAt)} · ${(s.coinsHarvested||0).toLocaleString()} coins harvested total · ${(s.totalWallets||0).toLocaleString()} midcap wallets in DB</span>`;
+      } else {
+        line.innerHTML = `<span style="color:var(--text3)">Waiting for first sweep…</span>`;
+      }
+    }
+  } catch (err) {
+    if (line) line.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function midcapRun(btn) {
+  if (!confirm('Trigger midcap harvester now?\n\nRuns a fresh Dune query (1-2min, uses credits) then Helius fetches holders for every new midcap coin. Normally runs automatically twice a day.')) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ DUNE QUERY…'; }
+  const pill = document.getElementById('mhStatusPill');
+  if (pill) { pill.textContent = 'SCANNING'; pill.style.background = 'rgba(255,152,0,0.15)'; pill.style.color = '#ff9800'; }
+  try {
+    const res = await fetch('/api/midcap-harvester/run', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'run failed');
+    // Poll every 20s for up to 4min to catch completion
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls++;
+      loadMidcapStats();
+      if (polls >= 12) clearInterval(timer);
+    }, 20_000);
+    loadMidcapStats();
+  } catch (err) {
+    alert('Midcap harvester run failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
   }
 }
 
@@ -8813,6 +8914,7 @@ syncBotToggle();
 // Pre-load wallet tiles in the background so they're ready the moment
 // the user opens the Smart Money tab — no waiting, no empty grid.
 setTimeout(() => { if (typeof loadWalletTiles === 'function') loadWalletTiles(); }, 2000);
+setTimeout(() => { if (typeof loadMidcapStats === 'function') loadMidcapStats(); }, 2500);
 
 
 // ── MOBILE NAVIGATION ─────────────────────────────────────
