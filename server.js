@@ -3178,15 +3178,20 @@ async function processCandidate(candidate, isRescan = false) {
     // the composite. A real social-volume spike is early alpha — coins
     // with a 2x social volume surge ahead of price almost always run.
     try {
+      // LunarCrush bonus capped at +4 max (per user). Simple tiered rewards:
+      //   socialSpike  → +2
+      //   galaxy ≥ 60  → +1
+      //   tweets ≥ 100 → +1
+      // Still draws from the global bonus budget.
       let lcBonus = 0;
       const lcSignals = [];
       if (enrichedCandidate.socialSpike) {
-        lcBonus += 3;
+        lcBonus += 2;
         lcSignals.push(`social volume spike (2x+ above baseline)`);
       }
       const gs = Number(enrichedCandidate.galaxyScore);
       if (Number.isFinite(gs) && gs >= 60) {
-        lcBonus += 2;
+        lcBonus += 1;
         lcSignals.push(`galaxy score ${gs.toFixed(0)}`);
       }
       const tm = Number(enrichedCandidate.twitterMentions);
@@ -3194,6 +3199,7 @@ async function processCandidate(candidate, isRescan = false) {
         lcBonus += 1;
         lcSignals.push(`${tm} Twitter mentions`);
       }
+      lcBonus = Math.min(lcBonus, 4); // hard cap at +4 per user request
       if (lcBonus > 0) {
         const applied = addBonusCapped(lcBonus);
         if (applied > 0) {
@@ -5722,7 +5728,7 @@ try { dbInstance.exec(`
 const TUNING_DEFAULTS = {
   discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
   thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:85000, sweetSpotMin:8000, sweetSpotMax:40000 },
-  penalties: { latePump1hThreshold:300, latePump1hPenalty:10, latePump1hSevereThreshold:500, latePump1hSeverePenalty:15, latePump24hThreshold:500, latePump24hPenalty:8, latePumpAgeExemptHours:0.5, winThresholdPct:20, lossThresholdPct:-30 },
+  penalties: { latePump1hThreshold:300, latePump1hPenalty:0, latePump1hSevereThreshold:500, latePump1hSeverePenalty:0, latePump24hThreshold:500, latePump24hPenalty:0, latePumpAgeExemptHours:0.5, winThresholdPct:20, lossThresholdPct:-30 },
 };
 let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
 try {
