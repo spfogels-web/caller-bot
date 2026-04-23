@@ -4017,6 +4017,16 @@ body::before {
                   Loading harvester stats…
                 </div>
               </div>
+              <!-- Legendary harvester — external signal, finds $30M+ vol Solana runs weekly -->
+              <div style="margin-top:14px;padding-top:10px;border-top:1px dashed rgba(255,193,7,0.25)">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <span style="font-family:var(--mono);font-size:8px;color:var(--gold);letter-spacing:1px;font-weight:700">👑 LEGENDARY HARVESTER</span>
+                  <button class="cs-btn" style="font-size:7px;padding:3px 8px" onclick="csLegendaryRun(this)">⚡ RUN NOW</button>
+                </div>
+                <div id="csLegendaryStats" style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:0.5px">
+                  Loading legendary stats…
+                </div>
+              </div>
             </div>
             <div class="cs-knob-grid" data-grid="wallets"></div>
             <div class="cs-status" data-status="wallets"></div>
@@ -5730,6 +5740,7 @@ async function csDuneRefresh() {
   }
   // Harvester stats load alongside Dune refresh
   loadHarvesterStats();
+  loadLegendaryStats();
 }
 
 async function loadHarvesterStats() {
@@ -5777,6 +5788,65 @@ async function csHarvesterRun(btn) {
     loadHarvesterStats();
   } catch (err) {
     alert('Harvester run failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
+  }
+}
+
+async function loadLegendaryStats() {
+  const el = document.getElementById('csLegendaryStats');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/legendary-harvester/status');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'legendary status failed');
+    const s = data;
+    const last = s.lastRunAt ? csTimeAgo(s.lastRunAt) : 'never';
+    const lastDune = s.lastDuneRunAt ? csTimeAgo(s.lastDuneRunAt) : 'never';
+    const err = s.lastError ? ` · <span style="color:var(--red)">${csEscape(String(s.lastError).slice(0,40))}</span>` : '';
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,193,7,0.2);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">LEGENDS FOUND</div>
+          <div style="font-size:13px;font-weight:700;color:var(--gold)">${(s.legendaryCoinsFound||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(76,175,80,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">WINNERS ADDED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--green)">${(s.walletsAdded||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(0,188,212,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">UPGRADED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--cyan)">${(s.walletsUpgraded||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">COINS SCAN'D</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text2)">${(s.totalScanned||0).toLocaleString()}</div>
+        </div>
+      </div>
+      <div style="color:var(--text3)">Last run: ${last} · Dune: ${lastDune}${err}</div>`;
+  } catch (err) {
+    el.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function csLegendaryRun(btn) {
+  if (!confirm('Trigger legendary harvester now? This runs a fresh Dune query (uses credits, takes 1-3min) and then Helius calls to resolve holders. Normally runs weekly automatically.')) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ DUNE…'; }
+  try {
+    const res = await fetch('/api/legendary-harvester/run', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'run failed');
+    // Poll status every 30s for 5min to catch Dune completion
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls++;
+      loadLegendaryStats();
+      if (polls >= 10) clearInterval(timer);
+    }, 30_000);
+    loadLegendaryStats();
+  } catch (err) {
+    alert('Legendary harvester run failed: ' + err.message);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
   }

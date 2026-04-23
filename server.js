@@ -10865,6 +10865,29 @@ app.post('/api/wallet-harvester/run', async (req, res) => {
   }
 });
 
+// Legendary harvester — external-signal counterpart to the passive harvester.
+// Pulls the biggest Solana meme-market runs from Dune and harvests their holders.
+app.get('/api/legendary-harvester/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getLegendaryStats } = await import('./legendary-harvester.js');
+    res.json({ ok: true, ...getLegendaryStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/legendary-harvester/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerLegendaryHarvest } = await import('./legendary-harvester.js');
+    // Fire-and-forget — Dune query can take 1-3min, then holder fetch
+    triggerLegendaryHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[legendary] run err:', err.message));
+    res.json({ ok: true, message: 'Legendary harvest triggered — Dune query runs first (1-3min), then Helius fetches. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Call-funnel diagnostic — shows where candidates drop in the pipeline
 // during the rolling 60-min window. Hit this endpoint during a call
 // drought to see exactly which gate is blocking everything.
@@ -12138,6 +12161,18 @@ app.listen(PORT, async () => {
     startWalletHarvester(dbInstance, HELIUS_API_KEY);
   } catch (err) {
     console.warn('[wallet-harvester] failed to start:', err.message);
+  }
+
+  // ── Legendary Harvester (external signal) ──────────────────────────────
+  // Weekly: Dune query finds Solana tokens with $30M+ cumulative volume in
+  // the last 180d (FARTCOIN/POPCAT-tier runs). Helius pulls top 20 holders
+  // of each and drops them into tracked_wallets as WINNER. Independent of
+  // whether we called them — pure external alpha sourcing.
+  try {
+    const { startLegendaryHarvester } = await import('./legendary-harvester.js');
+    startLegendaryHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[legendary-harvester] failed to start:', err.message);
   }
 
   try {
