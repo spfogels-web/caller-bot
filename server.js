@@ -3641,14 +3641,15 @@ async function processCandidate(candidate, isRescan = false) {
     //
     // Bypassed entirely by smart-money cluster/KOL alerts.
     if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney) {
-      // Softened for call-drought recovery: Claude WATCHLIST + strong scorer
-      // signal (score ≥ 50) now counts as OK to post. Previously only AUTO_POST
-      // / POST decisions passed; Claude being conservative was silently killing
-      // every marginal call. IGNORE / BLOCKLIST / RETEST still block posting.
+      // Softened further for call-drought recovery: Claude WATCHLIST + any
+      // reasonable scorer signal (score ≥ 45) now counts as OK to post.
+      // Previously only AUTO_POST / POST decisions passed; Claude being
+      // conservative was silently killing every marginal call. IGNORE /
+      // BLOCKLIST / RETEST still block posting.
       const claudeOK = verdict && (
         verdict.decision === 'AUTO_POST' ||
         verdict.decision === 'POST' ||
-        (verdict.decision === 'WATCHLIST' && (scoreResult.score ?? 0) >= 50)
+        (verdict.decision === 'WATCHLIST' && (scoreResult.score ?? 0) >= 45)
       );
       const openaiOK = openAIDecision && (openAIDecision.decision === 'POST' || openAIDecision.decision === 'PROMOTE');
       const claudeOnly = !!SCORING_CONFIG.claudeOnlyMode;
