@@ -1258,6 +1258,14 @@ const SCORING_CONFIG_DEFAULTS = {
   earlyMCapDeferMinutes:   0,   // DISABLED — was deferring $6K-$9K coins 3min, which was holding too many. Set to 0 to skip defer entirely.
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
   earlyMCapDeferMax:    9000,   // upper edge of the defer band ($)
+  // ── AXIOSCAN-MODE FAST LANE ────────────────────────────────────────────
+  // If ≥ fastLaneMinWinners WINNER wallets from our DB are already holding
+  // this coin AND basic rug checks pass, skip Claude/OpenAI entirely and
+  // post immediately. Axioscan-style "trust the wallets" bypass.
+  fastLaneEnabled:         1,   // 1=on, 0=off (turns the whole bypass off)
+  fastLaneMinWinners:      2,   // ≥ this many WINNER wallets in holders → fast lane
+  fastLaneMinLiquidityUsd: 2000,// still must have $2K+ liquidity
+  fastLaneMaxAgeHours:    12,   // only fires on coins <12h old
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -3421,6 +3429,39 @@ async function processCandidate(candidate, isRescan = false) {
           finalDecision = 'IGNORE';
           logEvent('WARN', 'WALLET_RUG_BLOCK', `${enrichedCandidate.token} rug_wallets=${walletIntel.rugWalletCount} verdict=${walletIntel.walletVerdict}`);
         }
+
+        // ── AXIOSCAN-MODE FAST LANE ──────────────────────────────────────
+        // If ≥ N WINNER wallets are already holding this and basic rug /
+        // liquidity / age checks pass, skip Claude/OpenAI/consensus gates
+        // entirely and force AUTO_POST. This is the "trust the wallets"
+        // bypass — Axioscan's core mechanic. Tagged _fastLane so downstream
+        // gates know not to re-gate it.
+        const flEnabled    = !!SCORING_CONFIG.fastLaneEnabled;
+        const flMinWinners = SCORING_CONFIG.fastLaneMinWinners ?? 2;
+        const flMinLiq     = SCORING_CONFIG.fastLaneMinLiquidityUsd ?? 2000;
+        const flMaxAgeHrs  = SCORING_CONFIG.fastLaneMaxAgeHours ?? 12;
+        const liqUsd       = Number(enrichedCandidate.liquidityUsd ?? enrichedCandidate.liquidity ?? 0);
+        const ageHrs       = Number(enrichedCandidate.ageHours ?? enrichedCandidate.age_hours ?? 999);
+        if (
+          flEnabled &&
+          finalDecision !== 'IGNORE' &&
+          (walletIntel.knownWinnerWalletCount ?? 0) >= flMinWinners &&
+          walletIntel.walletVerdict !== 'MANIPULATED' &&
+          walletIntel.walletVerdict !== 'SUSPICIOUS' &&
+          (walletIntel.rugWalletCount ?? 0) === 0 &&
+          liqUsd >= flMinLiq &&
+          ageHrs <= flMaxAgeHrs
+        ) {
+          enrichedCandidate._fastLane = {
+            winners:   walletIntel.knownWinnerWalletCount,
+            liquidity: liqUsd,
+            ageHrs,
+            at:        Date.now(),
+          };
+          finalDecision = 'AUTO_POST';
+          logEvent('INFO', 'FAST_LANE_FIRED', `${enrichedCandidate.token ?? ca.slice(0,6)} winners=${walletIntel.knownWinnerWalletCount} liq=$${Math.round(liqUsd)} age=${ageHrs.toFixed(1)}h → bypass Claude/consensus`);
+          console.log(`[fast-lane] ⚡ $${enrichedCandidate.token ?? ca.slice(0,6)} — ${walletIntel.knownWinnerWalletCount} WINNERS holding, age ${ageHrs.toFixed(1)}h, liq $${Math.round(liqUsd)} → AUTO_POST bypass`);
+        }
       }
     }
 
@@ -3597,6 +3638,7 @@ async function processCandidate(candidate, isRescan = false) {
     if (
       finalDecision === 'AUTO_POST' &&
       !enrichedCandidate._smartMoney &&
+      !enrichedCandidate._fastLane &&
       !youngSweetspot &&
       verdict?.risk === 'EXTREME' &&
       (verdict?.score ?? 100) < 35
@@ -3640,7 +3682,7 @@ async function processCandidate(candidate, isRescan = false) {
     // with score >= consensusOverrideScore single-AI override fallback.
     //
     // Bypassed entirely by smart-money cluster/KOL alerts.
-    if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney) {
+    if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney && !enrichedCandidate._fastLane) {
       // Softened further for call-drought recovery: Claude WATCHLIST + any
       // reasonable scorer signal (score ≥ 45) now counts as OK to post.
       // Previously only AUTO_POST / POST decisions passed; Claude being
@@ -3856,7 +3898,7 @@ async function processCandidate(candidate, isRescan = false) {
     const mcapNow = enrichedCandidate.marketCap ?? 0;
     const isHighRiskBand = mcapNow >= 13_000 && mcapNow <= 17_500;
     const smKindRG = enrichedCandidate._smartMoney?.kind;
-    const bypassRugGuard = smKindRG === 'cluster' || smKindRG === 'kol';
+    const bypassRugGuard = smKindRG === 'cluster' || smKindRG === 'kol' || !!enrichedCandidate._fastLane;
     if (
       finalDecision === 'AUTO_POST' &&
       isHighRiskBand &&
@@ -4607,6 +4649,16 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
     basePart =
       `🐋 <b>BIG WALLET ALERT</b>\n` +
       `<i>A tracked winner wallet just bought this coin. Full analysis below.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
+  } else if (candidate._fastLane) {
+    // Axioscan-style fast-lane bypass — winner wallet overlap is strong
+    // enough that we skipped Claude/consensus gates. Tag the caption so
+    // the reader knows this was a wallet-signal call, not AI-vetted.
+    const fl = candidate._fastLane;
+    basePart =
+      `⚡ <b>FAST-LANE CALL</b> ⚡\n` +
+      `<i>${fl.winners} winner wallets already holding · bypassed AI gate · Axioscan-mode.</i>\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       basePart;
   }
