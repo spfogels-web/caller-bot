@@ -264,6 +264,10 @@ async function runLegendaryTick(dbInstance, heliusKey) {
     }
     console.log(`[legendary-harvester] harvesting ${newMints.length} new legendary coins (of ${rows.length} total)...`);
 
+    // SOL-tier classify — every wallet lands in DB, categorized by SOL:
+    // ≥100 WINNER · 8-99 SMART_MONEY · 1-7 MOMENTUM · <1 HARVESTED_TRADER.
+    const { classifyAllBySol } = await import('./harvester-cleanup.js');
+
     let coinsHarvested = 0;
     for (const coin of newMints) {
       const ca = coin.contract_address;
@@ -271,9 +275,12 @@ async function runLegendaryTick(dbInstance, heliusKey) {
       if (tokenAccounts.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
 
       const owners = await resolveTokenAccountOwners(tokenAccounts, heliusKey);
+      if (owners.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
+
+      const qualified = await classifyAllBySol(owners, heliusKey);
       let added = 0, upgraded = 0;
-      for (const owner of owners) {
-        const r = upsertLegendaryWallet(dbInstance, owner, ca);
+      for (const cand of qualified) {
+        const r = upsertLegendaryWallet(dbInstance, cand, ca);
         if (r.added) added++;
         if (r.upgraded) upgraded++;
       }

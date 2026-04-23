@@ -72,14 +72,15 @@ export async function batchScanSolBalance(addresses, heliusKey) {
  * Helper for harvesters: given a list of candidate wallet addresses,
  * return only those that meet MIN_KEEP_SOL (≥ 8 SOL), tagged with their
  * correct category by SOL tier.
+ * [DEPRECATED in favor of classifyAllBySol — kept for any external callers]
  */
 export async function filterAndClassifyBySol(addresses, heliusKey) {
   const balances = await batchScanSolBalance(addresses, heliusKey);
   const keepers = [];
   for (const addr of addresses) {
     const sol = balances.get(addr);
-    if (sol == null) continue;           // scan failed → skip (don't insert unknown)
-    if (sol < MIN_KEEP_SOL) continue;    // dust → skip
+    if (sol == null) continue;
+    if (sol < MIN_KEEP_SOL) continue;
     keepers.push({
       address:  addr,
       sol,
@@ -87,6 +88,35 @@ export async function filterAndClassifyBySol(addresses, heliusKey) {
     });
   }
   return keepers;
+}
+
+/**
+ * Classify EVERY wallet we scanned — no filter. Returns all wallets
+ * (except those whose SOL scan failed) tagged with their SOL tier:
+ *   ≥ 100 SOL → WINNER
+ *   8  – 99  → SMART_MONEY
+ *   1  – 7   → MOMENTUM
+ *   < 1      → HARVESTED_TRADER (trader-pipeline / burner / dust)
+ *
+ * Harvesters use this now so every scraped wallet lands in the DB.
+ * Solscan enricher later overrides the category based on actual PnL
+ * (see solscan-wallet-enricher.js:163-187) — so SOL tier is the
+ * *initial* category, PnL is the final verdict.
+ */
+export async function classifyAllBySol(addresses, heliusKey) {
+  const balances = await batchScanSolBalance(addresses, heliusKey);
+  const out = [];
+  for (const addr of addresses) {
+    const sol = balances.get(addr);
+    if (sol == null) continue;   // RPC miss — skip (don't insert unknown balance)
+    let category;
+    if      (sol >= WHALE_SOL)    category = 'WINNER';
+    else if (sol >= MIN_KEEP_SOL) category = 'SMART_MONEY';
+    else if (sol >= 1)            category = 'MOMENTUM';
+    else                          category = 'HARVESTED_TRADER';
+    out.push({ address: addr, sol, category });
+  }
+  return out;
 }
 
 /**
@@ -107,14 +137,14 @@ export async function cleanupHarvesterDust(dbInstance, heliusKey) {
 
   if (candidates.length === 0) {
     console.log('[harvester-cleanup] nothing to clean — no harvester-touched wallets found');
-    return { scanned: 0, deleted: 0, upgradedWinner: 0, upgradedSmart: 0, demoted: 0, preserved: 0 };
+    return { scanned: 0, upgradedWinner: 0, upgradedSmart: 0, demoted: 0, preserved: 0 };
   }
   console.log(`[harvester-cleanup] scanning ${candidates.length} harvester-touched wallets...`);
 
   const addresses = candidates.map(c => c.address);
   const balances  = await batchScanSolBalance(addresses, heliusKey);
 
-  let deleted = 0, upgradedWinner = 0, upgradedSmart = 0, demoted = 0, preserved = 0, scanFailed = 0;
+  let upgradedWinner = 0, upgradedSmart = 0, demoted = 0, preserved = 0, scanFailed = 0;
 
   const updateBal       = dbInstance.prepare('UPDATE tracked_wallets SET sol_balance = ?, updated_at = datetime(\'now\') WHERE id = ?');
   const setCategoryWithBal = dbInstance.prepare(`
@@ -125,8 +155,6 @@ export async function cleanupHarvesterDust(dbInstance, heliusKey) {
         notes       = COALESCE(notes, '') || ' | cleanup: SOL-tier reclassified ' || datetime('now')
     WHERE id = ?
   `);
-  const deleteWallet    = dbInstance.prepare('DELETE FROM tracked_wallets WHERE id = ?');
-
   const txn = dbInstance.transaction((rows) => {
     for (const w of rows) {
       const sol = balances.get(w.address);
@@ -134,21 +162,30 @@ export async function cleanupHarvesterDust(dbInstance, heliusKey) {
 
       updateBal.run(sol, w.id);
 
-      if (sol < MIN_KEEP_SOL) {
+      // Never delete — per user directive "don't lose anything."
+      // Dust wallets land in HARVESTED_TRADER bucket (preserves signal
+      // without polluting WHALE tier). Curated wallets (non-harvester
+      // source) get demoted to NEUTRAL only — category still editable.
+      if (sol < 1) {
         if (HARVESTER_SOURCES.includes(w.source)) {
-          // Source = harvester, dust SOL → safe to DELETE (we added it)
-          deleteWallet.run(w.id);
-          deleted++;
+          if (w.category !== 'HARVESTED_TRADER') { setCategoryWithBal.run('HARVESTED_TRADER', sol, w.id); demoted++; }
+          else preserved++;
         } else {
-          // Pre-existing wallet a harvester touched — DEMOTE but don't delete
-          setCategoryWithBal.run('NEUTRAL', sol, w.id);
-          demoted++;
+          if (w.category !== 'NEUTRAL' && w.category !== 'WINNER' && w.category !== 'KOL' && w.category !== 'RUG_ASSOCIATED') {
+            setCategoryWithBal.run('NEUTRAL', sol, w.id);
+            demoted++;
+          } else preserved++;
         }
+      } else if (sol < MIN_KEEP_SOL) {
+        if (w.category === 'WINNER' || w.category === 'KOL' || w.category === 'RUG_ASSOCIATED') { preserved++; continue; }
+        if (w.category !== 'MOMENTUM') { setCategoryWithBal.run('MOMENTUM', sol, w.id); demoted++; }
+        else preserved++;
       } else if (sol >= WHALE_SOL) {
         if (w.category !== 'WINNER') { setCategoryWithBal.run('WINNER', sol, w.id); upgradedWinner++; }
         else preserved++;
       } else {
         // 8 ≤ sol < 100
+        if (w.category === 'WINNER' || w.category === 'KOL' || w.category === 'RUG_ASSOCIATED') { preserved++; continue; }
         if (w.category !== 'SMART_MONEY') { setCategoryWithBal.run('SMART_MONEY', sol, w.id); upgradedSmart++; }
         else preserved++;
       }
@@ -158,7 +195,7 @@ export async function cleanupHarvesterDust(dbInstance, heliusKey) {
 
   const summary = {
     scanned: candidates.length,
-    deleted, upgradedWinner, upgradedSmart, demoted, preserved, scanFailed,
+    upgradedWinner, upgradedSmart, demoted, preserved, scanFailed,
     rules: { minKeepSol: MIN_KEEP_SOL, whaleSol: WHALE_SOL },
   };
   console.log('[harvester-cleanup] done:', summary);

@@ -166,9 +166,10 @@ async function runHarvestTick(dbInstance, heliusKey) {
     }
     console.log(`[wallet-harvester] harvesting ${coins.length} new winner coins...`);
 
-    // SOL-tier filter: only wallets ≥ 8 SOL become candidates.
-    // ≥100 SOL = WINNER, 8-99 = SMART_MONEY. Dust wallets are dropped.
-    const { filterAndClassifyBySol } = await import('./harvester-cleanup.js');
+    // SOL-tier classify — every wallet lands in DB, categorized by SOL:
+    // ≥100 WINNER · 8-99 SMART_MONEY · 1-7 MOMENTUM · <1 HARVESTED_TRADER.
+    // Solscan enricher overrides category with PnL-based tier later.
+    const { classifyAllBySol } = await import('./harvester-cleanup.js');
 
     let coinsHarvested = 0;
     for (const coin of coins) {
@@ -179,7 +180,7 @@ async function runHarvestTick(dbInstance, heliusKey) {
       const owners = await resolveTokenAccountOwners(tokenAccounts, heliusKey);
       if (owners.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
 
-      const qualified = await filterAndClassifyBySol(owners, heliusKey);
+      const qualified = await classifyAllBySol(owners, heliusKey);
       let wallets = 0;
       for (const cand of qualified) {
         const r = upsertHarvestedWallet(dbInstance, cand);
