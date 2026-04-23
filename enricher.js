@@ -787,6 +787,13 @@ let   _lcBreakerUntil = 0; // ms epoch — skip all calls until this time
 
 async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
   const result = { lunarCrushOk: false };
+  // Kill switch — set SKIP_LUNARCRUSH=true in Railway env to disable entirely.
+  // LC v4 API is unstable for fresh memecoins (100% error rate observed in
+  // prod). Social scoring is nice-to-have, not critical. Saves API calls +
+  // cleans up the health dashboard error rate.
+  if (process.env.SKIP_LUNARCRUSH === 'true' || process.env.SKIP_LUNARCRUSH === '1') {
+    return result;
+  }
   const key = getLunarCrushKey();
   if (!key) {
     console.log('[enricher:lunarcrush] ✗ LUNARCRUSH_API_KEY not set');

@@ -156,7 +156,7 @@ async function fetchTopHolders(mint, heliusKey) {
         jsonrpc: '2.0', id: 1, method: 'getTokenLargestAccounts',
         params: [mint, { commitment: 'finalized' }],
       }),
-      signal: AbortSignal.timeout(9_000),
+      signal: AbortSignal.timeout(12_000),
     });
     if (!res.ok) return [];
     const j = await res.json();
@@ -174,7 +174,7 @@ async function resolveTokenAccountOwners(tokenAccounts, heliusKey) {
         jsonrpc: '2.0', id: 1, method: 'getMultipleAccounts',
         params: [tokenAccounts.map(t => t.address), { encoding: 'jsonParsed' }],
       }),
-      signal: AbortSignal.timeout(9_000),
+      signal: AbortSignal.timeout(12_000),
     });
     if (!res.ok) return [];
     const j = await res.json();
