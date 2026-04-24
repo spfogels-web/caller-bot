@@ -3103,9 +3103,20 @@ async function processCandidate(candidate, isRescan = false) {
     try { similarity = computeSimilarityScores(scoreResult) ?? {}; } catch {}
 
     // ── STEP 1: Rules engine decision ─────────────────────────────────────────
+    // v5 pipeline now produces the authoritative decision (POST/WATCHLIST/
+    // IGNORE/BLOCK). Map to legacy decision labels for the rest of the flow:
+    //   POST → AUTO_POST · WATCHLIST → WATCHLIST · IGNORE → IGNORE · BLOCK → BLOCKLIST
+    // Hard rule: a v5 BLOCK is never overridable by AI or any later step.
     const scorerDecision = makeFinalDecision(scoreResult, null, enrichedCandidate);
-    let finalDecision = scorerDecision;
+    const v5 = scoreResult?.parts?._v5 ?? null;
+    const v5ActionMap = { POST: 'AUTO_POST', WATCHLIST: 'WATCHLIST', IGNORE: 'IGNORE', BLOCK: 'BLOCKLIST' };
+    const v5InitialDecision = v5 ? v5ActionMap[v5.action] : null;
+    let finalDecision = v5InitialDecision || scorerDecision;
+    const v5HardBlock = v5 && v5.action === 'BLOCK';
     let ftResult = null; // legacy compat
+    if (v5) {
+      console.log(`[auto-caller:v5] $${enrichedCandidate.token??ca.slice(0,6)} state=${v5.state} action=${v5.action} labels=[${(v5.labels||[]).join(',')}] · scan=${v5.scores.scanner} rug=${v5.scores.rugRisk} mq=${v5.scores.momentum} wq=${v5.scores.wallet} dq=${v5.scores.demand} → final=${v5.scores.finalCall}`);
+    }
 
     // ── STEP 2: Dune Wallet Intelligence Cross-Reference ──────────────────────
     // Cross-references token holders against Dune wallet DB (pump.fun + Raydium PnL data).
@@ -3196,13 +3207,14 @@ async function processCandidate(candidate, isRescan = false) {
           const isGemRange = mcap >= 8_000 && mcap <= 50_000;
 
           // AI upgrades: if scorer said WATCHLIST but Claude sees a gem in range → POST
-          if (aiDecision === 'AUTO_POST' && finalDecision === 'WATCHLIST' && aiScore >= 45) {
+          // v5 BLOCK is never overridable — protects against AI rubber-stamping rugs.
+          if (!v5HardBlock && aiDecision === 'AUTO_POST' && finalDecision === 'WATCHLIST' && aiScore >= 45) {
             finalDecision = 'AUTO_POST';
             logEvent('INFO', 'AI_UPGRADE', `${enrichedCandidate.token} WATCHLIST→AUTO_POST ai=${aiScore} mcap=${mcap}`);
             console.log(`[ai-os] ⬆️  AI upgraded $${enrichedCandidate.token}: WATCHLIST → AUTO_POST (score ${aiScore}, mcap $${(mcap/1000).toFixed(1)}K)`);
           }
           // AI upgrades HOLD_FOR_REVIEW → AUTO_POST if it's a gem
-          if (aiDecision === 'AUTO_POST' && finalDecision === 'HOLD_FOR_REVIEW' && isGemRange && aiScore >= 50) {
+          if (!v5HardBlock && aiDecision === 'AUTO_POST' && finalDecision === 'HOLD_FOR_REVIEW' && isGemRange && aiScore >= 50) {
             finalDecision = 'AUTO_POST';
             logEvent('INFO', 'AI_UPGRADE', `${enrichedCandidate.token} HOLD→AUTO_POST ai=${aiScore}`);
             console.log(`[ai-os] ⬆️  AI upgraded $${enrichedCandidate.token}: HOLD → AUTO_POST (gem range)`);
@@ -3426,14 +3438,18 @@ async function processCandidate(candidate, isRescan = false) {
       // These are hardcoded public alpha wallets (Cupsey / Unipcs / Ansem etc.)
       // with >60% micro-cap hit rates. Their entry alone is enough signal.
       const label = sm.kind === 'kol' ? 'KOL' : `cluster=${sm.clusterSize}`;
-      if (finalDecision !== 'AUTO_POST') {
-        logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
-        console.log(`[smart-money] ${sm.kind === 'kol' ? '⭐' : '🐋🐋🐋'} ${sm.kind.toUpperCase()} OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
+      if (v5HardBlock) {
+        logEvent('WARN', 'SMART_MONEY_OVERRIDE_BLOCKED', `${enrichedCandidate.token ?? ca.slice(0,6)} ${label} ignored — v5 hard BLOCK (rug=${v5?.scores?.rugRisk})`);
+      } else {
+        if (finalDecision !== 'AUTO_POST') {
+          logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
+          console.log(`[smart-money] ${sm.kind === 'kol' ? '⭐' : '🐋🐋🐋'} ${sm.kind.toUpperCase()} OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
+        }
+        finalDecision = 'AUTO_POST';
       }
-      finalDecision = 'AUTO_POST';
     } else if (sm?.kind === 'single') {
       // Soft promote: if score is reasonable, allow the post even if OpenAI was lukewarm
-      if (finalDecision === 'WATCHLIST' && (scoreResult?.score ?? 0) >= 45) {
+      if (!v5HardBlock && finalDecision === 'WATCHLIST' && (scoreResult?.score ?? 0) >= 45) {
         logEvent('INFO', 'SMART_MONEY_PROMOTE', `${enrichedCandidate.token ?? ca.slice(0,6)} WATCHLIST → AUTO_POST (single winner, score ${scoreResult.score})`);
         finalDecision = 'AUTO_POST';
       }
