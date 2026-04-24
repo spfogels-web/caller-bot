@@ -3004,37 +3004,23 @@ async function processCandidate(candidate, isRescan = false) {
 
     // ── DATA QUALITY GATE: reject tokens with zero enrichment data ────────
     // If Birdeye AND Helius both failed AND we have no market cap, this token
-    // has no real data — scoring is meaningless. Don't waste Claude/OpenAI
-    // credits evaluating air.
-    //
-    // Exceptions:
-    //   - cluster/KOL smart-money alerts: post anyway — highest-conviction
-    //     signal (3+ winners or KOL buy) overrides the data gap. Coin is
-    //     marked _limitedData so the TG caption warns the reader.
-    //   - single-wallet smart-money alerts: enqueue for retry in 2min
-    //     (DexScreener/Birdeye usually index fresh coins within that
-    //     window). If still empty at retry, drop silently.
+    // has no real data. Always drop — no useful signal with this little
+    // information. Smart-money alerts get queued for ONE retry at +2min
+    // (DexScreener usually indexes fresh pools in that window) before being
+    // dropped permanently.
     if (!enrichedCandidate.birdeyeOk && !enrichedCandidate.heliusOk && enrichedCandidate.marketCap == null) {
       const sm = enrichedCandidate._smartMoney;
-      const highConviction = sm && (sm.kind === 'cluster' || sm.kind === 'kol');
-      const singleSmart    = sm && sm.kind === 'single';
-
-      if (highConviction) {
-        enrichedCandidate._limitedData = true;
-        console.log(`[auto-caller] ⚠️  $${enrichedCandidate.token ?? ca.slice(0,8)} — missing enrichment but ${sm.kind.toUpperCase()} signal — continuing with _limitedData flag`);
-        logEvent('WARN', 'DATA_VOID_BYPASSED', `${ca} — smart-money ${sm.kind} override`);
-        // Don't return — let scoring proceed with whatever data we have
-      } else if (singleSmart && !enrichedCandidate._smRetryAttempt) {
-        console.log(`[auto-caller] 🔁 $${ca.slice(0,8)} — single-wallet signal, enrichment empty → queueing 2min retry`);
+      const alreadyRetried = !!enrichedCandidate._smRetryAttempt;
+      if (sm && !alreadyRetried) {
+        console.log(`[auto-caller] 🔁 $${ca.slice(0,8)} — ${sm.kind} signal, enrichment empty → queueing 2min retry`);
         enqueueSmartMoneyRetry(ca, { ...candidate, _smRetryAttempt: 1 });
         fnl('dataVoidRetry');
         return;
-      } else {
-        console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
-        fnl('dataVoidSkip');
-        logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
-        return;
       }
+      console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
+      fnl('dataVoidSkip');
+      logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
+      return;
     }
 
     // ── MCap tier bonuses ─────────────────────────────────────────────────
@@ -4369,6 +4355,17 @@ async function processCandidate(candidate, isRescan = false) {
         riskLevel: enrichedCandidate.deployerHistoryRisk ?? 'UNKNOWN',
         flags:     intel?.deployerProfile?.flags ?? [],
       });
+    }
+
+    // ── FINAL HARD GATE: never post a call without a market cap ──────────
+    // Catches all upstream paths — smart-money overrides, fast-lane bypass,
+    // AI upgrades — if mcap is missing, the call has no useful info for the
+    // reader. Downgrade to WATCHLIST so we can revisit if data arrives.
+    if (finalDecision === 'AUTO_POST' &&
+        (enrichedCandidate.marketCap == null || enrichedCandidate.marketCap === 0)) {
+      console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — blocked AUTO_POST: no marketCap available (would post blind). → WATCHLIST`);
+      logEvent('INFO', 'NO_MCAP_BLOCK', `${ca} — blocked AUTO_POST, no mcap to show reader`);
+      finalDecision = 'WATCHLIST';
     }
 
     // Post if AUTO_POST — even if Claude verdict is null (Claude may have timed out/failed)
