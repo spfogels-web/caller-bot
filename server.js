@@ -4410,21 +4410,12 @@ async function processCandidate(candidate, isRescan = false) {
       const coinImg  = enrichedCandidate.imageUrl
                     || (caForImg ? `https://dd.dexscreener.com/ds-data/tokens/solana/${caForImg}.png` : null);
 
-      // Respect pausePosting config override (set via dashboard or /config Telegram command)
-      if (AI_CONFIG_OVERRIDES.pausePosting) {
-        fnl('pausedPosting');
-        console.log(`[ai-os] ⏸ Posting PAUSED — $${enrichedCandidate.token} would have posted (score ${scoreResult.score})`);
-        logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
-      } else {
-        fnl('posted');
-        await sendCallAlertWithImage(caption, null, coinImg);
-      }
-
-      await sleep(1500);
-      // ── CA beacon for third-party bots (Phanes, Sect, etc.) ──────────────
-      // Sent as plain text, no HTML parse_mode, no preview, just the CA —
-      // this is what the leaderboard bots scan the chat for.
-      // Respect pausePosting — if posting is paused, don't send the beacon either.
+      // ── CA beacon FIRST (Phanes, Sect Board, leaderboard trackers) ──────
+      // Posted as a plain-text message with just the CA — mirrors the way
+      // a human user would drop a call in the group. This is what Phanes
+      // and Sect scan for to credit the caller on their leaderboards. MUST
+      // go out BEFORE the analysis card so the attribution sticks to the
+      // Pulse bot account. Respect pausePosting.
       const caBeacon = enrichedCandidate.contractAddress ?? '';
       if (caBeacon && TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID && !AI_CONFIG_OVERRIDES.pausePosting) {
         try {
@@ -4439,10 +4430,21 @@ async function processCandidate(candidate, isRescan = false) {
             signal: AbortSignal.timeout(10_000),
           });
           if (!r.ok) console.warn(`[TG-CA] beacon status ${r.status}: ${(await r.text()).slice(0,150)}`);
-          else console.log(`[TG-CA] ✓ CA beacon posted for Phanes/Sect: ${caBeacon}`);
+          else console.log(`[TG-CA] ✓ CA beacon posted FIRST for Phanes/Sect: ${caBeacon}`);
         } catch (err) {
           console.warn(`[TG-CA] beacon failed: ${err.message}`);
         }
+        await sleep(1500); // give leaderboard bots a moment to pick up the CA
+      }
+
+      // Respect pausePosting config override (set via dashboard or /config Telegram command)
+      if (AI_CONFIG_OVERRIDES.pausePosting) {
+        fnl('pausedPosting');
+        console.log(`[ai-os] ⏸ Posting PAUSED — $${enrichedCandidate.token} would have posted (score ${scoreResult.score})`);
+        logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
+      } else {
+        fnl('posted');
+        await sendCallAlertWithImage(caption, null, coinImg);
       }
 
       // ── Archive this call permanently (AUTO_POST) ─────────────────────────
