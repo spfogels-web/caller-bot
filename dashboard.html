@@ -4488,6 +4488,46 @@ body::before {
           </div>
         </div>
 
+        <!-- ═══════════════════════════════════════════════════════════════
+             🔗 WHALE FUNDING TRACKER — catches whales funding fresh burner
+             wallets via Solscan. Every 15min. When a freshly-funded wallet
+             then holds a candidate coin, scorer awards +4/+6 (near-real-
+             time "whale is buying via burner" signal).
+             ═══════════════════════════════════════════════════════════════ -->
+        <div id="whaleFundingCard" class="wallet-scanner" style="--ws-accent:#18ffff;margin-top:16px;border-color:rgba(24,255,255,0.25);background:linear-gradient(135deg,rgba(24,255,255,0.04),rgba(156,39,176,0.02))">
+          <div class="ws-top">
+            <div class="ws-visual">
+              <div class="ws-orbit ws-orbit-1" style="border-color:rgba(24,255,255,0.6)"></div>
+              <div class="ws-orbit ws-orbit-2" style="border-color:rgba(24,255,255,0.4)"></div>
+              <div class="ws-orbit ws-orbit-3" style="border-color:rgba(156,39,176,0.3)"></div>
+              <div class="ws-orb" style="background:radial-gradient(circle,rgba(24,255,255,0.4),rgba(156,39,176,0.1));box-shadow:0 0 30px rgba(24,255,255,0.5)"><div class="ws-orb-icon">🔗</div></div>
+            </div>
+            <div class="ws-info">
+              <div class="ws-title">
+                <span class="ws-title-glow" style="color:#18ffff">WHALE FUNDING TRACKER</span>
+                <span class="ws-status-pill" id="wfStatusPill">IDLE</span>
+              </div>
+              <div class="ws-subtitle">Every 15 min, scans the top ~50 WINNER wallets for outgoing SOL transfers in the last 24h. Recipients get tagged as <b>WHALE_FUNDED</b> — these are fresh burner wallets a whale is about to trade with. When a freshly-funded wallet shows up as a holder of a new candidate coin within 48h, scorer awards +4 (1 match) or +6 (2+ matches).</div>
+              <div class="ws-stats">
+                <div class="ws-stat"><div class="ws-stat-label">EVENTS 24H</div><div class="ws-stat-val" style="color:#18ffff" id="wfEvents24h">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">FUNDED WALLETS</div><div class="ws-stat-val" style="color:var(--green)" id="wfFundedWallets">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">NEW THIS RUN</div><div class="ws-stat-val" style="color:var(--gold)" id="wfNewThisRun">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">WHALES SCAN'D</div><div class="ws-stat-val" id="wfWhalesScanned">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">LAST RUN</div><div class="ws-stat-val" style="font-size:11px" id="wfLastRun">—</div></div>
+              </div>
+              <div class="ws-actions" style="margin-top:10px">
+                <button class="ws-btn ws-btn-primary" onclick="whaleFundingRun(this)" style="background:linear-gradient(135deg,#18ffff,#9c27b0);border-color:#18ffff">⚡ SCAN NOW</button>
+                <button class="ws-btn ws-btn-tertiary" onclick="loadWhaleFundingEvents()">↻ REFRESH</button>
+                <span id="wfStatusLine" class="ws-status-line" style="margin-left:auto"></span>
+              </div>
+              <!-- Recent funding feed -->
+              <div id="wfEventsList" style="margin-top:14px;max-height:280px;overflow-y:auto;font-family:var(--mono);font-size:9px;color:var(--text3)">
+                Loading recent events…
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- legacy hidden-but-referenced elements (older code paths still touch these IDs) -->
         <button id="smScanBtn" style="display:none" onclick="triggerDuneScan()"></button>
         <span id="smLastScan" style="display:none"></span>
@@ -5930,6 +5970,91 @@ async function midcapRun(btn) {
     alert('Midcap harvester run failed: ' + err.message);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
+  }
+}
+
+// ── Whale Funding Tracker (Smart Money tab) ────────────────────────────
+async function loadWhaleFundingStats() {
+  try {
+    const res = await fetch('/api/whale-funding/status');
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'status failed');
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set('wfEvents24h', (d.events24h || 0).toLocaleString());
+    set('wfFundedWallets', (d.fundedWallets || 0).toLocaleString());
+    set('wfNewThisRun', (d.newWalletsFunded || 0).toLocaleString());
+    set('wfWhalesScanned', (d.whalesScanned || 0).toLocaleString());
+    set('wfLastRun', d.lastRunAt ? csTimeAgo(d.lastRunAt) : 'never');
+    const pill = document.getElementById('wfStatusPill');
+    if (pill) {
+      const ok = (d.runsCompleted || 0) > 0 && !d.lastError;
+      pill.textContent = d.lastError ? 'ERROR' : (ok ? 'ACTIVE' : 'IDLE');
+      pill.style.background = d.lastError ? 'rgba(244,67,54,0.15)' : (ok ? 'rgba(76,175,80,0.15)' : 'rgba(24,255,255,0.15)');
+      pill.style.color      = d.lastError ? 'var(--red)' : (ok ? 'var(--green)' : '#18ffff');
+    }
+    const line = document.getElementById('wfStatusLine');
+    if (line) {
+      line.innerHTML = d.lastError
+        ? `<span style="color:var(--red)">✕ ${csEscape(String(d.lastError).slice(0,80))}</span>`
+        : `<span style="color:var(--text3)">${(d.totalEvents||0).toLocaleString()} lifetime events · ${(d.fundedNewWallets||0).toLocaleString()} new wallets added to DB</span>`;
+    }
+  } catch (err) {
+    const line = document.getElementById('wfStatusLine');
+    if (line) line.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function loadWhaleFundingEvents() {
+  loadWhaleFundingStats();
+  const el = document.getElementById('wfEventsList');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/whale-funding/recent?limit=40');
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'events failed');
+    if (!d.events || d.events.length === 0) {
+      el.innerHTML = '<div style="padding:14px;text-align:center;color:var(--text3)">No whale funding events yet. Click ⚡ SCAN NOW to run an immediate sweep.</div>';
+      return;
+    }
+    el.innerHTML = d.events.map(e => {
+      const amt = Number(e.amount_sol || 0).toFixed(2);
+      const when = e.detected_at ? csTimeAgo(e.detected_at) : '?';
+      const funder = (e.funder_wallet || '').slice(0, 6);
+      const recip  = (e.recipient_wallet || '').slice(0, 6);
+      return `<div style="display:grid;grid-template-columns:1fr auto auto 1fr auto;gap:10px;align-items:center;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.04)">
+        <span style="color:var(--gold)">🐋 ${funder}…</span>
+        <span style="color:var(--text3)">→</span>
+        <span style="color:#18ffff;font-weight:700">${amt} SOL</span>
+        <span style="color:var(--green)">→ ${recip}…</span>
+        <span style="color:var(--text3);font-size:8px">${when}${e.tx_sig ? ` · <a href="https://solscan.io/tx/${e.tx_sig}" target="_blank" style="color:var(--text3);text-decoration:none">tx</a>` : ''}</span>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    el.innerHTML = `<div style="padding:14px;color:var(--red)">✕ ${csEscape(err.message)}</div>`;
+  }
+}
+
+async function whaleFundingRun(btn) {
+  if (!confirm('Trigger whale funding scan now?\n\nScans top 50 WINNER wallets for outgoing SOL transfers (~50 Solscan calls, 30-60s). Normally runs every 15min automatically.')) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ SCANNING…'; }
+  const pill = document.getElementById('wfStatusPill');
+  if (pill) { pill.textContent = 'SCANNING'; pill.style.background = 'rgba(24,255,255,0.15)'; pill.style.color = '#18ffff'; }
+  try {
+    const res = await fetch('/api/whale-funding/run', { method: 'POST' });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'run failed');
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls++;
+      loadWhaleFundingEvents();
+      if (polls >= 8) clearInterval(timer);
+    }, 15_000);
+    loadWhaleFundingEvents();
+  } catch (err) {
+    alert('Whale funding scan failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ SCAN NOW'; }
   }
 }
 
@@ -9096,6 +9221,7 @@ syncBotToggle();
 // the user opens the Smart Money tab — no waiting, no empty grid.
 setTimeout(() => { if (typeof loadWalletTiles === 'function') loadWalletTiles(); }, 2000);
 setTimeout(() => { if (typeof loadMidcapStats === 'function') loadMidcapStats(); }, 2500);
+setTimeout(() => { if (typeof loadWhaleFundingEvents === 'function') loadWhaleFundingEvents(); }, 3000);
 
 
 // ── MOBILE NAVIGATION ─────────────────────────────────────

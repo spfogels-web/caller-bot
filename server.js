@@ -3184,6 +3184,26 @@ async function processCandidate(candidate, isRescan = false) {
         }
       }
 
+      // Whale-funded holders — whales that funded fresh wallets within 48h.
+      // If ≥1 such wallet is holding this candidate, it's a near-real-time
+      // "whale is buying X through a burner" signal. +4 for 1, +6 for 2+.
+      try {
+        const holders = enrichedCandidate.knownWinnerWallets ?? [];
+        if (holders.length > 0) {
+          const { countRecentlyWhaleFunded } = await import('./whale-funding-tracker.js');
+          const n = countRecentlyWhaleFunded(dbInstance, holders, 48);
+          if (n > 0) {
+            const bonus = n >= 2 ? 6 : 4;
+            const applied = addBonusCapped(bonus);
+            if (applied > 0) {
+              (scoreResult.signals = scoreResult.signals || {}).wallet = scoreResult.signals.wallet || [];
+              scoreResult.signals.wallet.push(`+${applied} WHALE_FUNDED_HOLDER — ${n} wallet${n>1?'s':''} funded by whale in last 48h`);
+              console.log(`[auto-caller] 🔗 WHALE_FUNDED $${enrichedCandidate.token ?? ca.slice(0,6)} — ${n} holder(s) freshly whale-funded · +${applied}`);
+            }
+          }
+        }
+      } catch {}
+
       // #5 Liquidity trajectory (needs ≥2 snapshots, so first scans won't trigger)
       const traj = getLiquidityTrajectory(dbInstance, ca);
       if (traj) {
@@ -11141,6 +11161,37 @@ app.post('/api/midcap-harvester/run', async (req, res) => {
   }
 });
 
+// Whale funding tracker — top WINNER wallets' outgoing SOL transfers
+app.get('/api/whale-funding/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getWhaleFundingStats } = await import('./whale-funding-tracker.js');
+    res.json({ ok: true, ...getWhaleFundingStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.get('/api/whale-funding/recent', async (req, res) => {
+  setCors(res);
+  try {
+    const { getRecentWhaleFundingEvents } = await import('./whale-funding-tracker.js');
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 40));
+    res.json({ ok: true, events: getRecentWhaleFundingEvents(dbInstance, limit) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/whale-funding/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerWhaleFundingScan } = await import('./whale-funding-tracker.js');
+    triggerWhaleFundingScan(dbInstance).catch(err => console.warn('[whale-funding] run err:', err.message));
+    res.json({ ok: true, message: 'Whale funding scan triggered — ~50 Solscan calls, 30-60s to complete. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Harvester cleanup — batch-scan SOL balance of every harvester-touched
 // wallet, delete <8 SOL (harvester sources) or demote to NEUTRAL (curated
 // sources), recategorize survivors by SOL tier (≥100=WINNER, 8-99=SMART_MONEY).
@@ -12441,6 +12492,18 @@ app.listen(PORT, async () => {
     startLegendaryHarvester(dbInstance, HELIUS_API_KEY);
   } catch (err) {
     console.warn('[legendary-harvester] failed to start:', err.message);
+  }
+
+  // ── Whale Funding Tracker ──────────────────────────────────────────────
+  // Every 15min: checks outgoing SOL transfers from top WINNER wallets via
+  // Solscan. New recipients become WHALE_FUNDED — freshly-funded burners
+  // that a whale is about to trade with. If any of them show up as holders
+  // of a candidate coin within 48h, scorer awards a big bonus.
+  try {
+    const { startWhaleFundingTracker } = await import('./whale-funding-tracker.js');
+    startWhaleFundingTracker(dbInstance);
+  } catch (err) {
+    console.warn('[whale-funding] failed to start:', err.message);
   }
 
   // ── Midcap Harvester (twice-daily mid-tier sweep) ──────────────────────
