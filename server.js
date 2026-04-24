@@ -1038,6 +1038,43 @@ function invalidateMemoryCache() {
 // Refreshed every 30 min via setInterval. Uses same logic as the public
 // /api/candidates/missed endpoint — DexScreener batch lookup, free API.
 const _missedCache = { rows: [], refreshedAt: 0 };
+
+// ─── Call funnel diagnostic ───────────────────────────────────────────────
+// Tracks where candidates drop in the pipeline so we can see at a glance
+// why calls aren't flowing. Rolling 60-min window, rolls forward on each
+// increment so old events age out naturally. Read via /api/diagnose/funnel.
+const _callFunnel = {
+  windowStartMs: Date.now(),
+  stages: {
+    evaluated:          0,  // entered auto-caller
+    dataVoidSkip:       0,  // no enrichment data at all
+    scored:             0,  // got a composite score
+    belowFloor:         0,  // score < 38 hard floor
+    ignoreDecision:     0,  // makeFinalDecision said IGNORE
+    watchlistDecision:  0,  // makeFinalDecision said WATCHLIST
+    autoPostDecision:   0,  // makeFinalDecision said AUTO_POST
+    claudeExtremeVeto:  0,
+    consensusGate:      0,  // Claude said no (claude-only mode)
+    momentumGate:       0,  // DUMPING/SEVERE
+    rugGuard:           0,  // $13-17.5K band failed
+    liquidityFloor:     0,  // <$3K liq
+    foundationTrust:    0,  // foundation signals < 15/100 (scorer had no data)
+    earlyMcapDefer:     0,  // $6-9K defer
+    bundleVeto:         0,
+    extendedAvoid:      0,
+    smartMoneyOverride: 0,  // cluster/KOL forced auto-post
+    posted:             0,
+    pausedPosting:      0,
+  },
+};
+function fnl(stage) {
+  // Roll window every 60 min
+  if (Date.now() - _callFunnel.windowStartMs > 60 * 60_000) {
+    _callFunnel.windowStartMs = Date.now();
+    for (const k of Object.keys(_callFunnel.stages)) _callFunnel.stages[k] = 0;
+  }
+  _callFunnel.stages[stage] = (_callFunnel.stages[stage] || 0) + 1;
+}
 const MISSED_REFRESH_MS = 30 * 60_000;
 
 async function refreshMissedOpportunities() {
@@ -1110,9 +1147,69 @@ function getMissedOpportunityMemory() {
   ].join('\n');
 }
 
+// ─── Winner-memory feedback ─────────────────────────────────────────────
+// Mirror of the missed-opportunity cache but for WINS. Tells Claude
+// "here are the coins we posted that actually ran ≥2x — pattern-match
+// new candidates against these". The positive half of the learning loop.
+// Pulled directly from the calls table (peak_multiple is authoritative);
+// no DexScreener calls needed. Rebuilt every 30min same as misses.
+const _winnerCache = { rows: [], refreshedAt: 0 };
+
+function refreshWinnerMemory() {
+  try {
+    // Sync the memory threshold to the WIN definition. If user set
+    // winPeakMultiple=3.0, Claude sees only 3x+ coins as "winning patterns".
+    // If user wants wider memory for learning, they can lower winPeakMultiple.
+    const winTarget = SCORING_CONFIG.winPeakMultiple ?? 2.0;
+    const rows = dbInstance.prepare(`
+      SELECT token, contract_address,
+             market_cap_at_call as scan_mcap,
+             peak_mcap,
+             peak_multiple,
+             score_at_call,
+             structure_grade_at_call as structure_grade,
+             setup_type_at_call as setup_type,
+             risk_at_call as risk,
+             called_at
+      FROM calls
+      WHERE peak_multiple IS NOT NULL
+        AND peak_multiple >= ?
+        AND called_at > datetime('now', '-7 days')
+      ORDER BY peak_multiple DESC
+      LIMIT 10
+    `).all(winTarget);
+    _winnerCache.rows = rows;
+    _winnerCache.refreshedAt = Date.now();
+    console.log(`[winner-memory] Refreshed — ${rows.length} recent ≥${winTarget}x winners (7d)`);
+  } catch (err) {
+    console.warn(`[winner-memory] Refresh failed: ${err.message}`);
+  }
+}
+
+function getWinnerMemory() {
+  if (_winnerCache.rows.length === 0) return '';
+  const lines = _winnerCache.rows.slice(0, 5).map(r => {
+    const mcK = r.scan_mcap ? `$${Math.round(r.scan_mcap/1000)}K` : '?';
+    const feat = [
+      r.structure_grade && `${r.structure_grade}`,
+      r.setup_type && r.setup_type.replace(/_/g,' '),
+      r.risk && `${r.risk} risk`,
+    ].filter(Boolean).join(' · ');
+    return `  - $${r.token || '?'} — entry ${mcK} · ${feat} · score ${r.score_at_call ?? '?'} → peak ${r.peak_multiple.toFixed(2)}x`;
+  });
+  const winBar = SCORING_CONFIG.winPeakMultiple ?? 2.0;
+  return [
+    `RECENT WINS — coins we POSTED that ran ≥${winBar}x in the last 7 days. This is what winning calls look like:`,
+    ...lines,
+    'If this candidate has similar structure (grade, setup type, MCap band, score range) to these winners, bias toward AUTO_POST. Reference these as "winning patterns".',
+  ].join('\n');
+}
+
 // Initial refresh 60s after boot (let DB settle), then every 30 min
 setTimeout(() => { refreshMissedOpportunities().catch(() => {}); }, 60_000);
+setTimeout(() => { refreshWinnerMemory(); }, 65_000);
 setInterval(() => { refreshMissedOpportunities().catch(() => {}); }, MISSED_REFRESH_MS);
+setInterval(() => { refreshWinnerMemory(); }, MISSED_REFRESH_MS);
 
 
 
@@ -1123,6 +1220,11 @@ let AI_CONFIG_OVERRIDES = {};
 // Persist AI_CONFIG_OVERRIDES to SQLite so pausePosting survives restarts.
 try {
   dbInstance.exec(`CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)`);
+  // Ensure meta-signals schema (liquidity_snapshots) exists before first scan
+  try {
+    const { ensureMetaSignalsSchema } = await import('./meta-signals.js');
+    ensureMetaSignalsSchema(dbInstance);
+  } catch (err) { console.warn('[meta-signals] schema init:', err.message); }
   const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='ai_config_overrides'`).get();
   if (row?.value) {
     AI_CONFIG_OVERRIDES = JSON.parse(row.value);
@@ -1141,25 +1243,34 @@ function persistAIConfig() {
 // and whenever a POST /api/config/scoring lands. Every hot-path site below
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
-  minScoreToPost:         45,   // hard floor for AUTO_POST
-  sweetSpotBonus:          4,   // $13K-$40K MCap
-  secondaryBonus:          2,   // $40K-$80K MCap
+  minScoreToPost:         35,   // UNBLOCK — dropped to scorer hard floor. Any passing score should be able to post.
+  sweetSpotBonus:          0,   // DISABLED — hitting an MCap range isn't signal. Was +4 for $13K-$40K.
+  secondaryBonus:          0,   // DISABLED — same reason. Was +2 for $40K-$80K.
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
-  devFingerprintCap:       6,   // max positive delta from dev history (raised 3→6: proven devs deserve real weight)
-  hotDevBonus:             4,   // bonus when dev has a coin that hit 2x+ in the last 24h (currently-running dev boost)
+  devFingerprintCap:       6,   // max positive delta from dev history
+  hotDevBonus:             4,   // bonus when dev has a coin that hit 2x+ in the last 24h
   globalBonusCap:         10,   // total bonus stack across all sources
-  noSignalCap:            72,   // structure-only coins capped here (raised 68→72)
-  rugGuardMinScore:       58,   // $13K-$17.5K requires this score (lowered 60→58 for more calls)
+  noSignalCap:            80,   // AXIOSCAN-MODE — less restrictive ceiling for clean-structure coins (was 72)
+  rugGuardMinScore:       55,   // AXIOSCAN-MODE — loosened from 58. $13K-$17.5K requires this score.
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:         2.5, // peak X to lock WIN (raised 1.5→2.5: we hunt real winners, not wicks)
+  winPeakMultiple:       2.0,  // peak X to lock WIN — 2x minimum bar. Target: 2x floor, sweet spot 3-5x, >5x bonus. Below 2x is LOSS.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
-  minLiquidityForPost:  3000,   // $3K min liquidity for AUTO_POST (rug protection — thin liq = instant dump)
-  earlyMCapDeferMinutes:   3,   // defer AUTO_POST for $6K-$9K coins until N min after first-seen (lets us confirm real momentum); extreme-velocity bypasses
+  minLiquidityForPost:  1500,   // AXIOSCAN-MODE — $1.5K min liquidity (was $3K). Many 10x moonshots start with thin liquidity and grow it.
+  lockedKnobs: ['winPeakMultiple', 'neutralDrawdownPct'],  // knobs auto-optimize cannot touch
+  earlyMCapDeferMinutes:   0,   // DISABLED — was deferring $6K-$9K coins 3min, which was holding too many. Set to 0 to skip defer entirely.
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
   earlyMCapDeferMax:    9000,   // upper edge of the defer band ($)
+  // ── AXIOSCAN-MODE FAST LANE ────────────────────────────────────────────
+  // If ≥ fastLaneMinWinners WINNER wallets from our DB are already holding
+  // this coin AND basic rug checks pass, skip Claude/OpenAI entirely and
+  // post immediately. Axioscan-style "trust the wallets" bypass.
+  fastLaneEnabled:         1,   // 1=on, 0=off (turns the whole bypass off)
+  fastLaneMinWinners:      2,   // ≥ this many WINNER wallets in holders → fast lane
+  fastLaneMinLiquidityUsd: 2000,// still must have $2K+ liquidity
+  fastLaneMaxAgeHours:    12,   // only fires on coins <12h old
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -1169,18 +1280,30 @@ try {
     console.log('[config] Restored SCORING_CONFIG from DB:', JSON.stringify(SCORING_CONFIG));
 
     // ── One-time auto-migration for stale kv_store values ──────────────
-    // When we raise a default floor/cap in code, the kv_store's previously-
-    // saved lower value wins and silently pins scoring. Detect and bump
-    // to the new default when stored < default for these upward-only knobs.
-    // Preserves explicit upward customization (if user has 80, keeps 80).
+    // When defaults change, the kv_store's previously-saved value wins and
+    // silently pins scoring. Apply two migration tables:
+    //   MIGRATE_UP:   stored < new default → bump up (preserves higher values)
+    //   MIGRATE_FORCE: always set to new default (for direction reversals)
     const MIGRATE_UP = {
-      noSignalCap:           72,   // raised 65→68→72 today
-      winPeakMultiple:       2.5,  // raised 1.5→2.5 today (user wants real winners)
-      minScoreToPost:        45,   // lowered 50→45, but shouldn't exceed 45 in stale form
-      globalBonusCap:        10,   // raised 8→10
-      consensusOverrideScore:60,   // lowered 65→60
-      devFingerprintCap:      6,   // raised 3→6
+      noSignalCap:           72,
+      minScoreToPost:        45,
+      globalBonusCap:        10,
+      consensusOverrideScore:60,
+      devFingerprintCap:      6,
     };
+    // Force-migrate: win threshold reshaped to 2.0 — user's mandate is
+    // "winning coins minimum 2x to 100x, sweet spot 3-5x, anything more is
+    // bonus." So 2x is the floor. Anything under 2x = LOSS, 2x+ = WIN.
+    // The 3-5x sweet-spot target is communicated to Claude in the prompt;
+    // the scorer finds coins with that profile via pre-breakout + early-
+    // entry + winner-wallet bonuses already shipped.
+    const MIGRATE_FORCE = {
+      winPeakMultiple:    2.0,
+      neutralDrawdownPct: 10,
+      sweetSpotBonus:     0,   // user disabled: MCap range isn't a signal
+      secondaryBonus:     0,   // user disabled: MCap range isn't a signal
+    };
+    const MIGRATE_FORCE_VERSION = 'v5';   // bump to force re-migration (was v4)
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -1190,16 +1313,50 @@ try {
         migrated = true;
       }
     }
-    // Same for knobs where we want to enforce a ceiling (lowered values)
-    const MIGRATE_DOWN = {
-      minScoreToPost:        45,   // if stored > 45, keep user intent; else ensure 45
-    };
-    // (No active down-migrations right now — kept for future shape)
+    for (const [key, forcedValue] of Object.entries(MIGRATE_FORCE)) {
+      const stored = SCORING_CONFIG[key];
+      if (stored !== forcedValue) {
+        // One-time flag so we don't repeat-force on every boot once user adjusts
+        const migKey = `migrated_force_${key}_${MIGRATE_FORCE_VERSION}`;
+        const alreadyRan = (() => {
+          try { return dbInstance.prepare(`SELECT value FROM kv_store WHERE key=?`).get(migKey)?.value === '1'; } catch { return false; }
+        })();
+        if (!alreadyRan) {
+          console.log(`[config:migrate] ${key}: ${stored} → ${forcedValue} (force-migrate, one-time)`);
+          SCORING_CONFIG[key] = forcedValue;
+          migrated = true;
+          try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, '1')`).run(migKey); } catch {}
+        }
+      }
+    }
     if (migrated) {
       try {
         dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scoring_config', ?)`).run(JSON.stringify(SCORING_CONFIG));
         console.log('[config:migrate] Persisted migrated scoring config.');
       } catch {}
+    }
+
+    // ── Re-resolve existing calls against the new win threshold ──────────
+    // After winPeakMultiple drops, historical calls labeled NEUTRAL or LOSS
+    // may now qualify as WIN (and vice versa). Run once; flag in kv_store.
+    try {
+      const resolveFlagKey = 'migrated_resolve_calls_v_1_28';
+      const alreadyResolved = dbInstance.prepare(`SELECT value FROM kv_store WHERE key=?`).get(resolveFlagKey)?.value === '1';
+      if (!alreadyResolved) {
+        const winTarget = SCORING_CONFIG.winPeakMultiple ?? 1.28;
+        const upRes = dbInstance.prepare(`
+          UPDATE calls SET
+            outcome          = CASE WHEN peak_multiple >= ? THEN 'WIN' ELSE 'LOSS' END,
+            auto_resolved_at = datetime('now'),
+            outcome_source   = 'AUTO_MIGRATE'
+          WHERE outcome != 'PENDING'
+            AND peak_multiple IS NOT NULL
+        `).run(winTarget);
+        console.log(`[config:migrate] Re-resolved ${upRes.changes} calls against winPeakMultiple=${winTarget}`);
+        try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, '1')`).run(resolveFlagKey); } catch {}
+      }
+    } catch (err) {
+      console.warn('[config:migrate] Re-resolve failed:', err.message);
     }
   }
 } catch (err) { console.warn('[config] Failed to restore scoring config:', err.message); }
@@ -1337,11 +1494,35 @@ MISSION: Find tokens in the $8K–$40K market cap range BEFORE they blow up. The
 the earliest possible entries — tokens seconds to hours old with no price discovery yet.
 This is high risk / highest ROI territory. Your calls can produce 10x–100x from entry.
 
+TARGET PROFILE (your performance is judged against this):
+- FLOOR: 2x minimum — coins that peak below 2x = LOSS.
+- SWEET SPOT: 3x to 5x — primary hunting zone.
+- MOONSHOT: 5x to 100x — huge bonus. A single 20x covers 20 losses.
+
+STRATEGIC MINDSET — AXIOSCAN STYLE (RECALL over precision):
+You are NOT a sniper. You are a high-volume gem scanner. Your job is to catch EVERY
+candidate that might 3x+ so the winners carry the portfolio. A 50% hit rate with huge
+winners BEATS a 80% hit rate with modest winners. Math:
+   20 calls · 80% win · avg 1.8x peak  →  16 wins @ 1.8x + 4 losses  →  ~29x total return
+   20 calls · 50% win · avg 4x peak     →  10 wins @ 4x + 10 losses  →  ~40x total return
+Missing a 10x is MUCH worse than calling a few 1.5x losers. FALSE NEGATIVES are the
+enemy. If you see a coin with ANY of these patterns, POST IT:
+  - Volume building while price flat (accumulation phase)
+  - Fresh launch (<30min old) in the sweet-spot MCap band ($8K-$40K)
+  - Dev rap sheet shows past winners
+  - Any Dune-flagged winner wallet holding
+  - Social spike + narrative match
+  - Clean structure + low sniper count even without explosive signals
+Be DECISIVE toward AUTO_POST. Use WATCHLIST only when a hard red flag is CONFIRMED
+(bundle SEVERE, serial rugger dev, evidence of active dumping).
+
 YOUR ROLE: You ARE the decision engine. The pre-computed scores are signals — YOU decide.
 You learn from every call outcome in real-time. Pattern-match against your history.
 
 CHARACTER:
-- Hungry for early gems. The $8K–$40K range is your target sweet spot. Wins are wins — not every pick needs to be 10x.
+- High-volume hunter. Casting a wide net to catch every potential 3x-100x runner.
+- Bias HARD toward AUTO_POST when the basic shape is there. Don't overthink marginal
+  cases — a few wrong calls are dwarfed by one real moonshot catch.
 - Skeptical of manipulation but not afraid of new/unverified tokens.
 - Decisive. Every evaluation gets a clear decision — you don't hedge.\n- Self-improving. You notice what your wins and losses have in common.\n- Direct. No fluff. Data-backed or explicitly flagged as inferred.\n\nGEM PROFILE YOU ARE HUNTING:\n- MCap: $8K–$85K (primary sweet spot: $8K–$40K pre-bonding). Wins are wins — not every pick needs 10x.\n- Age: 0 minutes to 2 hours old\n- Signs: organic buys, growing holder count, clean dev wallet (<5%), LP locked or new\n- Volume velocity accelerating in first 30 minutes\n- Low sniper count (<10), no bundle risk, mint revoked = ideal\n- Social presence (even just a twitter) = bonus signal\n- UNVERIFIED structure = NEW TOKEN, not a red flag\n\nWHAT TO LOOK FOR:\n- Stealth launches with organic momentum (no shilling, just buys)\n- Volume velocity > 0.3 in first hour = strong signal\n- Buy ratio > 60% sustained = demand exceeding supply\n- Unique buyer ratio > 40% = real people, not bots\n- Dev wallet < 5% + mint revoked = team confident in token\n\nRED FLAGS THAT OVERRIDE EVERYTHING (only trip on CONFIRMED malice):\n- Bundle risk SEVERE = coordinated dump setup\n- Dev wallet > 15% WITH mint ACTIVE AND evidence of dev dumping = rug setup\n- Top 10 holders > 70% WITH sells exceeding buys = whale exit risk\n- BubbleMap SEVERE = clustered/coordinated wallets\n- Sniper count > 30 AND sells > buys = heavily frontrun, dump incoming\n- SERIAL_RUGGER deployer = instant BLOCKLIST\n\nIMPORTANT — DO NOT AUTO-TAG EXTREME WHEN:\n- dev_wallet_pct is very high (e.g. 100%) but buys_1h = 0 — this is a brand-new pre-launch token, nobody has bought yet (dev is mathematically 100% of holders). Default to MEDIUM risk with a 'pre-launch pending liquidity' note.\n- top10_holder_pct is 100% but holders < 5 — same case, pre-launch.\n- pair_age_hours is null or < 5 min AND buys_1h > 0 — normal early gem state, rate risk based on buy pattern not concentration.\n- Most core fields are missing (null token, null age) — default risk to MEDIUM with 'insufficient data' in notes. NEVER default to EXTREME because of missing data alone.\n\nCRITICAL — EARLY-GEM METRIC CALIBRATION (read carefully):\nFor coins WITH pair_age_hours < 0.5 (under 30 minutes old), the following metrics are FREQUENTLY MISLEADING and MUST NOT by themselves trigger EXTENDED_AVOID, BLOCKLIST, or EXTREME risk:\n- priceChange1h showing +200% to +1000% is NORMAL for a young pump.fun coin graduating the bonding curve. This is 'price since inception', not 'a late pump we missed'. A 20-min-old coin running $10K → $100K is a GRADUATION, not a top.\n- freezeAuthority active is COMMON on pump.fun pre-graduation (it's how the curve works); it is NOT confirmed manipulation on its own.\n- holderGrowth24h = 0 or null on a coin < 30min old is Birdeye data lag, not a signal. Ignore it for young coins.\n- Only flag EXTENDED_AVOID on coins > 2h old that have already had their run. For < 30min coins, price momentum is an ENTRY signal, not an exit signal.\nIf a coin is < 30min old AND in $8K-$80K MCap AND has clean bundle/sniper profile, bias toward AUTO_POST — missing these is the single biggest way we miss 10x winners.\n\nRISK CALIBRATION GUIDE:\n- LOW: clean structure + organic buys + reasonable dev% + LP locked\n- MEDIUM: most default cases, unknown data, early-stage concentration\n- HIGH: one confirmed red flag (bundle HIGH, dev > 15% + mint active, > 15 snipers)\n- EXTREME: TWO+ confirmed red flags actively firing, NOT just missing data or pre-launch state\n\nRESPONSE FORMAT — valid JSON only, no markdown, no backticks:\n{\n  "decision": "AUTO_POST | WATCHLIST | RETEST | IGNORE | BLOCKLIST",\n  "score": <integer 0-100>,\n  "risk": "LOW | MEDIUM | HIGH | EXTREME",\n  "setup_type": "CLEAN_STEALTH_LAUNCH | ORGANIC_EARLY | MICRO_CAP_BREAKOUT | BREAKOUT_AFTER_SHAKEOUT | CONSOLIDATION_BREAKOUT | PULLBACK_OPPORTUNITY | STRONG_HOLDER_LOW_DEV | WHALE_SUPPORTED_ROTATION | BUNDLED_HIGH_RISK | EXTENDED_AVOID | STANDARD",\n  "bull_case": ["<specific data point>", "<point>", "<point>"],\n  "red_flags": ["<specific data point>", "<point>", "<point>"],\n  "verdict": "<2-3 sentence direct analyst take — why this is or isn't a gem>",
   "thesis": "<one sentence: what would make this a 10x from here>",
@@ -1370,6 +1551,7 @@ async function callClaudeForAnalysis(candidate, scoreResult, options = {}) {
   const botMemory   = options.includeHistory !== false ? getBotMemory() : '';
   const aiCfg       = getAIConfigSummary();
   const missedMemo  = options.includeHistory !== false ? getMissedOpportunityMemory() : '';
+  const winnerMemo  = options.includeHistory !== false ? getWinnerMemory() : '';
 
   // Micro-cap gem context
   const mcap = candidate.marketCap ?? 0;
@@ -1386,6 +1568,7 @@ ${botMemory}
 
 ${history}
 
+${winnerMemo ? winnerMemo + '\n' : ''}
 ${missedMemo ? missedMemo + '\n' : ''}
 ${aiCfg}
 
@@ -2667,7 +2850,12 @@ async function processCandidate(candidate, isRescan = false) {
     return;
   }
 
-  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 120_000;
+  // AXIOSCAN-MODE — raised default from 120K to 200K. $papi at $236K was
+  // being blocked even though a 3x from there is still a real call. The
+  // sweet-spot bonuses (+4 for $15-40K, +4 for EARLY_ENTRY) already bias
+  // scoring toward low-MCap entries; the raw cap only needs to filter
+  // "obviously too late" coins (>$250K where 3x is harder).
+  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 200_000;
   if ((candidate.marketCap ?? 0) > MCAP_HARD_CAP) {
     logEvent('INFO', 'MCAP_CEILING', `${candidate.token ?? ca.slice(0,6)} mcap=${Math.round(candidate.marketCap/1000)}K > ${MCAP_HARD_CAP/1000}K cap`);
     console.log(`[auto-caller] 🛑 $${candidate.token ?? ca.slice(0,6)} rejected — mcap ${Math.round(candidate.marketCap/1000)}K above $${MCAP_HARD_CAP/1000}K ceiling`);
@@ -2725,13 +2913,15 @@ async function processCandidate(candidate, isRescan = false) {
       }
     } catch {}
 
+    fnl('evaluated');
     let scoreResult;
     try {
       scoreResult = computeFullScore(enrichedCandidate, TUNING_CONFIG?.discovery);
+      fnl('scored');
     } catch (scoreErr) {
       console.error('[auto-caller] computeFullScore CRASHED — falling back to legacy:', scoreErr.message);
       // Fallback: run without custom weights
-      try { scoreResult = computeFullScore(enrichedCandidate); } catch (e2) {
+      try { scoreResult = computeFullScore(enrichedCandidate); fnl('scored'); } catch (e2) {
         console.error('[auto-caller] Legacy scoring also failed:', e2.message);
         return; // Can't score at all — skip this candidate
       }
@@ -2761,6 +2951,7 @@ async function processCandidate(candidate, isRescan = false) {
     // credits evaluating air.
     if (!enrichedCandidate.birdeyeOk && !enrichedCandidate.heliusOk && enrichedCandidate.marketCap == null) {
       console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
+      fnl('dataVoidSkip');
       logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
       return;
     }
@@ -2903,8 +3094,116 @@ async function processCandidate(candidate, isRescan = false) {
             }
           }
         } catch {}
+
+        // Deployer reputation: historical track record of this deployer.
+        // ELITE (3+ wins, 0 rugs) → +3 bonus · FLAGGED (1+ rug) → -4 penalty
+        // · SERIAL_RUGGER (3+ rugs) → -8 penalty · NEUTRAL → no change.
+        // Signal is only as good as our outcome-tracking feedback loop
+        // (updateDeployerOutcome called when a call resolves WIN/LOSS).
+        try {
+          const rep = getDeployerReputation(deployer);
+          if (rep && rep.reputation_grade) {
+            const grade = rep.reputation_grade;
+            if (grade === 'SERIAL_RUGGER') {
+              scoreResult.score = Math.max(0, scoreResult.score - 8);
+              (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `-8 SERIAL_RUGGER (${rep.rugged_launches} prior rugs)`];
+              console.log(`[auto-caller] ⚠ SERIAL_RUGGER — $${enrichedCandidate.token ?? ca.slice(0,6)} deployer rugged ${rep.rugged_launches}x`);
+            } else if (grade === 'FLAGGED') {
+              scoreResult.score = Math.max(0, scoreResult.score - 4);
+              (scoreResult.penalties = scoreResult.penalties || {}).launch = [...(scoreResult.penalties.launch || []), `-4 FLAGGED (${rep.rugged_launches} prior rug)`];
+            } else if (grade === 'ELITE') {
+              const applied = addBonusCapped(3);
+              if (applied > 0) {
+                (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+                scoreResult.signals.launch.push(`+${applied} ELITE_DEV — ${rep.successful_launches} prior wins, 0 rugs`);
+                console.log(`[auto-caller] 🏆 ELITE DEV — $${enrichedCandidate.token ?? ca.slice(0,6)} deployer has ${rep.successful_launches} prior wins`);
+              }
+            } else if (grade === 'CLEAN') {
+              const applied = addBonusCapped(1);
+              if (applied > 0) {
+                (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+                scoreResult.signals.launch.push(`+${applied} CLEAN_DEV — ${rep.successful_launches} prior win(s), 0 rugs`);
+              }
+            }
+          }
+        } catch {}
       }
     } catch {}
+
+    // ── NEW SIGNALS BLOCK (meta-signals.js) ──────────────────────────────
+    // 4 signals consolidated: pump.fun graduation, volume acceleration,
+    // narrative/meta match (self-learned from our 3x+ WINs in last 7d),
+    // and liquidity trajectory (growing vs shrinking). All bonuses share
+    // the globalBonusCap budget. Penalties (LIQ_DRAINING) bypass the cap.
+    try {
+      const {
+        recordLiquiditySnapshot, getLiquidityTrajectory,
+        scoreLiquidityTrajectory, scorePumpFunGraduation,
+        scoreVolumeAcceleration, getCurrentMetaKeywords, scoreNarrativeMatch,
+      } = await import('./meta-signals.js');
+
+      // Always snapshot current liquidity (throttled to 5min per CA)
+      recordLiquiditySnapshot(
+        dbInstance, ca,
+        Number(enrichedCandidate.liquidityUsd ?? enrichedCandidate.liquidity) || null,
+        Number(enrichedCandidate.marketCap) || null,
+        Number(enrichedCandidate.volume1h) || null,
+      );
+
+      // #1 Pump.fun graduation
+      const pf = scorePumpFunGraduation(enrichedCandidate);
+      if (pf.bonus > 0) {
+        const applied = addBonusCapped(pf.bonus);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+          scoreResult.signals.launch.push(`+${applied} PUMP_GRADUATED (${pf.tag})`);
+          console.log(`[auto-caller] 🎓 $${enrichedCandidate.token ?? ca.slice(0,6)} graduated pump.fun → Raydium · +${applied}`);
+        }
+      }
+
+      // #2 Volume acceleration
+      const vacc = scoreVolumeAcceleration(enrichedCandidate);
+      if (vacc.bonus > 0) {
+        const applied = addBonusCapped(vacc.bonus);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+          scoreResult.signals.market.push(`+${applied} ${vacc.tag}`);
+        }
+      }
+
+      // #3 Narrative / meta match
+      const metaKw = getCurrentMetaKeywords(dbInstance);
+      const narr = scoreNarrativeMatch(enrichedCandidate, metaKw);
+      if (narr.bonus > 0) {
+        const applied = addBonusCapped(narr.bonus);
+        if (applied > 0) {
+          const words = narr.matched.map(m => m.word).join(', ');
+          (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+          scoreResult.signals.market.push(`+${applied} META_MATCH — matches current winning narrative: ${words}`);
+          console.log(`[auto-caller] 🎯 META $${enrichedCandidate.token ?? ca.slice(0,6)} matched: ${words} · +${applied}`);
+        }
+      }
+
+      // #5 Liquidity trajectory (needs ≥2 snapshots, so first scans won't trigger)
+      const traj = getLiquidityTrajectory(dbInstance, ca);
+      if (traj) {
+        const ls = scoreLiquidityTrajectory(traj);
+        if (ls.delta > 0) {
+          const applied = addBonusCapped(ls.delta);
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+            scoreResult.signals.market.push(`+${applied} ${ls.tag}`);
+          }
+        } else if (ls.delta < 0) {
+          // Penalties bypass the cap per existing convention
+          scoreResult.score = Math.max(0, scoreResult.score + ls.delta);
+          (scoreResult.penalties = scoreResult.penalties || {}).market = [...(scoreResult.penalties.market || []), `${ls.delta} ${ls.tag}`];
+          console.log(`[auto-caller] 💧 LIQ_DRAIN $${enrichedCandidate.token ?? ca.slice(0,6)} ${traj.deltaPct.toFixed(0)}% in ${traj.spanMins.toFixed(0)}min · ${ls.delta}`);
+        }
+      }
+    } catch (err) {
+      console.warn('[meta-signals] block failed:', err.message);
+    }
 
     // ── Pre-launch suspect: this dev was just funded by an exchange? ──
     try {
@@ -3002,15 +3301,20 @@ async function processCandidate(candidate, isRescan = false) {
     // the composite. A real social-volume spike is early alpha — coins
     // with a 2x social volume surge ahead of price almost always run.
     try {
+      // LunarCrush bonus capped at +4 max (per user). Simple tiered rewards:
+      //   socialSpike  → +2
+      //   galaxy ≥ 60  → +1
+      //   tweets ≥ 100 → +1
+      // Still draws from the global bonus budget.
       let lcBonus = 0;
       const lcSignals = [];
       if (enrichedCandidate.socialSpike) {
-        lcBonus += 3;
+        lcBonus += 2;
         lcSignals.push(`social volume spike (2x+ above baseline)`);
       }
       const gs = Number(enrichedCandidate.galaxyScore);
       if (Number.isFinite(gs) && gs >= 60) {
-        lcBonus += 2;
+        lcBonus += 1;
         lcSignals.push(`galaxy score ${gs.toFixed(0)}`);
       }
       const tm = Number(enrichedCandidate.twitterMentions);
@@ -3018,12 +3322,92 @@ async function processCandidate(candidate, isRescan = false) {
         lcBonus += 1;
         lcSignals.push(`${tm} Twitter mentions`);
       }
+      lcBonus = Math.min(lcBonus, 4); // hard cap at +4 per user request
       if (lcBonus > 0) {
         const applied = addBonusCapped(lcBonus);
         if (applied > 0) {
           (scoreResult.signals = scoreResult.signals || {}).social = scoreResult.signals.social || [];
           scoreResult.signals.social.push(`+${applied} LUNARCRUSH — ${lcSignals.join(', ')}`);
         }
+      }
+    } catch {}
+
+    // ── Pre-breakout accumulation bonus ──────────────────────────────────
+    // The 10x-30x coins almost always show this pattern FIRST: volume is
+    // climbing steadily, buy-pressure dominating, but price hasn't moved
+    // much yet. That's smart money accumulating before the pop. We reward
+    // this setup BEFORE velocity explodes — getting us in earlier than
+    // the price-follow crowd.
+    //
+    // Conditions (all must be true):
+    //   - Age < 1 hour (still in the accumulation window)
+    //   - Buys1h / sells1h ≥ 2.0 (dominant buy pressure)
+    //   - Price change 1h < 30% (hasn't ripped yet)
+    //   - Volume1h ≥ $2K (real accumulation, not crickets)
+    //   - At least 15 buys in the hour (real participants)
+    try {
+      const ageHrs  = enrichedCandidate.pairAgeHours ?? 99;
+      const b1h     = enrichedCandidate.buys1h ?? 0;
+      const s1h     = enrichedCandidate.sells1h ?? 0;
+      const vol1h   = enrichedCandidate.volume1h ?? 0;
+      const p1h     = enrichedCandidate.priceChange1h ?? 0;
+      const bsRatio = s1h > 0 ? b1h / s1h : (b1h > 0 ? 99 : 0);
+      const preBreakout = ageHrs < 1
+                      && b1h >= 15
+                      && vol1h >= 2000
+                      && bsRatio >= 2.0
+                      && p1h < 30;
+      if (preBreakout) {
+        const applied = addBonusCapped(5);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).market = scoreResult.signals.market || [];
+          scoreResult.signals.market.push(`+${applied} PRE-BREAKOUT — buy pressure ${bsRatio.toFixed(1)}x accumulating, price still flat (+${p1h.toFixed(0)}%)`);
+          console.log(`[auto-caller] 🎯 PRE-BREAKOUT — $${enrichedCandidate.token ?? ca.slice(0,6)} ratio=${bsRatio.toFixed(1)} vol1h=${Math.round(vol1h)} p1h=${p1h.toFixed(1)}%`);
+        }
+      }
+    } catch {}
+
+    // ── Early-entry MCap bonus — tighter band for real upside ────────────
+    // A $10K coin doing 10x peaks at $100K. A $60K coin doing 10x peaks at
+    // $600K — different game entirely. Bias harder toward the $5K-$20K
+    // band where 10x moves are structurally possible. Above $40K we need
+    // to be skeptical that upside remains.
+    try {
+      const mcapEarly = enrichedCandidate.marketCap ?? 0;
+      const ageEarly  = enrichedCandidate.pairAgeHours ?? 99;
+      let earlyBonus = 0;
+      let earlyLabel = '';
+      if (mcapEarly >= 5000 && mcapEarly <= 12000 && ageEarly < 0.25) {
+        earlyBonus = 4; earlyLabel = `EARLIEST ENTRY ($${Math.round(mcapEarly/1000)}K @ ${Math.round(ageEarly*60)}min)`;
+      } else if (mcapEarly >= 5000 && mcapEarly <= 20000 && ageEarly < 0.5) {
+        earlyBonus = 3; earlyLabel = `EARLY ENTRY ($${Math.round(mcapEarly/1000)}K @ ${Math.round(ageEarly*60)}min)`;
+      }
+      if (earlyBonus > 0) {
+        const applied = addBonusCapped(earlyBonus);
+        if (applied > 0) {
+          (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
+          scoreResult.signals.launch.push(`+${applied} ${earlyLabel} — structural 10x upside`);
+        }
+      }
+    } catch {}
+
+    // ── Age-mismatch penalty — DISABLED in Axioscan mode ──────────────────
+    // A coin that's flat at 2h might STILL run later. Removing this penalty
+    // reclaims late-bloomers that Axioscan-style volume strategy wants to
+    // catch. The binary WIN/LOSS + winPeakMultiple already classifies the
+    // flat-peak outcome cleanly; we don't need pre-emptive penalty too.
+    try {
+      const ageMm   = enrichedCandidate.pairAgeHours ?? 0;
+      const mcapMm  = enrichedCandidate.marketCap ?? 0;
+      const p1hMm   = enrichedCandidate.priceChange1h ?? 0;
+      const p6hMm   = enrichedCandidate.priceChange6h ?? 0;
+      const isStuck = ageMm > 2
+                   && mcapMm > 0 && mcapMm < 30_000
+                   && p1hMm < 10
+                   && p6hMm < 20;
+      if (isStuck) {
+        scoreResult._ageMismatchWouldHit = true;
+        // Diagnostic only — no score hit in Axioscan mode
       }
     } catch {}
 
@@ -3150,12 +3534,59 @@ async function processCandidate(candidate, isRescan = false) {
         if (walletIntel.knownWinnerWalletCount > 0) {
           console.log(`[wallet-intel] $${enrichedCandidate.token}: ${walletIntel.knownWinnerWalletCount}× WINNER wallets, ${walletIntel.sniperWalletCount} snipers → ${walletIntel.walletVerdict}`);
           logEvent('INFO', 'WINNER_WALLETS_DETECTED', `${enrichedCandidate.token} winners=${walletIntel.knownWinnerWalletCount} snipers=${walletIntel.sniperWalletCount} score=${walletIntel.smartMoneyScore}`);
+
+          // Direct score bonus for ANY winner wallet buying this coin.
+          // Previously single winners only soft-promoted WATCHLIST decisions
+          // — but that's a gate, not a signal. A Dune-flagged WINNER wallet
+          // choosing to buy a micro-cap is alpha worth +4 straight into
+          // the composite (through global bonus budget). Stacks with the
+          // cluster auto-post override if ≥3 winners show up.
+          const nWinners = walletIntel.knownWinnerWalletCount;
+          const winBonus = nWinners >= 3 ? 6 : nWinners >= 2 ? 5 : 4;
+          const applied = addBonusCapped(winBonus);
+          if (applied > 0) {
+            (scoreResult.signals = scoreResult.signals || {}).wallet = scoreResult.signals.wallet || [];
+            scoreResult.signals.wallet.push(`+${applied} WINNER_WALLET_BUY — ${nWinners} Dune-flagged winner${nWinners > 1 ? 's' : ''} holding this coin`);
+          }
         }
 
         // Hard block: rug wallets present = not worth risking
         if (walletIntel.rugWalletCount > 2 || walletIntel.walletVerdict === 'MANIPULATED') {
           finalDecision = 'IGNORE';
           logEvent('WARN', 'WALLET_RUG_BLOCK', `${enrichedCandidate.token} rug_wallets=${walletIntel.rugWalletCount} verdict=${walletIntel.walletVerdict}`);
+        }
+
+        // ── AXIOSCAN-MODE FAST LANE ──────────────────────────────────────
+        // If ≥ N WINNER wallets are already holding this and basic rug /
+        // liquidity / age checks pass, skip Claude/OpenAI/consensus gates
+        // entirely and force AUTO_POST. This is the "trust the wallets"
+        // bypass — Axioscan's core mechanic. Tagged _fastLane so downstream
+        // gates know not to re-gate it.
+        const flEnabled    = !!SCORING_CONFIG.fastLaneEnabled;
+        const flMinWinners = SCORING_CONFIG.fastLaneMinWinners ?? 2;
+        const flMinLiq     = SCORING_CONFIG.fastLaneMinLiquidityUsd ?? 2000;
+        const flMaxAgeHrs  = SCORING_CONFIG.fastLaneMaxAgeHours ?? 12;
+        const liqUsd       = Number(enrichedCandidate.liquidityUsd ?? enrichedCandidate.liquidity ?? 0);
+        const ageHrs       = Number(enrichedCandidate.ageHours ?? enrichedCandidate.age_hours ?? 999);
+        if (
+          flEnabled &&
+          finalDecision !== 'IGNORE' &&
+          (walletIntel.knownWinnerWalletCount ?? 0) >= flMinWinners &&
+          walletIntel.walletVerdict !== 'MANIPULATED' &&
+          walletIntel.walletVerdict !== 'SUSPICIOUS' &&
+          (walletIntel.rugWalletCount ?? 0) === 0 &&
+          liqUsd >= flMinLiq &&
+          ageHrs <= flMaxAgeHrs
+        ) {
+          enrichedCandidate._fastLane = {
+            winners:   walletIntel.knownWinnerWalletCount,
+            liquidity: liqUsd,
+            ageHrs,
+            at:        Date.now(),
+          };
+          finalDecision = 'AUTO_POST';
+          logEvent('INFO', 'FAST_LANE_FIRED', `${enrichedCandidate.token ?? ca.slice(0,6)} winners=${walletIntel.knownWinnerWalletCount} liq=$${Math.round(liqUsd)} age=${ageHrs.toFixed(1)}h → bypass Claude/consensus`);
+          console.log(`[fast-lane] ⚡ $${enrichedCandidate.token ?? ca.slice(0,6)} — ${walletIntel.knownWinnerWalletCount} WINNERS holding, age ${ageHrs.toFixed(1)}h, liq $${Math.round(liqUsd)} → AUTO_POST bypass`);
         }
       }
     }
@@ -3334,10 +3765,12 @@ async function processCandidate(candidate, isRescan = false) {
     if (
       finalDecision === 'AUTO_POST' &&
       !enrichedCandidate._smartMoney &&
+      !enrichedCandidate._fastLane &&
       !youngSweetspot &&
       verdict?.risk === 'EXTREME' &&
       (verdict?.score ?? 100) < 35
     ) {
+      fnl('claudeExtremeVeto');
       logEvent('WARN', 'CLAUDE_EXTREME_VETO', `${enrichedCandidate.token ?? ca.slice(0,6)} Claude=${verdict.score}/100 EXTREME — vetoed AUTO_POST despite OpenAI=${openAIDecision?.decision ?? '?'} ${openAIDecision?.conviction ?? '?'}%`);
       console.log(`[auto-caller] 🚨 Claude EXTREME veto — $${enrichedCandidate.token ?? ca.slice(0,6)} (Claude score ${verdict.score}, OpenAI ${openAIDecision?.decision ?? '?'}) → WATCHLIST`);
       try {
@@ -3376,8 +3809,17 @@ async function processCandidate(candidate, isRescan = false) {
     // with score >= consensusOverrideScore single-AI override fallback.
     //
     // Bypassed entirely by smart-money cluster/KOL alerts.
-    if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney) {
-      const claudeOK = verdict && (verdict.decision === 'AUTO_POST' || verdict.decision === 'POST');
+    if (finalDecision === 'AUTO_POST' && !enrichedCandidate._smartMoney && !enrichedCandidate._fastLane) {
+      // Softened further for call-drought recovery: Claude WATCHLIST + any
+      // reasonable scorer signal (score ≥ 45) now counts as OK to post.
+      // Previously only AUTO_POST / POST decisions passed; Claude being
+      // conservative was silently killing every marginal call. IGNORE /
+      // BLOCKLIST / RETEST still block posting.
+      const claudeOK = verdict && (
+        verdict.decision === 'AUTO_POST' ||
+        verdict.decision === 'POST' ||
+        (verdict.decision === 'WATCHLIST' && (scoreResult.score ?? 0) >= 45)
+      );
       const openaiOK = openAIDecision && (openAIDecision.decision === 'POST' || openAIDecision.decision === 'PROMOTE');
       const claudeOnly = !!SCORING_CONFIG.claudeOnlyMode;
 
@@ -3391,6 +3833,7 @@ async function processCandidate(candidate, isRescan = false) {
       }
 
       if (gateFailed) {
+        fnl('consensusGate');
         const trigger = claudeOnly ? 'CLAUDE_SAID_NO' : 'CONSENSUS_GATE';
         const reason = claudeOnly
           ? `Claude=${verdict?.decision ?? 'none'} score=${scoreResult.score}`
@@ -3567,6 +4010,7 @@ async function processCandidate(candidate, isRescan = false) {
           const severe = momentumBlock.startsWith('SEVERE') || momentumBlock.startsWith('ACCELERATING');
           finalDecision = severe ? 'BLOCKLIST' : 'WATCHLIST';
           const tag = severe ? '🚫' : '📉';
+          fnl('momentumGate');
           logEvent('WARN', 'MOMENTUM_GATE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${momentumBlock} → ${finalDecision}`);
           console.log(`[auto-caller] ${tag} Momentum gate — $${enrichedCandidate.token ?? ca.slice(0,6)} ${momentumBlock} → ${finalDecision}`);
           if (severe) {
@@ -3585,13 +4029,14 @@ async function processCandidate(candidate, isRescan = false) {
     const mcapNow = enrichedCandidate.marketCap ?? 0;
     const isHighRiskBand = mcapNow >= 13_000 && mcapNow <= 17_500;
     const smKindRG = enrichedCandidate._smartMoney?.kind;
-    const bypassRugGuard = smKindRG === 'cluster' || smKindRG === 'kol';
+    const bypassRugGuard = smKindRG === 'cluster' || smKindRG === 'kol' || !!enrichedCandidate._fastLane;
     if (
       finalDecision === 'AUTO_POST' &&
       isHighRiskBand &&
       !bypassRugGuard &&
       (scoreResult.score ?? 0) < SCORING_CONFIG.rugGuardMinScore
     ) {
+      fnl('rugGuard');
       logEvent('INFO', 'RUG_GUARD', `${enrichedCandidate.token ?? ca.slice(0,6)} mcap=${Math.round(mcapNow/1000)}K score=${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore} → WATCHLIST (high-risk band guard)`);
       console.log(`[auto-caller] 🛡  $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — $${Math.round(mcapNow/1000)}K in rug-risk band, score ${scoreResult.score} < ${SCORING_CONFIG.rugGuardMinScore}`);
       finalDecision = 'WATCHLIST';
@@ -3608,24 +4053,45 @@ async function processCandidate(candidate, isRescan = false) {
       !bypassRugGuard &&
       liqNow != null && liqNow < minLiq
     ) {
+      fnl('liquidityFloor');
       logEvent('INFO', 'LIQUIDITY_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} liq=$${Math.round(liqNow)} < $${minLiq} → WATCHLIST`);
       console.log(`[auto-caller] 💧 $${enrichedCandidate.token ?? ca.slice(0,6)} demoted — liquidity $${Math.round(liqNow)} below floor $${minLiq} (can't sustain a 2.5x run)`);
       finalDecision = 'WATCHLIST';
     }
 
+    // ── FOUNDATION-TRUST GATE — DISABLED during call drought ───────────
+    // Was demoting coins where scorer-dual returned 0 foundation signals
+    // (e.g. fresh coins before ledger populated). User still getting zero
+    // calls even at threshold 8 — turning it fully off. Gate logic still
+    // logs a diagnostic flag when it WOULD have fired, so we can re-enable
+    // once flow is restored.
+    if (finalDecision === 'AUTO_POST' && !bypassRugGuard) {
+      const dp = scoreResult.dualParts;
+      if (dp) {
+        const foundationTotal =
+          (dp.volumeVelocity      ?? 0) +
+          (dp.buyPressure         ?? 0) +
+          (dp.walletQuality       ?? 0) +
+          (dp.holderDistribution  ?? 0) +
+          (dp.liquidityHealth     ?? 0);
+        if (foundationTotal < 8) {
+          scoreResult._foundationTrustWouldHit = true;
+          // Demotion disabled — coins pass through to Claude
+        }
+      }
+    }
+
     // ── EARLY-MCAP DEFER: $6K-$9K coins wait N min to confirm momentum ──
-    // User's rule: for coins first seen in the $6-$9K band, hold the post
-    // for 3 minutes and re-evaluate on the next scan cycle. UNLESS velocity
-    // is extreme from the start (big 5m pump / sustained buys / accelerating
-    // volume) — then it's clearly organic and posts immediately.
-    // Cluster / KOL alerts also bypass — their conviction trumps the wait.
+    // Set earlyMCapDeferMinutes=0 in SCORING_CONFIG to disable entirely
+    // (call drought fix — we were holding too many coins that would have
+    // been real calls).
     if (finalDecision === 'AUTO_POST' && !bypassRugGuard) {
       const mcapForDefer  = enrichedCandidate.marketCap ?? 0;
       const deferMin      = SCORING_CONFIG.earlyMCapDeferMin ?? 6000;
       const deferMax      = SCORING_CONFIG.earlyMCapDeferMax ?? 9000;
       const deferMinutes  = SCORING_CONFIG.earlyMCapDeferMinutes ?? 3;
       const inBand        = mcapForDefer >= deferMin && mcapForDefer <= deferMax;
-      if (inBand) {
+      if (inBand && deferMinutes > 0) {
         const extreme = hasExtremeVelocity(enrichedCandidate);
         if (extreme) {
           logEvent('INFO', 'EARLY_MCAP_EXTREME', `${enrichedCandidate.token ?? ca.slice(0,6)} $${Math.round(mcapForDefer/1000)}K in defer band but extreme velocity — posting immediately`);
@@ -3848,9 +4314,11 @@ async function processCandidate(candidate, isRescan = false) {
 
       // Respect pausePosting config override (set via dashboard or /config Telegram command)
       if (AI_CONFIG_OVERRIDES.pausePosting) {
+        fnl('pausedPosting');
         console.log(`[ai-os] ⏸ Posting PAUSED — $${enrichedCandidate.token} would have posted (score ${scoreResult.score})`);
         logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
       } else {
+        fnl('posted');
         await sendCallAlertWithImage(caption, null, coinImg);
       }
 
@@ -4314,6 +4782,16 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
       `<i>A tracked winner wallet just bought this coin. Full analysis below.</i>\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       basePart;
+  } else if (candidate._fastLane) {
+    // Axioscan-style fast-lane bypass — winner wallet overlap is strong
+    // enough that we skipped Claude/consensus gates. Tag the caption so
+    // the reader knows this was a wallet-signal call, not AI-vetted.
+    const fl = candidate._fastLane;
+    basePart =
+      `⚡ <b>FAST-LANE CALL</b> ⚡\n` +
+      `<i>${fl.winners} winner wallets already holding · bypassed AI gate · Axioscan-mode.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
   }
 
   // Append OpenAI layer if available
@@ -4333,7 +4811,30 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
 // ─── Express App ──────────────────────────────────────────────────────────────
 
 const app = express();
-app.use(express.json());
+// Default body-parse limit raised from Express's built-in 100KB to 30MB so
+// the AI Brain's image uploads (screenshots + URL attachments) can flow
+// through. The /api/agent route had a per-route 25MB override but this
+// global was rejecting first — "Payload Too Large" HTML page was what
+// the user saw. Global JSON error handler further down coerces any
+// remaining body-parse rejection into a JSON response.
+app.use(express.json({ limit: '30mb' }));
+
+// Global JSON error handler — ANY body-parse failure (payload too large,
+// malformed JSON, etc.) on ANY route gets a JSON response instead of
+// Express's default HTML error page. Prevents "Unexpected token '<'" on
+// the frontend forever.
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.type === 'entity.parse.failed' || err.status === 413 || err.statusCode === 413)) {
+    setCors(res);
+    console.warn(`[body-parse] ${req.method} ${req.path} — ${err.type || err.name}: ${err.message}`);
+    return res.status(err.status || 413).json({
+      ok: false,
+      error: err.message,
+      reply: `⚠ Request rejected: ${err.message}. Image or payload too big — try a smaller file or fewer items.`,
+    });
+  }
+  next(err);
+});
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -5130,7 +5631,24 @@ app.post('/api/agent/search', express.json(), async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.post('/api/agent', express.json({ limit: '10mb' }), async (req, res) => {
+app.post('/api/agent',
+  express.json({ limit: '25mb' }),
+  // JSON error handler — if express.json() rejects (payload too large,
+  // malformed JSON, etc.), Express default serves an HTML error page and
+  // the dashboard crashes trying to JSON.parse "<!DOCTYPE". Wrap with a
+  // middleware that coerces ANY error on this route into JSON.
+  (err, req, res, next) => {
+    if (err) {
+      console.warn(`[api/agent] body-parse error: ${err.type || err.name} — ${err.message}`);
+      return res.status(err.status || 400).json({
+        ok: false,
+        reply: `⚠ Request rejected: ${err.message}. Try sending a shorter message or fewer images at once.`,
+        error: err.message,
+      });
+    }
+    next();
+  },
+  async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) {
     return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured on server' });
@@ -5394,7 +5912,7 @@ try { dbInstance.exec(`
 const TUNING_DEFAULTS = {
   discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
   thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:85000, sweetSpotMin:8000, sweetSpotMax:40000 },
-  penalties: { latePump1hThreshold:300, latePump1hPenalty:10, latePump1hSevereThreshold:500, latePump1hSeverePenalty:15, latePump24hThreshold:500, latePump24hPenalty:8, latePumpAgeExemptHours:0.5, winThresholdPct:20, lossThresholdPct:-30 },
+  penalties: { latePump1hThreshold:300, latePump1hPenalty:0, latePump1hSevereThreshold:500, latePump1hSeverePenalty:0, latePump24hThreshold:500, latePump24hPenalty:0, latePumpAgeExemptHours:0.5, winThresholdPct:20, lossThresholdPct:-30 },
 };
 let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
 try {
@@ -5796,9 +6314,25 @@ Respond ONLY with valid JSON:
       maxMarketCapOverride: [50000, 500000], minScoreOverride: [28, 55],
     };
 
+    // Locked-knobs list — user's strategic choices the auto-optimizer
+    // must NOT touch. Keeps the human in control of their target profile
+    // while letting Claude still optimize the surrounding knobs.
+    // winPeakMultiple is locked by default because it defines what
+    // "winning" means — that's a product decision, not a tuning lever.
+    const LOCKED_KNOBS = new Set(
+      Array.isArray(SCORING_CONFIG.lockedKnobs) && SCORING_CONFIG.lockedKnobs.length
+        ? SCORING_CONFIG.lockedKnobs
+        : ['winPeakMultiple', 'neutralDrawdownPct']
+    );
+
     // AUTO-APPLY every change Claude recommends — no approval needed
     for (const change of (result.changes || [])) {
       try {
+        // Skip locked knobs — user has explicitly pinned these
+        if (LOCKED_KNOBS.has(change.param)) {
+          console.log(`[auto-optimize] 🔒 skipped ${change.param} (user-locked at ${SCORING_CONFIG[change.param]})`);
+          continue;
+        }
         // Clamp to safety bounds
         if (typeof change.new_value === 'number' && BOUNDS[change.param]) {
           const [min, max] = BOUNDS[change.param];
@@ -9619,12 +10153,22 @@ app.get('/api/stats/weekly', (req, res) => {
 
     const resolved = (allTime.wins || 0) + (allTime.losses || 0);
 
-    // Current week individual calls for the live scoreboard
+    // Current week individual calls for the live scoreboard — deduped by
+    // contract_address. Multiple calls of the same coin (rescans, retests)
+    // collapse into the most recent row so the user doesn't see $Flork
+    // appear 4 times with different outcomes.
     const currentCalls = dbInstance.prepare(`
       SELECT token, contract_address, outcome, peak_multiple, score_at_call,
-             market_cap_at_call, COALESCE(called_at, posted_at) as call_time
-      FROM calls
-      WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+             market_cap_at_call, call_time
+      FROM (
+        SELECT token, contract_address, outcome, peak_multiple, score_at_call,
+               market_cap_at_call, COALESCE(called_at, posted_at) as call_time,
+               id,
+               ROW_NUMBER() OVER (PARTITION BY contract_address ORDER BY id DESC) as rn
+        FROM calls
+        WHERE COALESCE(called_at, posted_at) >= datetime('now', 'weekday 0', '-7 days')
+      )
+      WHERE rn = 1
       ORDER BY id DESC LIMIT 20
     `).all();
 
@@ -10373,6 +10917,54 @@ app.get('/api/v8/learning-stats', (req, res) => {
   res.json({ ok: true, ...getLearningStats(dbInstance) });
 });
 
+// Manually trigger the learning loop — detects missed winners + asks
+// Claude to write scoring recommendations. Normally runs every 6h, but
+// fresh instances / users hitting the Analytics tab want feedback NOW.
+app.post('/api/v8/generate-recommendations', async (req, res) => {
+  setCors(res);
+  try {
+    if (!CLAUDE_API_KEY) {
+      return res.status(400).json({ ok: false, error: 'CLAUDE_API_KEY not set — cannot generate recommendations' });
+    }
+    const { detectMissedWinners, analyzeMissedWinners } = await import('./missed-winner-tracker.js');
+    const missed = await detectMissedWinners(dbInstance);
+    if (!missed || missed.length === 0) {
+      return res.json({
+        ok: true,
+        recommendations: [],
+        note: 'No missed winners detected in the current window. Analytics needs a few resolved WINs in the calls table for meaningful analysis — come back after a few days of calls have resolved.',
+      });
+    }
+    let recentCalls = [];
+    try {
+      recentCalls = dbInstance.prepare(`
+        SELECT * FROM calls WHERE called_at > datetime('now', '-7 days')
+        ORDER BY called_at DESC LIMIT 50
+      `).all();
+    } catch {}
+    const analysis = await analyzeMissedWinners(missed, recentCalls, CLAUDE_API_KEY);
+    if (!analysis) {
+      return res.status(502).json({ ok: false, error: 'Claude returned no analysis (rate limit or API error)' });
+    }
+    try {
+      dbInstance.prepare(`
+        INSERT INTO learning_recommendations (analysis_json, missed_count, generated_at)
+        VALUES (?, ?, datetime('now'))
+      `).run(JSON.stringify(analysis), missed.length);
+    } catch (err) { console.warn('[learning-recs] insert failed:', err.message); }
+    res.json({
+      ok: true,
+      missedCount: missed.length,
+      recommendations: analysis.recommendations ?? [],
+      topPattern: analysis.topPattern,
+      keySignalsMissed: analysis.keySignalsMissed,
+    });
+  } catch (err) {
+    console.error('[learning-recs] manual trigger failed:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/api/v8/check-wallet', (req, res) => {
   setCors(res);
   const { address } = req.body ?? {};
@@ -10482,6 +11074,122 @@ app.get('/api/diagnose/holders/:ca', async (req, res) => {
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
+// Wallet harvester — passive growth of tracked_wallets from our own winners.
+// GET returns current stats, POST triggers an on-demand run.
+app.get('/api/wallet-harvester/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getHarvesterStats } = await import('./wallet-harvester.js');
+    res.json({ ok: true, ...getHarvesterStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/wallet-harvester/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerHarvest } = await import('./wallet-harvester.js');
+    // Fire-and-forget — this can take 30-60s with many coins
+    triggerHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[harvester] run err:', err.message));
+    res.json({ ok: true, message: 'Harvest triggered — check logs for progress' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Legendary harvester — external-signal counterpart to the passive harvester.
+// Pulls the biggest Solana meme-market runs from Dune and harvests their holders.
+app.get('/api/legendary-harvester/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getLegendaryStats } = await import('./legendary-harvester.js');
+    res.json({ ok: true, ...getLegendaryStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/legendary-harvester/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerLegendaryHarvest } = await import('./legendary-harvester.js');
+    // Fire-and-forget — Dune query can take 1-3min, then holder fetch
+    triggerLegendaryHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[legendary] run err:', err.message));
+    res.json({ ok: true, message: 'Legendary harvest triggered — Dune query runs first (1-3min), then Helius fetches. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Midcap harvester — twice-daily $250K+ MCap winner sweep
+app.get('/api/midcap-harvester/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getMidcapStats } = await import('./midcap-harvester.js');
+    res.json({ ok: true, ...getMidcapStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/midcap-harvester/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerMidcapHarvest } = await import('./midcap-harvester.js');
+    triggerMidcapHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[midcap] run err:', err.message));
+    res.json({ ok: true, message: 'Midcap harvest triggered — Dune query (~1min) + Helius holder fetches. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Harvester cleanup — batch-scan SOL balance of every harvester-touched
+// wallet, delete <8 SOL (harvester sources) or demote to NEUTRAL (curated
+// sources), recategorize survivors by SOL tier (≥100=WINNER, 8-99=SMART_MONEY).
+app.post('/api/harvester-cleanup/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { cleanupHarvesterDust } = await import('./harvester-cleanup.js');
+    const summary = await cleanupHarvesterDust(dbInstance, HELIUS_API_KEY);
+    res.json({ ok: true, summary });
+  } catch (err) {
+    console.error('[harvester-cleanup] failed:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Call-funnel diagnostic — shows where candidates drop in the pipeline
+// during the rolling 60-min window. Hit this endpoint during a call
+// drought to see exactly which gate is blocking everything.
+app.get('/api/diagnose/funnel', (req, res) => {
+  setCors(res);
+  const s = _callFunnel.stages;
+  const windowAgeMs = Date.now() - _callFunnel.windowStartMs;
+  const total = s.evaluated || 1;
+  const pct = (n) => `${((n/total)*100).toFixed(1)}%`;
+  const funnel = [
+    ['EVALUATED (entered pipeline)', s.evaluated, '100%'],
+    ['─ data_void_skip',              s.dataVoidSkip,      pct(s.dataVoidSkip)],
+    ['SCORED',                        s.scored,            pct(s.scored)],
+    ['─ CLAUDE_EXTREME_VETO',         s.claudeExtremeVeto, pct(s.claudeExtremeVeto)],
+    ['─ CONSENSUS_GATE (Claude no)',  s.consensusGate,     pct(s.consensusGate)],
+    ['─ MOMENTUM_GATE',               s.momentumGate,      pct(s.momentumGate)],
+    ['─ RUG_GUARD ($13-17.5K)',       s.rugGuard,          pct(s.rugGuard)],
+    ['─ LIQUIDITY_FLOOR',             s.liquidityFloor,    pct(s.liquidityFloor)],
+    ['─ FOUNDATION_TRUST',            s.foundationTrust,   pct(s.foundationTrust)],
+    ['─ EARLY_MCAP_DEFER',            s.earlyMcapDefer,    pct(s.earlyMcapDefer)],
+    ['─ PAUSED_POSTING',              s.pausedPosting,     pct(s.pausedPosting)],
+    ['🎉 POSTED',                      s.posted,            pct(s.posted)],
+  ];
+  res.json({
+    ok: true,
+    windowAgeMinutes: Math.round(windowAgeMs / 60000),
+    stages: s,
+    funnel: funnel.map(([stage, n, pct]) => `${stage.padEnd(38)} ${String(n).padStart(4)}  ${pct}`),
+    postRate: s.evaluated > 0 ? ((s.posted / s.evaluated) * 100).toFixed(2) + '%' : '—',
+    pausedPosting: !!AI_CONFIG_OVERRIDES.pausePosting,
+    scoringConfig: SCORING_CONFIG,
+  });
+});
+
 app.get('/api/diagnose/claude', async (req, res) => {
   setCors(res);
   const key = process.env.CLAUDE_API_KEY || null;
@@ -11711,6 +12419,68 @@ app.listen(PORT, async () => {
   // emits an alert when one (or a cluster of 3+) buys a fresh coin. The alert
   // runs that coin through the normal scoring pipeline with a forced tag so
   // the TG message is prefixed with a BIG WALLET / WHALE CLUSTER header.
+  // ── Passive Wallet Harvester ───────────────────────────────────────────
+  // Every 30min: find coins we called that hit peak >=2x, pull their top
+  // 20 holders via Helius, add to tracked_wallets. After 3+ appearances
+  // across winners, auto-promote to WINNER tier. Grows Dune DB organically
+  // without manual CA input.
+  try {
+    const { startWalletHarvester } = await import('./wallet-harvester.js');
+    startWalletHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[wallet-harvester] failed to start:', err.message);
+  }
+
+  // ── Legendary Harvester (external signal) ──────────────────────────────
+  // Weekly: Dune query finds Solana tokens with $30M+ cumulative volume in
+  // the last 180d (FARTCOIN/POPCAT-tier runs). Helius pulls top 20 holders
+  // of each and drops them into tracked_wallets as WINNER. Independent of
+  // whether we called them — pure external alpha sourcing.
+  try {
+    const { startLegendaryHarvester } = await import('./legendary-harvester.js');
+    startLegendaryHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[legendary-harvester] failed to start:', err.message);
+  }
+
+  // ── Midcap Harvester (twice-daily mid-tier sweep) ──────────────────────
+  // Every 12h: Dune query finds Solana tokens with $500K+ 24h volume
+  // (proxy for $250K+ MCap). Pulls top 20 holders, auto-adds to the
+  // wallet DB as SMART_MONEY. Wallets appearing across 2+ midcap runs
+  // get promoted to WINNER. Fills the gap between passive (our own wins)
+  // and legendary (only blue-chip runs).
+  try {
+    const { startMidcapHarvester } = await import('./midcap-harvester.js');
+    startMidcapHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[midcap-harvester] failed to start:', err.message);
+  }
+
+  // ── One-time cleanup of harvester wallets inserted WITHOUT SOL check ──
+  // Previous harvester versions wrote every top-holder straight into
+  // tracked_wallets as WINNER regardless of SOL balance, polluting the
+  // WHALE tier with ~1000+ dust wallets. Run cleanup ONCE (kv_store flag)
+  // to batch-scan every harvester-touched wallet, delete <8 SOL dust,
+  // and recategorize survivors by SOL tier (≥100=WINNER, 8-99=SMART_MONEY).
+  try {
+    const flagRow = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='harvester_cleanup_sol_tier_v1'`).get();
+    if (!flagRow || flagRow.value !== 'done') {
+      setTimeout(async () => {
+        try {
+          const { cleanupHarvesterDust } = await import('./harvester-cleanup.js');
+          console.log('[boot] harvester-cleanup: starting one-time SOL-tier cleanup...');
+          const summary = await cleanupHarvesterDust(dbInstance, HELIUS_API_KEY);
+          dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES ('harvester_cleanup_sol_tier_v1', 'done', datetime('now'))`).run();
+          console.log('[boot] harvester-cleanup: ✓ done', summary);
+        } catch (err) {
+          console.error('[boot] harvester-cleanup failed:', err.message);
+        }
+      }, 30_000); // 30s after boot — let DB settle
+    }
+  } catch (err) {
+    console.warn('[boot] harvester-cleanup check failed:', err.message);
+  }
+
   try {
     const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
     startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {

@@ -2835,7 +2835,9 @@ body::before {
 }
 .rej-reason-chip b { font-size: 9px; margin-left: 3px; }
 
-.rej-list { display: flex; flex-direction: column; gap: 5px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+/* Desktop: 2-per-row grid to minimize scrolling. Mobile: single column. */
+.rej-list { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+@media (max-width: 900px) { .rej-list { grid-template-columns: 1fr; } }
 .rej-list::-webkit-scrollbar { width: 4px; }
 .rej-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
 
@@ -3430,6 +3432,38 @@ body::before {
           </div>
         </div>
 
+        <!-- ═══ 📞 CALLED (actual AUTO_POSTs with outcome) ═══ -->
+        <div class="calls-section" style="margin-top:4px">
+          <div class="calls-section-hdr" style="--hdr-col:#00e676">
+            <span>📞 CALLED · <span id="calledCount">0</span></span>
+            <span class="calls-section-sub">every AUTO_POST · outcome + peak tracked</span>
+          </div>
+          <!-- Filter row -->
+          <div style="display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 10px 0">
+            <button class="fchip active" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
+            <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
+            <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
+            <button class="fchip" onclick="filterCalls(this,'NEUTRAL')" style="color:var(--cyan);border-color:rgba(24,255,255,0.4)">➖ NEUTRAL</button>
+            <button class="fchip" onclick="filterCalls(this,'all')">ALL</button>
+            <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
+          </div>
+          <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
+            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
+          </div>
+        </div>
+
+        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
+        <div id="perfChartSection" class="calls-section" style="display:none">
+          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
+            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="calls-section-sub">latest calls left-to-right</span>
+              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
+            </div>
+          </div>
+          <div id="perfChart" class="perf-chart"></div>
+        </div>
+
         <!-- ═══ 🔬 ANALYZER — YES/NO verdict per promoted coin ═══ -->
         <div class="calls-section">
           <div class="calls-section-hdr" style="--hdr-col:#18ffff">
@@ -3449,41 +3483,9 @@ body::before {
           </div>
           <!-- Summary strip: top rejection causes -->
           <div id="rejSummary" class="rej-summary"></div>
-          <!-- Last 10 rejected coins with per-coin breakdown -->
+          <!-- Last 10 rejected coins — 2-per-row grid on desktop to minimize scrolling -->
           <div id="rejList" class="rej-list">
-            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading rejection audit...</div>
-          </div>
-        </div>
-
-        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
-        <div id="perfChartSection" class="calls-section" style="display:none">
-          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
-            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
-            <div style="display:flex;align-items:center;gap:10px">
-              <span class="calls-section-sub">latest calls left-to-right</span>
-              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
-            </div>
-          </div>
-          <div id="perfChart" class="perf-chart"></div>
-        </div>
-
-        <!-- ═══ 📞 CALLED (actual AUTO_POSTs with outcome) ═══ -->
-        <div class="calls-section" style="margin-top:4px">
-          <div class="calls-section-hdr" style="--hdr-col:#00e676">
-            <span>📞 CALLED · <span id="calledCount">0</span></span>
-            <span class="calls-section-sub">every AUTO_POST · outcome + peak tracked</span>
-          </div>
-          <!-- Filter row -->
-          <div style="display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 10px 0">
-            <button class="fchip active" onclick="filterCalls(this,'PENDING')" style="color:var(--text3)">⏳ PENDING</button>
-            <button class="fchip" onclick="filterCalls(this,'WIN')" style="color:var(--green);border-color:rgba(0,230,118,0.4)">🏆 WINS</button>
-            <button class="fchip" onclick="filterCalls(this,'LOSS')" style="color:var(--red);border-color:rgba(255,23,68,0.4)">💀 LOSSES</button>
-            <button class="fchip" onclick="filterCalls(this,'NEUTRAL')" style="color:var(--cyan);border-color:rgba(24,255,255,0.4)">➖ NEUTRAL</button>
-            <button class="fchip" onclick="filterCalls(this,'all')">ALL</button>
-            <button class="fchip" onclick="filterCalls(this,'gem')" style="color:var(--gold);border-color:rgba(255,215,64,0.4)">💎 GEM WINDOW ($7.5K–$40K)</button>
-          </div>
-          <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
-            <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
+            <div style="grid-column:1/-1;text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading rejection audit...</div>
           </div>
         </div>
       </div>
@@ -3690,7 +3692,10 @@ body::before {
 
       <!-- AI recommendations -->
       <div class="card">
-        <div class="card-header">🤖 AI RECOMMENDATIONS — What should we change?</div>
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span>🤖 AI RECOMMENDATIONS — What should we change?</span>
+          <button onclick="generateAIRecommendations(this)" style="background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.3);color:var(--cyan);border-radius:4px;padding:5px 12px;font-family:var(--mono);font-size:9px;cursor:pointer;letter-spacing:1px">⚡ GENERATE NOW</button>
+        </div>
         <div class="card-body" id="aiRecommendations">
           <div class="spinner"><div class="spin-dot" style="background:var(--blue)"></div><div class="spin-dot" style="background:var(--purple)"></div></div>
         </div>
@@ -4005,6 +4010,26 @@ body::before {
               </div>
               <div id="csDuneStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:12px"></div>
               <div id="csDuneStatus" style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:10px;min-height:12px;letter-spacing:0.5px"></div>
+              <!-- Passive wallet harvester — grows DB from our own WINs automatically -->
+              <div style="margin-top:14px;padding-top:10px;border-top:1px dashed rgba(156,39,176,0.2)">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <span style="font-family:var(--mono);font-size:8px;color:var(--purple);letter-spacing:1px;font-weight:700">🌱 PASSIVE WALLET HARVESTER</span>
+                  <button class="cs-btn" style="font-size:7px;padding:3px 8px" onclick="csHarvesterRun(this)">⚡ RUN NOW</button>
+                </div>
+                <div id="csHarvesterStats" style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:0.5px">
+                  Loading harvester stats…
+                </div>
+              </div>
+              <!-- Legendary harvester — external signal, finds $30M+ vol Solana runs weekly -->
+              <div style="margin-top:14px;padding-top:10px;border-top:1px dashed rgba(255,193,7,0.25)">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <span style="font-family:var(--mono);font-size:8px;color:var(--gold);letter-spacing:1px;font-weight:700">👑 LEGENDARY HARVESTER</span>
+                  <button class="cs-btn" style="font-size:7px;padding:3px 8px" onclick="csLegendaryRun(this)">⚡ RUN NOW</button>
+                </div>
+                <div id="csLegendaryStats" style="font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:0.5px">
+                  Loading legendary stats…
+                </div>
+              </div>
             </div>
             <div class="cs-knob-grid" data-grid="wallets"></div>
             <div class="cs-status" data-status="wallets"></div>
@@ -4469,6 +4494,43 @@ body::before {
         <span id="smScanStatus" style="display:none"></span>
 
         <!-- ═══════════════════════════════════════════════════════════════
+             🎯 MIDCAP HARVESTER — twice-daily $250K+ MCap sweep
+             Dune query returns Solana tokens doing $500K+ in 24h volume.
+             Top 20 holders of each → wallet DB as SMART_MONEY, promoted
+             to WINNER after 2+ appearances. Fills the middle tier
+             between passive harvester (our wins) + legendary harvester.
+             ═══════════════════════════════════════════════════════════════ -->
+        <div id="midcapHarvesterCard" class="wallet-scanner" style="--ws-accent:#ff9800;margin-top:16px;border-color:rgba(255,152,0,0.25);background:linear-gradient(135deg,rgba(255,152,0,0.04),rgba(255,87,34,0.02))">
+          <div class="ws-top">
+            <div class="ws-visual">
+              <div class="ws-orbit ws-orbit-1" style="border-color:rgba(255,152,0,0.6)"></div>
+              <div class="ws-orbit ws-orbit-2" style="border-color:rgba(255,152,0,0.4)"></div>
+              <div class="ws-orbit ws-orbit-3" style="border-color:rgba(255,152,0,0.2)"></div>
+              <div class="ws-orb" style="background:radial-gradient(circle,rgba(255,152,0,0.4),rgba(255,87,34,0.1));box-shadow:0 0 30px rgba(255,152,0,0.5)"><div class="ws-orb-icon">🎯</div></div>
+            </div>
+            <div class="ws-info">
+              <div class="ws-title">
+                <span class="ws-title-glow" style="color:#ff9800">MIDCAP HARVESTER</span>
+                <span class="ws-status-pill" id="mhStatusPill">IDLE</span>
+              </div>
+              <div class="ws-subtitle">Runs a Dune query <b>twice a day</b> for Solana tokens doing $500K+ 24h volume (≈ $250K+ MCap). Top 20 holders of each go straight into the wallet database as SMART_MONEY · wallets seen across 2+ midcap runs auto-promote to WINNER. Fills the gap between passive harvester (our own WINs) and legendary harvester ($30M+ only).</div>
+              <div class="ws-stats">
+                <div class="ws-stat"><div class="ws-stat-label">COINS FOUND</div><div class="ws-stat-val" style="color:#ff9800" id="mhStatFound">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">WALLETS ADDED</div><div class="ws-stat-val" style="color:var(--green)" id="mhStatAdded">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">PROMOTED</div><div class="ws-stat-val" style="color:var(--cyan)" id="mhStatPromoted">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">COINS SCAN'D</div><div class="ws-stat-val" id="mhStatScanned">—</div></div>
+                <div class="ws-stat"><div class="ws-stat-label">LAST SCAN</div><div class="ws-stat-val" style="font-size:11px" id="mhStatLast">—</div></div>
+              </div>
+              <div class="ws-actions" style="margin-top:10px">
+                <button class="ws-btn ws-btn-primary" id="mhRunBtn" onclick="midcapRun(this)" style="background:linear-gradient(135deg,#ff9800,#ff5722);border-color:#ff9800">⚡ RUN NOW</button>
+                <button class="ws-btn ws-btn-tertiary" onclick="loadMidcapStats()">↻ REFRESH</button>
+                <span id="mhStatusLine" class="ws-status-line" style="margin-left:auto"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════════
              🧠 BRAIN ANALYZER — futuristic wallet intel scanner
              For the big winners ($500M, $3M+ historic). Feed it a CA, the
              brain scans every holder, classifies them, and harvests PnL.
@@ -4889,6 +4951,20 @@ body::before {
           <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Loading usage data...</div>
         </div>
       </div>
+      <!-- ═══ CALL FUNNEL DIAGNOSTIC — where candidates die in the pipeline ═══ -->
+      <div class="card" style="margin-bottom:12px;border-color:rgba(156,39,176,0.3)">
+        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(156,39,176,0.08),transparent)">
+          <div class="card-title" style="color:var(--purple)"><span class="icon">🔬</span>CALL FUNNEL — where candidates drop (rolling 60min)</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-family:var(--mono);font-size:8px;color:var(--text3)" id="funnelWindowAge">—</span>
+            <button onclick="loadCallFunnel()" style="background:rgba(156,39,176,0.1);border:1px solid rgba(156,39,176,0.3);color:var(--purple);border-radius:5px;padding:5px 12px;font-family:var(--mono);font-size:8px;cursor:pointer">↻ REFRESH</button>
+          </div>
+        </div>
+        <div class="card-body" id="callFunnelBody">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;padding:20px">Loading funnel diagnostic...</div>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom:12px">
         <div class="card-header">⚙️ SCAN MODE</div>
         <div class="card-body" id="modeButtonList"><div class="spinner"><div class="spin-dot" style="background:var(--cyan)"></div></div></div>
@@ -5151,8 +5227,17 @@ function renderSidebar(){
 }
 
 function buildSidebarCoin(r){
-  const qs=r.quick_score??0;
-  const col=qs>=80?'var(--gold)':qs>=65?'var(--green)':qs>=50?'var(--cyan)':'var(--orange)';
+  // Prefer the real composite score (0-100 full pipeline) over the quick
+  // score (0-70 pre-screen heuristic). Sidebar used to show 70 then detail
+  // showed 54 — confusing because they're different metrics. Now sidebar
+  // shows what the bot ACTUALLY thinks of the coin, with a label showing
+  // which score is displayed so you know if it's still pre-scoring.
+  const composite = r.composite_score ?? r.compositeScore;
+  const qsRaw     = r.quick_score ?? 0;
+  const hasFull   = composite != null && composite > 0;
+  const qs        = hasFull ? composite : qsRaw;
+  const scoreLabel = hasFull ? 'SCORE' : 'QS·PRE-SCREEN';
+  const col=qs>=80?'var(--gold)':qs>=65?'var(--green)':qs>=50?'var(--cyan)':qs>=35?'var(--orange)':'var(--red)';
   const p5m=r.price_change_5m,p1h=r.price_change_1h;
   const p5mC=p5m>0?'var(--green)':p5m<0?'var(--red)':'var(--text3)';
   const p1hC=p1h>0?'var(--green)':p1h<0?'var(--red)':'var(--text3)';
@@ -5181,7 +5266,7 @@ function buildSidebarCoin(r){
       </div>
       <div style="text-align:right">
         <div class="pcoin-score" style="color:${col}">${qs}</div>
-        <div style="font-family:var(--mono);font-size:7px;color:var(--text3)">SCORE</div>
+        <div style="font-family:var(--mono);font-size:7px;color:var(--text3)" title="${hasFull ? 'Full composite score (scorer + bonuses + AI)' : 'Scanner pre-screen — full composite pending'}">${scoreLabel}</div>
       </div>
     </div>
     <div class="pcoin-meta">
@@ -5692,6 +5777,182 @@ async function csDuneRefresh() {
     dot.style.background = 'var(--red)';
     subtitle.textContent = '✕ ' + err.message;
     subtitle.style.color = 'var(--red)';
+  }
+  // Harvester stats load alongside Dune refresh
+  loadHarvesterStats();
+  loadLegendaryStats();
+}
+
+async function loadHarvesterStats() {
+  const el = document.getElementById('csHarvesterStats');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/wallet-harvester/status');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'harvester status failed');
+    const s = data; // stats are spread at top level by the server
+    const last = s.lastRunAt ? csTimeAgo(s.lastRunAt) : 'never';
+    const err  = s.lastError ? ` · <span style="color:var(--red)">${csEscape(String(s.lastError).slice(0,40))}</span>` : '';
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(156,39,176,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">HARVESTED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--purple)">${(s.totalWallets||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(76,175,80,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">PROMOTED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--green)">${(s.winnerWallets||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(0,188,212,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">COINS SCAN'D</div>
+          <div style="font-size:13px;font-weight:700;color:var(--cyan)">${(s.coinsHarvested||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">RUNS</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text2)">${(s.runsCompleted||0).toLocaleString()}</div>
+        </div>
+      </div>
+      <div style="color:var(--text3)">Last run: ${last}${err}</div>`;
+  } catch (err) {
+    el.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function csHarvesterRun(btn) {
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ RUNNING…'; }
+  try {
+    const res = await fetch('/api/wallet-harvester/run', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'run failed');
+    loadHarvesterStats();
+  } catch (err) {
+    alert('Harvester run failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
+  }
+}
+
+async function loadLegendaryStats() {
+  const el = document.getElementById('csLegendaryStats');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/legendary-harvester/status');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'legendary status failed');
+    const s = data;
+    const last = s.lastRunAt ? csTimeAgo(s.lastRunAt) : 'never';
+    const lastDune = s.lastDuneRunAt ? csTimeAgo(s.lastDuneRunAt) : 'never';
+    const err = s.lastError ? ` · <span style="color:var(--red)">${csEscape(String(s.lastError).slice(0,40))}</span>` : '';
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,193,7,0.2);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">LEGENDS FOUND</div>
+          <div style="font-size:13px;font-weight:700;color:var(--gold)">${(s.legendaryCoinsFound||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(76,175,80,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">WINNERS ADDED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--green)">${(s.walletsAdded||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(0,188,212,0.15);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">UPGRADED</div>
+          <div style="font-size:13px;font-weight:700;color:var(--cyan)">${(s.walletsUpgraded||0).toLocaleString()}</div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:4px">
+          <div style="font-size:7px;color:var(--text3);letter-spacing:1px">COINS SCAN'D</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text2)">${(s.totalScanned||0).toLocaleString()}</div>
+        </div>
+      </div>
+      <div style="color:var(--text3)">Last run: ${last} · Dune: ${lastDune}${err}</div>`;
+  } catch (err) {
+    el.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function loadMidcapStats() {
+  const pill = document.getElementById('mhStatusPill');
+  const found = document.getElementById('mhStatFound');
+  const added = document.getElementById('mhStatAdded');
+  const promo = document.getElementById('mhStatPromoted');
+  const scan  = document.getElementById('mhStatScanned');
+  const last  = document.getElementById('mhStatLast');
+  const line  = document.getElementById('mhStatusLine');
+  if (!found) return;
+  try {
+    const res  = await fetch('/api/midcap-harvester/status');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'midcap status failed');
+    const s = data;
+    found.textContent = (s.midcapCoinsFound||0).toLocaleString();
+    added.textContent = (s.walletsAdded||0).toLocaleString();
+    promo.textContent = (s.walletsPromoted||0).toLocaleString();
+    scan.textContent  = (s.totalScanned||0).toLocaleString();
+    last.textContent  = s.lastRunAt ? csTimeAgo(s.lastRunAt) : 'never';
+    if (pill) {
+      const ok = s.runsCompleted > 0 && !s.lastError;
+      pill.textContent = s.lastError ? 'ERROR' : (s.runsCompleted > 0 ? 'ACTIVE' : 'IDLE');
+      pill.style.background = s.lastError ? 'rgba(244,67,54,0.15)' : (ok ? 'rgba(76,175,80,0.15)' : 'rgba(255,152,0,0.15)');
+      pill.style.color      = s.lastError ? 'var(--red)' : (ok ? 'var(--green)' : '#ff9800');
+    }
+    if (line) {
+      if (s.lastError) {
+        line.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(String(s.lastError).slice(0,80))}</span>`;
+      } else if (s.lastDuneRunAt) {
+        line.innerHTML = `<span style="color:var(--text3)">Last Dune: ${csTimeAgo(s.lastDuneRunAt)} · ${(s.coinsHarvested||0).toLocaleString()} coins harvested total · ${(s.totalWallets||0).toLocaleString()} midcap wallets in DB</span>`;
+      } else {
+        line.innerHTML = `<span style="color:var(--text3)">Waiting for first sweep…</span>`;
+      }
+    }
+  } catch (err) {
+    if (line) line.innerHTML = `<span style="color:var(--red)">✕ ${csEscape(err.message)}</span>`;
+  }
+}
+
+async function midcapRun(btn) {
+  if (!confirm('Trigger midcap harvester now?\n\nRuns a fresh Dune query (1-2min, uses credits) then Helius fetches holders for every new midcap coin. Normally runs automatically twice a day.')) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ DUNE QUERY…'; }
+  const pill = document.getElementById('mhStatusPill');
+  if (pill) { pill.textContent = 'SCANNING'; pill.style.background = 'rgba(255,152,0,0.15)'; pill.style.color = '#ff9800'; }
+  try {
+    const res = await fetch('/api/midcap-harvester/run', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'run failed');
+    // Poll every 20s for up to 4min to catch completion
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls++;
+      loadMidcapStats();
+      if (polls >= 12) clearInterval(timer);
+    }, 20_000);
+    loadMidcapStats();
+  } catch (err) {
+    alert('Midcap harvester run failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
+  }
+}
+
+async function csLegendaryRun(btn) {
+  if (!confirm('Trigger legendary harvester now? This runs a fresh Dune query (uses credits, takes 1-3min) and then Helius calls to resolve holders. Normally runs weekly automatically.')) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ DUNE…'; }
+  try {
+    const res = await fetch('/api/legendary-harvester/run', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'run failed');
+    // Poll status every 30s for 5min to catch Dune completion
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls++;
+      loadLegendaryStats();
+      if (polls >= 10) clearInterval(timer);
+    }, 30_000);
+    loadLegendaryStats();
+  } catch (err) {
+    alert('Legendary harvester run failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
   }
 }
 
@@ -8159,9 +8420,46 @@ function renderLearningStats(data){
     // renderer normalizes those.
     renderMissedWinners(topMissedWinners);
   }
+  const recEl=document.getElementById('aiRecommendations');
+  if(!recEl)return;
   if(latestRecommendations?.recommendations?.length){
-    const recEl=document.getElementById('aiRecommendations');
-    if(recEl)recEl.innerHTML=latestRecommendations.recommendations.slice(0,5).map(r=>`<div style="padding:12px 14px;border-left:3px solid ${r.priority==='HIGH'?'var(--red)':r.priority==='MEDIUM'?'var(--gold)':'var(--cyan)'};background:rgba(0,0,0,0.2);border-radius:0 8px 8px 0;margin-bottom:10px"><div style="font-family:var(--mono);font-size:8px;color:${r.priority==='HIGH'?'var(--red)':'var(--gold)'};letter-spacing:1px;margin-bottom:5px">${r.priority} PRIORITY · ${r.target||'?'} · Confidence: ${r.confidence||'?'}%</div><div style="font-family:var(--mono);font-size:10px;color:var(--text1);margin-bottom:4px">${esc(r.component||'?')} — ${esc((r.suggested||'').slice(0,100))}</div><div style="font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.4">${esc((r.rationale||'').slice(0,120))} · FP risk: ${r.falsePositiveRisk||'?'}</div></div>`).join('');
+    recEl.innerHTML=latestRecommendations.recommendations.slice(0,5).map(r=>`<div style="padding:12px 14px;border-left:3px solid ${r.priority==='HIGH'?'var(--red)':r.priority==='MEDIUM'?'var(--gold)':'var(--cyan)'};background:rgba(0,0,0,0.2);border-radius:0 8px 8px 0;margin-bottom:10px"><div style="font-family:var(--mono);font-size:8px;color:${r.priority==='HIGH'?'var(--red)':'var(--gold)'};letter-spacing:1px;margin-bottom:5px">${r.priority} PRIORITY · ${r.target||'?'} · Confidence: ${r.confidence||'?'}%</div><div style="font-family:var(--mono);font-size:10px;color:var(--text1);margin-bottom:4px">${esc(r.component||'?')} — ${esc((r.suggested||'').slice(0,100))}</div><div style="font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.4">${esc((r.rationale||'').slice(0,120))} · FP risk: ${r.falsePositiveRisk||'?'}</div></div>`).join('');
+  } else {
+    // No recs yet — explain why + invite user to generate on demand.
+    recEl.innerHTML = `
+      <div style="font-family:var(--mono);font-size:10px;color:var(--text3);padding:22px;text-align:center;line-height:1.6">
+        No recommendations yet.<br>
+        <span style="color:var(--text2);font-size:9px">Claude reviews missed winners every 6 hours. Click <b style="color:var(--cyan)">⚡ GENERATE NOW</b> above to run the analysis on demand — needs ≥1 resolved WIN in the last 7 days to produce useful output.</span>
+      </div>`;
+  }
+}
+
+// Manual trigger: ask Claude to analyze missed winners + write recs right now.
+async function generateAIRecommendations(btn){
+  const recEl = document.getElementById('aiRecommendations');
+  const orig = btn?.textContent;
+  if(btn){btn.disabled=true;btn.textContent='⏳ CLAUDE THINKING…';}
+  if(recEl){recEl.innerHTML='<div style="padding:20px;text-align:center;color:var(--cyan);font-family:var(--mono);font-size:10px">Claude is reviewing missed winners + recent calls…</div>';}
+  try{
+    const res = await fetch('/api/v8/generate-recommendations',{method:'POST'});
+    const data = await res.json();
+    if(!data.ok) throw new Error(data.error || 'generation failed');
+    if(!data.recommendations || data.recommendations.length===0){
+      if(recEl){
+        recEl.innerHTML = `
+          <div style="font-family:var(--mono);font-size:10px;color:var(--text3);padding:22px;text-align:center;line-height:1.6">
+            <div style="color:var(--gold);margin-bottom:8px">No analysis available yet</div>
+            <span style="color:var(--text2);font-size:9px">${esc(data.note || 'Needs resolved WINs in the calls table.')}</span>
+          </div>`;
+      }
+    } else {
+      // Re-render via the existing pipeline
+      renderLearningStats({ ok:true, latestRecommendations: { recommendations: data.recommendations } });
+    }
+  } catch(err) {
+    if(recEl){recEl.innerHTML = `<div style="padding:18px;text-align:center;color:var(--red);font-family:var(--mono);font-size:10px">✕ ${esc(err.message)}</div>`;}
+  } finally {
+    if(btn){btn.disabled=false;btn.textContent=orig||'⚡ GENERATE NOW';}
   }
 }
 
@@ -8461,6 +8759,64 @@ async function markOutcome(id,outcome){
 }
 
 // ── SYSTEM ────────────────────────────────────────────────
+async function loadCallFunnel() {
+  const bodyEl  = document.getElementById('callFunnelBody');
+  const ageEl   = document.getElementById('funnelWindowAge');
+  if (!bodyEl) return;
+  try {
+    const res = await fetch('/api/diagnose/funnel');
+    if (!res.ok) {
+      bodyEl.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--red);padding:10px">⚠ Endpoint returned ' + res.status + '. The deployed server does not include the /api/diagnose/funnel route — redeploy needed.</div>';
+      return;
+    }
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'unknown');
+    if (ageEl) ageEl.textContent = 'Window: ' + data.windowAgeMinutes + 'min · Post rate: ' + data.postRate;
+    const s = data.stages || {};
+    const total = s.evaluated || 1;
+    const pct = (n) => ((n/total)*100).toFixed(1) + '%';
+    const rows = [
+      ['EVALUATED (entered pipeline)', s.evaluated,          '100%',                 'var(--cyan)',   'hdr'],
+      ['data_void_skip',               s.dataVoidSkip,       pct(s.dataVoidSkip),    'var(--red)',    'drop'],
+      ['SCORED',                       s.scored,             pct(s.scored),          'var(--green)',  'hdr'],
+      ['CLAUDE_EXTREME_VETO',          s.claudeExtremeVeto,  pct(s.claudeExtremeVeto),'var(--red)',   'drop'],
+      ['CONSENSUS_GATE (Claude no)',   s.consensusGate,      pct(s.consensusGate),   'var(--red)',    'drop'],
+      ['MOMENTUM_GATE',                s.momentumGate,       pct(s.momentumGate),    'var(--red)',    'drop'],
+      ['RUG_GUARD ($13-17.5K)',        s.rugGuard,           pct(s.rugGuard),        'var(--red)',    'drop'],
+      ['LIQUIDITY_FLOOR',              s.liquidityFloor,     pct(s.liquidityFloor),  'var(--red)',    'drop'],
+      ['FOUNDATION_TRUST',             s.foundationTrust,    pct(s.foundationTrust), 'var(--red)',    'drop'],
+      ['EARLY_MCAP_DEFER',             s.earlyMcapDefer,     pct(s.earlyMcapDefer),  'var(--orange)', 'drop'],
+      ['PAUSED_POSTING',               s.pausedPosting,      pct(s.pausedPosting),   'var(--text3)',  'drop'],
+      ['POSTED 🎉',                     s.posted,             pct(s.posted),          'var(--green)',  'hdr'],
+    ];
+    bodyEl.innerHTML =
+      '<div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:8px">Every AUTO_POST candidate passes through these gates. Whichever line has the highest count is where your calls are dying.</div>' +
+      '<div style="display:flex;flex-direction:column;gap:2px">' +
+      rows.map(([stage, n, p, col, kind]) => {
+        const isDrop = kind === 'drop';
+        const prefix = isDrop ? '  ↳ ' : '';
+        const weight = isDrop ? '400' : '700';
+        const size   = isDrop ? '10px' : '11px';
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 10px;background:' + (isDrop?'rgba(255,255,255,0.02)':col+'10') + ';border-left:2px solid ' + (isDrop?'rgba(255,255,255,0.1)':col) + ';border-radius:3px">' +
+          '<span style="font-family:var(--mono);font-size:' + size + ';font-weight:' + weight + ';color:' + (isDrop ? 'var(--text2)' : col) + ';letter-spacing:0.5px">' + prefix + stage + '</span>' +
+          '<span style="display:flex;gap:10px;align-items:center">' +
+            '<span style="font-family:var(--mono);font-size:' + size + ';font-weight:700;color:' + col + '">' + (n || 0) + '</span>' +
+            '<span style="font-family:var(--mono);font-size:8px;color:var(--text3);min-width:48px;text-align:right">' + p + '</span>' +
+          '</span>' +
+        '</div>';
+      }).join('') +
+      '</div>' +
+      '<div style="margin-top:10px;padding:6px 10px;background:rgba(0,0,0,0.3);border-radius:4px;font-family:var(--mono);font-size:8px;color:var(--text3)">' +
+        'Paused: <span style="color:' + (data.pausedPosting ? 'var(--red)' : 'var(--green)') + '">' + (data.pausedPosting ? 'YES' : 'NO') + '</span> · ' +
+        'minScoreToPost: <b>' + (data.scoringConfig?.minScoreToPost ?? '?') + '</b> · ' +
+        'noSignalCap: <b>' + (data.scoringConfig?.noSignalCap ?? '?') + '</b> · ' +
+        'winPeakMultiple: <b>' + (data.scoringConfig?.winPeakMultiple ?? '?') + 'x</b>' +
+      '</div>';
+  } catch (err) {
+    bodyEl.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--red);padding:10px">⚠ Failed to load: ' + (err.message || err) + '</div>';
+  }
+}
+
 async function loadApiUsage() {
   try {
     var data = await apiFetch('/api/usage');
@@ -8524,6 +8880,7 @@ async function loadApiUsage() {
 
 async function loadSystem(){
   loadApiUsage();
+  loadCallFunnel();
   const [statsData,modeData,v8Data]=await Promise.all([apiFetch('/api/stats'),apiFetch('/api/mode'),apiFetch('/api/v8/dashboard')]);
   if(statsData){
     const c=statsData.config||{},m=statsData.mode||{};
@@ -8738,6 +9095,7 @@ syncBotToggle();
 // Pre-load wallet tiles in the background so they're ready the moment
 // the user opens the Smart Money tab — no waiting, no empty grid.
 setTimeout(() => { if (typeof loadWalletTiles === 'function') loadWalletTiles(); }, 2000);
+setTimeout(() => { if (typeof loadMidcapStats === 'function') loadMidcapStats(); }, 2500);
 
 
 // ── MOBILE NAVIGATION ─────────────────────────────────────
@@ -9036,23 +9394,60 @@ function removeAgentTyping() {
 // ── Agent file upload handling ──────────────────────────────────────
 let _agentUploadData = null; // { base64, mediaType, fileName, isImage }
 
-function handleAgentUpload(input) {
+// Downsample an image File to max 1600px wide/tall and re-encode as JPEG
+// at 85% quality before base64. A 4K screenshot PNG can be 15-20MB raw
+// (→ 20-27MB base64), easily blowing past even a 30MB request limit.
+// Downsampling keeps Claude's vision-model quality (it processes at ~1092
+// anyway) while cutting payload to 0.5-2MB.
+function downsampleImage(file, maxDim = 1600, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = e => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          const ratio = Math.min(maxDim / width, maxDim / height);
+          width  = Math.round(width  * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        const base64  = dataUrl.split(',')[1];
+        resolve({ dataUrl, base64, mediaType: 'image/jpeg', width, height, bytes: Math.round(base64.length * 0.75) });
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleAgentUpload(input) {
   const file = input.files?.[0];
   if (!file) return;
-  const reader = new FileReader();
   const isImage = file.type.startsWith('image/');
 
-  reader.onload = function(e) {
-    if (isImage) {
-      const base64 = e.target.result.split(',')[1];
-      _agentUploadData = { base64, mediaType: file.type, fileName: file.name, isImage: true };
+  if (isImage) {
+    try {
+      const img = await downsampleImage(file);
+      _agentUploadData = { base64: img.base64, mediaType: img.mediaType, fileName: file.name, isImage: true };
       const preview = document.getElementById('agentUploadPreview');
       const thumb = document.getElementById('agentUploadThumb');
       const name = document.getElementById('agentUploadName');
-      if (thumb) { thumb.src = e.target.result; thumb.style.display = ''; }
-      if (name) name.textContent = file.name + ' (' + (file.size / 1024).toFixed(0) + 'KB)';
+      if (thumb) { thumb.src = img.dataUrl; thumb.style.display = ''; }
+      if (name) name.textContent = file.name + ' → ' + img.width + 'x' + img.height + ' · ' + (img.bytes/1024).toFixed(0) + 'KB';
       if (preview) preview.style.display = '';
-    } else {
+    } catch (err) {
+      console.warn('[agent-upload] image downsample failed:', err.message);
+    }
+  } else {
+    const reader = new FileReader();
+    reader.onload = function(e) {
       _agentUploadData = { text: e.target.result, fileName: file.name, isImage: false };
       const preview = document.getElementById('agentUploadPreview');
       const thumb = document.getElementById('agentUploadThumb');
@@ -9060,10 +9455,9 @@ function handleAgentUpload(input) {
       if (thumb) thumb.style.display = 'none';
       if (name) name.textContent = '📄 ' + file.name + ' (' + (file.size / 1024).toFixed(0) + 'KB)';
       if (preview) preview.style.display = '';
-    }
-  };
-  if (isImage) reader.readAsDataURL(file);
-  else reader.readAsText(file);
+    };
+    reader.readAsText(file);
+  }
   input.value = '';
 }
 
@@ -9134,14 +9528,47 @@ async function sendAgentMessage() {
   _agentMsgs.push({ role: 'user', content: msgContent });
 
   showAgentTyping();
+  // Strip base64 image payloads from HISTORICAL messages before sending —
+  // keeping them balloons the request body past Express's 10MB JSON limit
+  // (each image is 1-5MB encoded) and causes the server to reject with an
+  // HTML error page that the frontend can't JSON.parse ("Unexpected token
+  // '<', '<!DOCTYPE '..." error). We keep image content on the MOST RECENT
+  // user message so Claude can still see it, but historical image blocks
+  // get replaced with a text placeholder "[previously uploaded image]".
+  const msgsForSend = _agentMsgs.slice(-20);
+  const lastUserIdx = (() => {
+    for (let i = msgsForSend.length - 1; i >= 0; i--) {
+      if (msgsForSend[i].role === 'user') return i;
+    }
+    return -1;
+  })();
+  const prunedMsgs = msgsForSend.map((m, idx) => {
+    if (!Array.isArray(m.content)) return m;
+    // Always keep text blocks. Keep image blocks only on the last user msg.
+    const filtered = m.content.map(block => {
+      if (block.type === 'image' && idx !== lastUserIdx) {
+        return { type: 'text', text: '[previously uploaded image]' };
+      }
+      return block;
+    });
+    return { ...m, content: filtered };
+  });
   try {
     const res  = await fetch('/api/agent', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ messages: _agentMsgs.slice(-20) }),
+      body: JSON.stringify({ messages: prunedMsgs }),
       signal: AbortSignal.timeout(35000),
     });
-    const data = await res.json();
+    // Safer parse — if server returned HTML (413, 502, 504 etc.), surface
+    // the real reason instead of the opaque JSON.parse error.
+    let data;
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      const txt = await res.text();
+      throw new Error(`server returned ${res.status} ${ct.split(';')[0]} — ${txt.slice(0, 120).replace(/\n/g, ' ')}`);
+    }
+    data = await res.json();
     removeAgentTyping();
     const reply = data.reply || data.error || 'No response';
     _agentMsgs.push({ role: 'assistant', content: reply });
@@ -9151,7 +9578,7 @@ async function sendAgentMessage() {
     }
   } catch (e) {
     removeAgentTyping();
-    appendAgentMessage('bot', '⚠ Error: ' + e.message + '. Check bot is running.');
+    appendAgentMessage('bot', '⚠ Error: ' + e.message);
   } finally {
     if (input) input.disabled = false;
     if (btn)   btn.disabled   = false;

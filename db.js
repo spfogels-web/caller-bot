@@ -1527,26 +1527,51 @@ export function insertScannerFeed(data) {
 export function getScannerFeed({ limit = 200, action = null, minAge = null, maxAge = null } = {}) {
   // Dedupe by contract_address — show only the LATEST scan per token
   // This prevents the same token appearing multiple times across cycles
-  let actionFilter = action ? `AND filter_action = '${action.replace(/'/g,"''")}'` : '';
-  let ageFilter    = '';
-  if (minAge != null) ageFilter += ` AND pair_age_hours >= ${minAge}`;
-  if (maxAge != null) ageFilter += ` AND pair_age_hours <= ${maxAge}`;
+  //
+  // sf. prefix because we join candidates for composite_score enrichment.
+  // Sidebar prefers composite over quick_score so users see the ACTUAL
+  // bot rating (not the scanner's pre-screen heuristic capped at 70).
+  const innerClauses = [];
+  const outerClauses = [];
+  if (action) {
+    const a = action.replace(/'/g, "''");
+    innerClauses.push(`filter_action = '${a}'`);
+    outerClauses.push(`sf.filter_action = '${a}'`);
+  }
+  if (minAge != null) {
+    innerClauses.push(`pair_age_hours >= ${Number(minAge)}`);
+    outerClauses.push(`sf.pair_age_hours >= ${Number(minAge)}`);
+  }
+  if (maxAge != null) {
+    innerClauses.push(`pair_age_hours <= ${Number(maxAge)}`);
+    outerClauses.push(`sf.pair_age_hours <= ${Number(maxAge)}`);
+  }
+  const innerWhere = innerClauses.length ? `AND ${innerClauses.join(' AND ')}` : '';
+  const outerWhere = outerClauses.length ? `AND ${outerClauses.join(' AND ')}` : '';
+  // Still need non-aliased filters for the counts query at the bottom
+  const countWhere = innerClauses.length ? `AND ${innerClauses.join(' AND ')}` : '';
 
   const rows = db.prepare(`
-    SELECT * FROM scanner_feed
-    WHERE id IN (
+    SELECT sf.*, c.composite_score
+    FROM scanner_feed sf
+    LEFT JOIN (
+      SELECT contract_address, composite_score
+      FROM candidates
+      WHERE id IN (SELECT MAX(id) FROM candidates GROUP BY contract_address)
+    ) c ON c.contract_address = sf.contract_address
+    WHERE sf.id IN (
       SELECT MAX(id) FROM scanner_feed
-      WHERE 1=1 ${actionFilter} ${ageFilter}
+      WHERE 1=1 ${innerWhere}
       GROUP BY contract_address
     )
-    ${actionFilter} ${ageFilter}
-    ORDER BY scanned_at DESC
+    ${outerWhere}
+    ORDER BY sf.scanned_at DESC
     LIMIT ?
   `).all(limit);
 
   const total = db.prepare(`
     SELECT COUNT(DISTINCT contract_address) as n FROM scanner_feed
-    WHERE 1=1 ${actionFilter} ${ageFilter}
+    WHERE 1=1 ${countWhere}
   `).get().n;
 
   const actionCounts = db.prepare(`

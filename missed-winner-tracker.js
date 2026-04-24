@@ -529,11 +529,15 @@ export async function runOutcomeTracker(dbInstance) {
         const wasUpgrade = call.outcome && call.outcome !== 'WIN' && call.outcome !== 'PENDING';
         console.log(`[outcome-tracker] ✅ ${wasUpgrade ? 'UPGRADED' : 'Auto'}-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)${wasUpgrade ? ' (was ' + call.outcome + ')' : ''} — LOCKED`);
       } else if (confirmWindow && !reachedWinBar && call.outcome !== 'WIN') {
-        // 2h passed and peak never hit 1.5x. Never downgrade an existing WIN.
-        // Peak 0.9x–1.49x → NEUTRAL (didn't lose money)
-        // Peak < 0.9x → LOSS (real drawdown)
-        const finalOutcome = peakNow >= 0.9 ? 'NEUTRAL' : 'LOSS';
-        const emoji = finalOutcome === 'NEUTRAL' ? '➖' : '❌';
+        // 2h passed and peak never hit winPeakMultiple. Never downgrade an
+        // existing WIN.
+        //
+        // BINARY MODE: no more NEUTRAL middle ground. Peak < winPeakMultiple
+        // = LOSS, full stop. We're a caller bot — "didn't lose much" isn't
+        // a win. The feedback loop needs clean WIN/LOSS signal for the
+        // bot to learn what moves vs what stalls.
+        const finalOutcome = 'LOSS';
+        const emoji = '❌';
         dbInstance.prepare(`
           UPDATE calls SET
             outcome = ?,
@@ -667,6 +671,34 @@ export function startLearningLoop(dbInstance, claudeApiKey) {
   // Run both immediately on start
   setTimeout(() => runOutcomeTracker(dbInstance).catch(() => {}), 5_000);
   setTimeout(() => detectMissedWinners(dbInstance).catch(() => {}), 30_000);
+
+  // First full analysis cycle runs at +10min (not +6h). Ensures AI
+  // recommendations populate shortly after boot so the Analytics tab
+  // isn't empty for hours. Only writes if missed winners are found.
+  setTimeout(async () => {
+    try {
+      const missed = await detectMissedWinners(dbInstance);
+      if (!missed?.length) return;
+      let recentCalls = [];
+      try {
+        recentCalls = dbInstance.prepare(`
+          SELECT * FROM calls WHERE called_at > datetime('now', '-7 days')
+          ORDER BY called_at DESC LIMIT 50
+        `).all();
+      } catch {}
+      const analysis = await analyzeMissedWinners(missed, recentCalls, claudeApiKey);
+      if (!analysis) return;
+      try {
+        dbInstance.prepare(`
+          INSERT INTO learning_recommendations (analysis_json, missed_count, generated_at)
+          VALUES (?, ?, datetime('now'))
+        `).run(JSON.stringify(analysis), missed.length);
+        console.log(`[learning-loop] boot+10min analysis complete — ${analysis.recommendations?.length ?? 0} recs stored`);
+      } catch {}
+    } catch (err) {
+      console.warn('[learning-loop] boot+10min analysis failed:', err.message);
+    }
+  }, 10 * 60_000);
 
   return { outcomeInterval, missedWinnerInterval };
 }

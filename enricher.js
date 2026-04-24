@@ -787,6 +787,13 @@ let   _lcBreakerUntil = 0; // ms epoch — skip all calls until this time
 
 async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
   const result = { lunarCrushOk: false };
+  // Kill switch — set SKIP_LUNARCRUSH=true in Railway env to disable entirely.
+  // LC v4 API is unstable for fresh memecoins (100% error rate observed in
+  // prod). Social scoring is nice-to-have, not critical. Saves API calls +
+  // cleans up the health dashboard error rate.
+  if (process.env.SKIP_LUNARCRUSH === 'true' || process.env.SKIP_LUNARCRUSH === '1') {
+    return result;
+  }
   const key = getLunarCrushKey();
   if (!key) {
     console.log('[enricher:lunarcrush] ✗ LUNARCRUSH_API_KEY not set');
@@ -880,7 +887,12 @@ async function enrichWithLunarCrush(tokenSymbol, contractAddress) {
 
 export async function enrichCandidate(candidate) {
   const ca          = candidate.contractAddress;
-  const pairAddress = candidate.pairAddress ?? null;
+  // `pairAddress` may get reassigned below (pre-flight DexScreener fills
+  // it in when missing) — must be `let`, not `const`. Previously thrown:
+  // "Assignment to constant variable" on every enrichment attempting the
+  // pre-flight path, silently breaking enrichment for a big chunk of
+  // Helius-listener-sourced candidates.
+  let pairAddress   = candidate.pairAddress ?? null;
   const ageHours    = candidate.pairAgeHours ?? null;
 
   if (!ca) return candidate;
@@ -983,6 +995,29 @@ export async function enrichCandidate(candidate) {
   }
 
   const enriched = mergeEnrichmentData(candidate, birdeyeData, heliusData, bubblemapData, lunarData);
+
+  // ── Pump.fun graduation check ──────────────────────────────────────────
+  // Only poll pump.fun for coins that plausibly came from it (<72h old or
+  // unknown age). If the coin graduated the bonding curve (~$69K MCap) and
+  // migrated to Raydium, that's proven organic demand — ~1% of pump.fun
+  // launches make it. Adds pumpFunMigrated / pumpFunStage / pumpFunBondingPct
+  // / pumpFunReplyCount / pumpFunKOTH fields for scorer consumption.
+  try {
+    const ageH = Number(enriched.pairAgeHours ?? 0);
+    if ((ageH > 0 && ageH < 72) || enriched.pairAgeHours == null) {
+      const { fetchPumpFunCoin } = await import('./helius-listener.js');
+      const pf = await fetchPumpFunCoin(enriched.contractAddress);
+      if (pf) {
+        enriched.pumpFunStage        = pf.stage;                    // 'PRE_BOND' | 'MIGRATED'
+        enriched.pumpFunMigrated     = pf.bondingCurveComplete === true;
+        enriched.pumpFunBondingPct   = pf.bondingCurvePct ?? null;
+        enriched.pumpFunReplyCount   = pf.replyCount ?? 0;
+        enriched.pumpFunKOTH         = pf.pumpRank === 'KOTH';
+      }
+    }
+  } catch (err) {
+    console.warn(`[enricher:pump.fun] check failed: ${err.message}`);
+  }
 
   // Derived tags / flags
   enriched.narrativeTags = uniq([

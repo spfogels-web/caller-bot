@@ -49,10 +49,15 @@ export const RUNNER_THRESHOLDS    = { alert: 80, watchlist: 70, monitor: 60 };
 // runners (pre-bond pump.fun coins doing 300%+ on a $10K → $30K leg still
 // have room). New coins under ageExemptHours are exempt entirely: "late" is
 // not a meaningful concept for a 15-minute-old token.
+// Late-pump penalties DISABLED per user request — all three penalties set
+// to 0. The pre-breakout detector + winner-wallet bonus + Claude's prompt
+// bias already steer toward early entries; explicit late-pump deduction
+// was killing legitimate continuation plays. Tunable knobs preserved so
+// we can re-enable later if needed without code changes.
 let _latePumpConfig = {
-  p1hSevereThreshold: 500, p1hSeverePenalty: 15,
-  p1hThreshold:       300, p1hPenalty:       10,
-  p24hThreshold:      500, p24hPenalty:       8,
+  p1hSevereThreshold: 500, p1hSeverePenalty: 0,
+  p1hThreshold:       300, p1hPenalty:       0,
+  p24hThreshold:      500, p24hPenalty:      0,
   ageExemptHours:     0.5,   // <30min old = no late-pump penalty applies
 };
 export function setLatePumpConfig(cfg = {}) {
@@ -353,8 +358,10 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
 
   // Smart money score — continuous, applied alongside winners (not as fallback)
   // Weighted lower when winners are already present to avoid double-counting.
+  // Fallback weight (no winners) raised 0.55 → 0.80 so coins without Dune hits
+  // can reach 16/20 instead of capping at 11/20. Compensates for thin Dune DB.
   if (smartMoney > 0) {
-    const weight = winners >= 2 ? 0.15 : winners >= 1 ? 0.30 : 0.55;
+    const weight = winners >= 2 ? 0.15 : winners >= 1 ? 0.30 : 0.80;
     const pts = curve(smartMoney, 20, 90, maxWQ * weight, 0.8);
     if (pts > 0.1) {
       wqAcc += add('wq.smart', 'Smart money score', `sm=${smartMoney}`, `curve*${weight}=${pts.toFixed(1)}`, pts);
@@ -364,10 +371,11 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
 
   // Clean wallet fallback — only applies when no strong positive signal yet
   // Awards continuous points based on "cleanliness" (low clusters + low coord)
+  // Fallback weight raised 0.45 → 0.80 (per user) — clean-behavior coins can
+  // reach 16/20 when no winners are available (Dune DB thin).
   if (winners === 0 && smartMoney < 20) {
     const cleanScore = Math.max(0, 1 - (clusters * 0.15 + coord * 0.6));
-    // 4-9 pts based on how clean — not a flat 9 for everyone
-    const pts = cleanScore * maxWQ * 0.45;
+    const pts = cleanScore * maxWQ * 0.80;
     wqAcc += add('wq.clean', 'Wallet cleanliness (cold DB fallback)', `clusters=${clusters} coord=${coord.toFixed(2)}`, `clean=${cleanScore.toFixed(2)} → ${pts.toFixed(1)}`, pts);
     if (cleanScore > 0.85) reasons.push('Clean wallet behavior — no coordination');
     else if (cleanScore < 0.4) risks.push(`${clusters} cluster wallets + coord ${coord.toFixed(2)}`);
