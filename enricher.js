@@ -1013,6 +1013,24 @@ export async function enrichCandidate(candidate) {
         enriched.pumpFunBondingPct   = pf.bondingCurvePct ?? null;
         enriched.pumpFunReplyCount   = pf.replyCount ?? 0;
         enriched.pumpFunKOTH         = pf.pumpRank === 'KOTH';
+
+        // MCap / liquidity FALLBACK — when DexScreener/Birdeye haven't
+        // indexed a fresh coin yet, pump.fun's own API returns a usable
+        // market cap (usd_market_cap) and liquidity estimate (virtual
+        // SOL reserves). This lets smart-money-triggered fresh coins
+        // clear the MCap-required post gate in server.js even before
+        // DexScreener catches up.
+        if (enriched.marketCap == null && pf.marketCap != null) {
+          enriched.marketCap = pf.marketCap;
+          enriched.marketCapSource = 'pump.fun';
+        }
+        if ((enriched.liquidity == null || enriched.liquidity === 0) && pf.liquidity != null) {
+          enriched.liquidity = pf.liquidity;
+          enriched.liquidityUsd = enriched.liquidityUsd ?? pf.liquidity;
+        }
+        // Token + name fallback — pump.fun returns these
+        if (!enriched.token     && pf.token)     enriched.token     = pf.token;
+        if (!enriched.tokenName && pf.tokenName) enriched.tokenName = pf.tokenName;
       }
     }
   } catch (err) {
