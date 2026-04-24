@@ -2840,6 +2840,41 @@ async function handleTelegramMessageAIOS(chatId, text, fromUserId) {
 // ─── Auto-Caller Cycle ────────────────────────────────────────────────────────
 
 let cycleRunning = false;
+
+// Smart-money retry queue — when a fresh coin from the smart-money watcher
+// arrives before DexScreener/Birdeye have indexed it, we queue it for a
+// single retry 2min later. If still empty at retry, drop. Prevents us
+// from losing alpha on coins that are SO fresh the data sources lag.
+const _smRetryQueue = new Map();   // ca → { candidate, retryAt, attempts }
+const SM_RETRY_DELAY_MS    = 2 * 60 * 1000;
+const SM_RETRY_MAX_ATTEMPTS = 1;   // 1 retry then give up
+
+function enqueueSmartMoneyRetry(ca, candidate) {
+  if (!ca) return;
+  const existing = _smRetryQueue.get(ca);
+  const attempts = (existing?.attempts ?? candidate?._smRetryAttempt ?? 0) + 1;
+  if (attempts > SM_RETRY_MAX_ATTEMPTS) return;
+  _smRetryQueue.set(ca, { candidate, retryAt: Date.now() + SM_RETRY_DELAY_MS, attempts });
+}
+
+async function processSmartMoneyRetries() {
+  if (_smRetryQueue.size === 0) return;
+  const now = Date.now();
+  const due = [];
+  for (const [ca, entry] of _smRetryQueue.entries()) {
+    if (entry.retryAt <= now) { due.push([ca, entry]); }
+  }
+  for (const [ca, entry] of due) {
+    _smRetryQueue.delete(ca);
+    try {
+      console.log(`[sm-retry] attempting retry for ${ca.slice(0,8)} (attempt ${entry.attempts})`);
+      await processCandidate(entry.candidate, false);
+    } catch (err) {
+      console.warn(`[sm-retry] retry failed for ${ca.slice(0,8)}: ${err.message}`);
+    }
+  }
+}
+
 // Scanner health telemetry — surfaces via /api/health/scanner so we can
 // diagnose "scanner stopped scanning" droughts without Railway log access.
 let _scannerHealth = {
@@ -2971,11 +3006,35 @@ async function processCandidate(candidate, isRescan = false) {
     // If Birdeye AND Helius both failed AND we have no market cap, this token
     // has no real data — scoring is meaningless. Don't waste Claude/OpenAI
     // credits evaluating air.
+    //
+    // Exceptions:
+    //   - cluster/KOL smart-money alerts: post anyway — highest-conviction
+    //     signal (3+ winners or KOL buy) overrides the data gap. Coin is
+    //     marked _limitedData so the TG caption warns the reader.
+    //   - single-wallet smart-money alerts: enqueue for retry in 2min
+    //     (DexScreener/Birdeye usually index fresh coins within that
+    //     window). If still empty at retry, drop silently.
     if (!enrichedCandidate.birdeyeOk && !enrichedCandidate.heliusOk && enrichedCandidate.marketCap == null) {
-      console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
-      fnl('dataVoidSkip');
-      logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
-      return;
+      const sm = enrichedCandidate._smartMoney;
+      const highConviction = sm && (sm.kind === 'cluster' || sm.kind === 'kol');
+      const singleSmart    = sm && sm.kind === 'single';
+
+      if (highConviction) {
+        enrichedCandidate._limitedData = true;
+        console.log(`[auto-caller] ⚠️  $${enrichedCandidate.token ?? ca.slice(0,8)} — missing enrichment but ${sm.kind.toUpperCase()} signal — continuing with _limitedData flag`);
+        logEvent('WARN', 'DATA_VOID_BYPASSED', `${ca} — smart-money ${sm.kind} override`);
+        // Don't return — let scoring proceed with whatever data we have
+      } else if (singleSmart && !enrichedCandidate._smRetryAttempt) {
+        console.log(`[auto-caller] 🔁 $${ca.slice(0,8)} — single-wallet signal, enrichment empty → queueing 2min retry`);
+        enqueueSmartMoneyRetry(ca, { ...candidate, _smRetryAttempt: 1 });
+        fnl('dataVoidRetry');
+        return;
+      } else {
+        console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
+        fnl('dataVoidSkip');
+        logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
+        return;
+      }
     }
 
     // ── MCap tier bonuses ─────────────────────────────────────────────────
@@ -4839,6 +4898,16 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
     basePart =
       `⚡ <b>FAST-LANE CALL</b> ⚡\n` +
       `<i>${fl.winners} winner wallets already holding · bypassed AI gate · Axioscan-mode.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
+  }
+
+  // Prepend a data-limited warning if enrichment was incomplete but the
+  // smart-money cluster/KOL signal overrode the data-void skip. Reader
+  // needs to know the MCap/liquidity numbers below may be stale or missing.
+  if (candidate._limitedData) {
+    basePart =
+      `⚠️ <b>DATA LIMITED</b> — coin is too fresh; Birdeye/DexScreener haven't indexed yet. Numbers may be incomplete. Signal trusted on wallet conviction alone.\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       basePart;
   }
@@ -12435,6 +12504,13 @@ app.listen(PORT, async () => {
     await updateRegime();
     await runAutoCallerCycle();
     setInterval(runAutoCallerCycle, intervalMs);
+  }, 30_000);
+
+  // Smart-money retry queue processor — runs every 30s.
+  // Fresh coins from the smart-money watcher that arrived before
+  // DexScreener indexed them get re-tried once after a 2min delay.
+  setInterval(() => {
+    processSmartMoneyRetries().catch(err => console.warn('[sm-retry] tick err:', err.message));
   }, 30_000);
 
   setInterval(() => {
