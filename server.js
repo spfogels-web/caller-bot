@@ -2840,6 +2840,19 @@ async function handleTelegramMessageAIOS(chatId, text, fromUserId) {
 // ─── Auto-Caller Cycle ────────────────────────────────────────────────────────
 
 let cycleRunning = false;
+// Scanner health telemetry — surfaces via /api/health/scanner so we can
+// diagnose "scanner stopped scanning" droughts without Railway log access.
+let _scannerHealth = {
+  lastCycleStartedAt:   null,
+  lastCycleCompletedAt: null,
+  lastCycleElapsedMs:   null,
+  lastCycleError:       null,
+  totalCyclesCompleted: 0,
+  totalCycleErrors:     0,
+  lastRawPairsCount:    null,
+  lastCandidatesCount:  null,
+  lastDexscreenerHttp:  null,
+};
 
 async function processCandidate(candidate, isRescan = false) {
   if (!_botActive) return; // Master toggle OFF — skip everything
@@ -4632,11 +4645,12 @@ async function processRescanQueue() {
 }
 
 async function runAutoCallerCycle() {
-  if (!_botActive) return; // Master toggle OFF — don't scan
+  if (!_botActive) { _scannerHealth.lastCycleError = 'BOT_INACTIVE — master toggle OFF'; return; }
   if (cycleRunning) { console.log('[auto-caller] Previous cycle running — skipping'); return; }
 
   cycleRunning     = true;
   const cycleStart = Date.now();
+  _scannerHealth.lastCycleStartedAt = new Date().toISOString();
   console.log('[auto-caller] ━━━ Cycle start', new Date().toISOString());
   logEvent('INFO', 'CYCLE_START');
   botStartCycle('NEW_COINS');
@@ -4772,10 +4786,16 @@ async function runAutoCallerCycle() {
     console.error('[auto-caller] Cycle error:', err.message);
     logEvent('ERROR', 'CYCLE_ERROR', err.message);
     botError('NEW_COINS', err.message);
+    _scannerHealth.lastCycleError    = err.message + ' @ ' + new Date().toISOString();
+    _scannerHealth.totalCycleErrors++;
     await sendAdminAlert(`❌ Cycle error:\n${escapeHtml(err.message.slice(0,300))}`);
   } finally {
     cycleRunning  = false;
-    const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
+    const elapsedMs = Date.now() - cycleStart;
+    const elapsed   = (elapsedMs / 1000).toFixed(1);
+    _scannerHealth.lastCycleCompletedAt = new Date().toISOString();
+    _scannerHealth.lastCycleElapsedMs   = elapsedMs;
+    _scannerHealth.totalCyclesCompleted++;
     botEndCycle('NEW_COINS', { candidatesFound: 0 });
     console.log(`[auto-caller] ━━━ Cycle complete in ${elapsed}s`);
     logEvent('INFO', 'CYCLE_COMPLETE', `elapsed=${elapsed}s`);
@@ -10833,6 +10853,93 @@ app.post('/api/bot/master-toggle', express.json(), async (req, res) => {
 app.get('/api/bot/status', (req, res) => {
   setCors(res);
   res.json({ ok: true, active: _botActive });
+});
+
+// Scanner-pipeline diagnostic — answers "why is the scanner not scanning?"
+// Returns in-process state + DB counts that let us pinpoint where the
+// pipeline is broken without needing Railway log access.
+app.get('/api/health/scanner', (req, res) => {
+  setCors(res);
+  try {
+    const nowIso = new Date().toISOString();
+    const sinceCompleteMs = _scannerHealth.lastCycleCompletedAt
+      ? Date.now() - new Date(_scannerHealth.lastCycleCompletedAt.includes('Z') ? _scannerHealth.lastCycleCompletedAt : _scannerHealth.lastCycleCompletedAt + 'Z').getTime()
+      : null;
+    const sinceStartMs = _scannerHealth.lastCycleStartedAt
+      ? Date.now() - new Date(_scannerHealth.lastCycleStartedAt.includes('Z') ? _scannerHealth.lastCycleStartedAt : _scannerHealth.lastCycleStartedAt + 'Z').getTime()
+      : null;
+
+    const scannerFeed1h = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM scanner_feed WHERE scanned_at > datetime('now','-1 hour')`).get().n; } catch { return null; }
+    })();
+    const scannerFeed5m = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM scanner_feed WHERE scanned_at > datetime('now','-5 minutes')`).get().n; } catch { return null; }
+    })();
+    const scannerFeedTotal = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM scanner_feed`).get().n; } catch { return null; }
+    })();
+    const lastScannerFeedAt = (() => {
+      try { return dbInstance.prepare(`SELECT MAX(scanned_at) as at FROM scanner_feed`).get().at; } catch { return null; }
+    })();
+    const candidates1h = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now','-1 hour') AND composite_score IS NOT NULL`).get().n; } catch { return null; }
+    })();
+    const autoPosted1h = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now','-1 hour') AND final_decision='AUTO_POST'`).get().n; } catch { return null; }
+    })();
+
+    // Diagnosis — pick the most likely explanation based on the data.
+    let diagnosis = 'OK';
+    let remedy = null;
+    if (!_botActive) {
+      diagnosis = 'BOT_INACTIVE — master toggle is OFF';
+      remedy = 'Toggle the bot ON from the dashboard header, or POST /api/bot/toggle { active: true }';
+    } else if (cycleRunning && sinceStartMs != null && sinceStartMs > 5 * 60_000) {
+      diagnosis = `CYCLE_STUCK — cycleRunning=true for ${Math.round(sinceStartMs/60_000)} min (should reset in <60s)`;
+      remedy = 'Likely a hung fetch or uncaught promise. Restart the Railway service. If it recurs, check the last cycle error.';
+    } else if (sinceCompleteMs != null && sinceCompleteMs > 3 * 60_000 && !cycleRunning) {
+      diagnosis = `NO_RECENT_CYCLE — last cycle completed ${Math.round(sinceCompleteMs/60_000)} min ago (expected ≤2 min)`;
+      remedy = 'Scheduler interval may be dead. Restart the Railway service.';
+    } else if (scannerFeed1h === 0 && _scannerHealth.totalCyclesCompleted > 0) {
+      diagnosis = 'CYCLES_RUN_BUT_NO_INSERTS — scanner cycles fire but nothing lands in scanner_feed';
+      remedy = 'Likely DexScreener returning no Solana pairs, or runScanner filter stripping everything. Check Source 1/2 logs.';
+    } else if (_scannerHealth.lastCycleError) {
+      diagnosis = `RECENT_ERROR — ${_scannerHealth.lastCycleError.slice(0, 100)}`;
+      remedy = 'Fix the underlying error. Check Railway logs for stack trace.';
+    }
+
+    res.json({
+      ok: true,
+      now: nowIso,
+      diagnosis,
+      remedy,
+      inProcess: {
+        botActive:              _botActive,
+        cycleRunning,
+        lastCycleStartedAt:     _scannerHealth.lastCycleStartedAt,
+        lastCycleCompletedAt:   _scannerHealth.lastCycleCompletedAt,
+        lastCycleElapsedMs:     _scannerHealth.lastCycleElapsedMs,
+        lastCycleError:         _scannerHealth.lastCycleError,
+        totalCyclesCompleted:   _scannerHealth.totalCyclesCompleted,
+        totalCycleErrors:       _scannerHealth.totalCycleErrors,
+        secondsSinceLastComplete: sinceCompleteMs == null ? null : Math.round(sinceCompleteMs / 1000),
+        secondsSinceLastStart:    sinceStartMs    == null ? null : Math.round(sinceStartMs    / 1000),
+      },
+      database: {
+        scannerFeedTotal,
+        scannerFeed1h,
+        scannerFeed5m,
+        lastScannerFeedAt,
+        candidatesEvaluated1h: candidates1h,
+        autoPosted1h,
+      },
+      config: {
+        scanIntervalMs: SCAN_INTERVAL_MS,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Health check endpoint for dashboard
