@@ -266,10 +266,12 @@ async function runMidcapTick(dbInstance, heliusKey) {
     }
     console.log(`[midcap-harvester] harvesting ${newMints.length} new midcap coins (of ${rows.length} total)...`);
 
-    // SOL-tier classify — every wallet lands in DB, categorized by SOL:
-    // ≥100 WINNER · 8-99 SMART_MONEY · 1-7 MOMENTUM · <1 HARVESTED_TRADER.
-    // Solscan enricher overrides category with PnL-based tier later.
-    const { classifyAllBySol } = await import('./harvester-cleanup.js');
+    // Whale-hunt filter: only insert wallets with > 3 SOL. Categorize by tier:
+    //   ≥100 SOL → WINNER · 8-99 → SMART_MONEY · 3-7 → MOMENTUM · <3 skipped.
+    // (Midcap harvester is specifically looking for whales holding the top
+    // slots of these CAs — dust wallets get filtered per user directive.)
+    const { filterAndClassifyBySol } = await import('./harvester-cleanup.js');
+    const MIDCAP_MIN_SOL = 3;
 
     let coinsHarvested = 0;
     for (const coin of newMints) {
@@ -280,7 +282,7 @@ async function runMidcapTick(dbInstance, heliusKey) {
       const owners = await resolveTokenAccountOwners(tokenAccounts, heliusKey);
       if (owners.length === 0) { await sleep(INTER_COIN_DELAY_MS); continue; }
 
-      const qualified = await classifyAllBySol(owners, heliusKey);
+      const qualified = await filterAndClassifyBySol(owners, heliusKey, MIDCAP_MIN_SOL);
       let added = 0, promoted = 0;
       for (const cand of qualified) {
         const r = upsertMidcapWallet(dbInstance, cand);

@@ -69,23 +69,25 @@ export async function batchScanSolBalance(addresses, heliusKey) {
 }
 
 /**
- * Helper for harvesters: given a list of candidate wallet addresses,
- * return only those that meet MIN_KEEP_SOL (≥ 8 SOL), tagged with their
- * correct category by SOL tier.
- * [DEPRECATED in favor of classifyAllBySol — kept for any external callers]
+ * Helper for harvesters: skip wallets below `minSol` (default 8) and
+ * classify the rest by SOL tier.
+ *   ≥ 100 SOL → WINNER
+ *   ≥ 8  SOL → SMART_MONEY
+ *   ≥ 1  SOL → MOMENTUM   (only reachable when minSol is lowered below 8)
+ * Used by midcap-harvester for the "only insert real wallets" path.
  */
-export async function filterAndClassifyBySol(addresses, heliusKey) {
+export async function filterAndClassifyBySol(addresses, heliusKey, minSol = MIN_KEEP_SOL) {
   const balances = await batchScanSolBalance(addresses, heliusKey);
   const keepers = [];
   for (const addr of addresses) {
     const sol = balances.get(addr);
     if (sol == null) continue;
-    if (sol < MIN_KEEP_SOL) continue;
-    keepers.push({
-      address:  addr,
-      sol,
-      category: sol >= WHALE_SOL ? 'WINNER' : 'SMART_MONEY',
-    });
+    if (sol < minSol) continue;
+    let category;
+    if      (sol >= WHALE_SOL)    category = 'WINNER';
+    else if (sol >= MIN_KEEP_SOL) category = 'SMART_MONEY';
+    else                          category = 'MOMENTUM';
+    keepers.push({ address: addr, sol, category });
   }
   return keepers;
 }
