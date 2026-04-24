@@ -1255,11 +1255,19 @@ const SCORING_CONFIG_DEFAULTS = {
   rugGuardMinScore:       55,   // AXIOSCAN-MODE — loosened from 58. $13K-$17.5K requires this score.
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:       2.0,  // peak X to lock WIN — 2x minimum bar. Target: 2x floor, sweet spot 3-5x, >5x bonus. Below 2x is LOSS.
+  // ── USER-ONLY KNOB ────────────────────────────────────────────────────
+  // The ONLY knob the auto-optimizer cannot touch. User sets their target
+  // multiplier here (e.g. 5 = "tune the system to find 5x coins"). Auto-
+  // optimizer reads this and tunes everything else (foundation weights,
+  // thresholds, bonuses) to maximize the number of coins that hit this
+  // target. winPeakMultiple stays a fallback WIN bar — anything ≥2.5x
+  // counts as a win even if it didn't reach the target.
+  targetMultiplier:      5.0,   // USER-ONLY. Tuning goal for the whole system.
+  winPeakMultiple:       2.5,   // Fallback WIN threshold — ≥2.5x = WIN, <2.5x = LOSS.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  1500,   // AXIOSCAN-MODE — $1.5K min liquidity (was $3K). Many 10x moonshots start with thin liquidity and grow it.
-  lockedKnobs: ['winPeakMultiple', 'neutralDrawdownPct'],  // knobs auto-optimize cannot touch
+  lockedKnobs: ['targetMultiplier'],  // ONLY the user-target multiplier is locked — bot tunes everything else
   earlyMCapDeferMinutes:   0,   // DISABLED — was deferring $6K-$9K coins 3min, which was holding too many. Set to 0 to skip defer entirely.
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
   earlyMCapDeferMax:    9000,   // upper edge of the defer band ($)
@@ -1298,12 +1306,13 @@ try {
     // the scorer finds coins with that profile via pre-breakout + early-
     // entry + winner-wallet bonuses already shipped.
     const MIGRATE_FORCE = {
-      winPeakMultiple:    2.0,
+      winPeakMultiple:    2.5,  // fallback WIN threshold, was 2.0
       neutralDrawdownPct: 10,
-      sweetSpotBonus:     0,   // user disabled: MCap range isn't a signal
-      secondaryBonus:     0,   // user disabled: MCap range isn't a signal
+      sweetSpotBonus:     0,    // user disabled: MCap range isn't a signal
+      secondaryBonus:     0,    // user disabled: MCap range isn't a signal
+      targetMultiplier:   5.0,  // NEW user-only tuning target
     };
-    const MIGRATE_FORCE_VERSION = 'v5';   // bump to force re-migration (was v4)
+    const MIGRATE_FORCE_VERSION = 'v6';   // bump to force re-migration (was v5)
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -6229,7 +6238,17 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
 
     const prompt = `You are the CONTROL STATION OPTIMIZER for Pulse Caller — a Solana micro-cap token sniper bot.
 
-You have FULL AUTHORITY to change ANY parameter below. No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL config systems to maximize win rate.
+═══ USER'S TUNING TARGET ═══
+The user has set targetMultiplier = ${SCORING_CONFIG.targetMultiplier ?? 5}x.
+This is the ONLY knob you cannot change. Your job is to tune EVERY other
+knob so the bot catches more coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x peaks.
+Any coin that hits at least winPeakMultiple (${SCORING_CONFIG.winPeakMultiple ?? 2.5}x) still counts as a WIN —
+so you're looking for high-quality signal that points at big-run coins, not
+ways to filter to only the ones that already pumped.
+
+You have FULL AUTHORITY to change ANY parameter below EXCEPT targetMultiplier.
+No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL
+config systems to maximize the rate of coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x+.
 
 SAFETY BOUNDS (you MUST stay within these):
 - minScoreToPost: 35-60 (NEVER below 35 — too much spam)
@@ -6334,15 +6353,15 @@ Respond ONLY with valid JSON:
       maxMarketCapOverride: [50000, 500000], minScoreOverride: [28, 55],
     };
 
-    // Locked-knobs list — user's strategic choices the auto-optimizer
-    // must NOT touch. Keeps the human in control of their target profile
-    // while letting Claude still optimize the surrounding knobs.
-    // winPeakMultiple is locked by default because it defines what
-    // "winning" means — that's a product decision, not a tuning lever.
+    // Locked-knobs list — per user directive, ONLY `targetMultiplier` is
+    // off-limits. That knob is the strategic goal ("tune the whole system
+    // to find 5x coins"). Everything else — scoring weights, gate floors,
+    // bonuses, caps, thresholds — is fully delegated to Claude to optimize
+    // toward the targetMultiplier target.
     const LOCKED_KNOBS = new Set(
       Array.isArray(SCORING_CONFIG.lockedKnobs) && SCORING_CONFIG.lockedKnobs.length
         ? SCORING_CONFIG.lockedKnobs
-        : ['winPeakMultiple', 'neutralDrawdownPct']
+        : ['targetMultiplier']
     );
 
     // AUTO-APPLY every change Claude recommends — no approval needed
