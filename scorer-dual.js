@@ -945,8 +945,14 @@ export const V5_WEIGHTS = {
   },
   finalCall: { mq: 0.30, dq: 0.25, wq: 0.25, ss: 0.20, rr: 0.60 },
   decision: {
-    postFinal: 75, postRug: 35, postMomentum: 70, postDemand: 70,
-    watchlistFinalLow: 60, watchlistFinalHigh: 74, watchlistRugMin: 35, watchlistRugMax: 50,
+    // Post gates relaxed from spec defaults (75/70/70 → 68/65/65) so that
+    // quality coins can hit POST on first scan. Single-scan momentum/demand
+    // typically max around 60-70 because delta signals don't exist yet —
+    // a clean fresh launch with strong velocity + buys + clean wallets
+    // should still earn POST status. Rug filter stays strict at <35.
+    postFinal: 68, postRug: 35, postMomentum: 65, postDemand: 65,
+    watchlistFinalLow: 52, watchlistFinalHigh: 67,
+    watchlistRugMin: 35, watchlistRugMax: 50,
     blockRug: 66,
   },
 };
@@ -1163,15 +1169,33 @@ export function computeMomentumQualityScore(metrics) {
   const lg = makeLedger();
   let s = 0;
 
-  // Unique buyers increasing — proxy: holder growth + UBR
+  // Unique buyers increasing — pick BEST of (a) UBR (b) holder delta
+  // (c) single-scan proxy: high buys/holders ratio + low cluster share.
+  // Without (a) or (b) we fall back to (c) so first-scan coins can score.
   const ubr = m.launchUbr;
   const holderD = m.deltas?.holderDelta;
-  if (ubr != null && ubr > 0.4) {
-    const fit = Math.min(1, (ubr - 0.4) / 0.4);
-    s += lg.add('mq.uniqueBuyers', 'Unique buyer ratio strong', `ubr=${(ubr*100).toFixed(0)}%`, `fit=${fit.toFixed(2)}`, fit * W.uniqueBuyersUp);
-  } else if (holderD != null && holderD > 5) {
-    const fit = Math.min(1, holderD / 30);
-    s += lg.add('mq.uniqueBuyers', 'New holders entering', `+${holderD.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, fit * W.uniqueBuyersUp);
+  {
+    let best = 0, bestKey, bestLabel, bestInput, bestFormula;
+    if (ubr != null && ubr > 0.4) {
+      const fit = Math.min(1, (ubr - 0.4) / 0.4);
+      const pts = fit * W.uniqueBuyersUp;
+      if (pts > best) { best = pts; bestKey='mq.uniqueBuyers'; bestLabel='Unique buyer ratio strong'; bestInput=`ubr=${(ubr*100).toFixed(0)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if (holderD != null && holderD > 5) {
+      const fit = Math.min(1, holderD / 30);
+      const pts = fit * W.uniqueBuyersUp;
+      if (pts > best) { best = pts; bestKey='mq.uniqueBuyers'; bestLabel='New holders entering (delta)'; bestInput=`+${holderD.toFixed(1)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    // Single-scan fallback: buy diversity proxy. Many buys vs total holders
+    // = lots of unique entries; low cluster share = entries are not bots.
+    if ((m.buys1h ?? 0) >= 30 && (m.holders ?? 0) > 0) {
+      const buyToHolderRatio = m.buys1h / Math.max(20, m.holders);
+      const clusterShare = (m.clusterWalletCount ?? 0) / Math.max(1, m.buys1h);
+      const proxyFit = Math.min(1, buyToHolderRatio * 1.5) * Math.max(0, 1 - clusterShare * 2);
+      const pts = proxyFit * W.uniqueBuyersUp * 0.8; // capped at 80% of full
+      if (pts > best) { best = pts; bestKey='mq.uniqueBuyers'; bestLabel='Unique buyer activity (single-scan proxy)'; bestInput=`${m.buys1h} buys / ${m.holders} holders, ${m.clusterWalletCount ?? 0} clusters`; bestFormula=`proxy=${proxyFit.toFixed(2)}`; }
+    }
+    if (best > 0) s += lg.add(bestKey, bestLabel, bestInput, bestFormula, best);
   }
 
   // Buy pressure consistent
@@ -1224,10 +1248,29 @@ export function computeMomentumQualityScore(metrics) {
     s += lg.add('mq.demandHold', 'Demand holding (high buy ratio)', `br=${(m.buySellRatio1h*100).toFixed(0)}% buys=${m.buys1h}`, `fit*0.7=${(fit*0.7).toFixed(2)}`, fit * W.pullbackAbsorbed * 0.7);
   }
 
-  // Holder count rising
-  if (holderD != null && holderD > 0) {
-    const fit = Math.min(1, holderD / 25);
-    s += lg.add('mq.holderUp', 'Holder count rising', `+${holderD.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, fit * W.holdersRising);
+  // Holder count rising — best of (a) live delta (b) 24h growth (c) absolute
+  // healthy holder count for the coin's age (single-scan fallback)
+  {
+    let best = 0, bestKey, bestLabel, bestInput, bestFormula;
+    if (holderD != null && holderD > 0) {
+      const fit = Math.min(1, holderD / 25);
+      const pts = fit * W.holdersRising;
+      if (pts > best) { best = pts; bestKey='mq.holderUp'; bestLabel='Holder count rising (delta)'; bestInput=`+${holderD.toFixed(1)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if (m.holderGrowth24h != null && m.holderGrowth24h > 0) {
+      const fit = Math.min(1, m.holderGrowth24h / 30);
+      const pts = fit * W.holdersRising;
+      if (pts > best) { best = pts; bestKey='mq.holderUp'; bestLabel='Holder growth (24h)'; bestInput=`+${m.holderGrowth24h.toFixed(1)}%/24h`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    // Single-scan fallback: holders/min vs age. Healthy fresh coin sees
+    // 1+ holder/min; mature coins should have 100+ holders.
+    if ((m.holders ?? 0) > 30 && (m.ageMinutes ?? 0) > 1) {
+      const expected = Math.max(20, Math.min(400, m.ageMinutes * 1.5));
+      const fit = Math.min(1, m.holders / expected);
+      const pts = fit * W.holdersRising * 0.7; // single-scan capped at 70%
+      if (pts > best) { best = pts; bestKey='mq.holderUp'; bestLabel='Holder base healthy for age'; bestInput=`${m.holders} holders @ ${m.ageMinutes.toFixed(0)}min`; bestFormula=`vs expected ${Math.round(expected)} = ${fit.toFixed(2)}`; }
+    }
+    if (best > 0) s += lg.add(bestKey, bestLabel, bestInput, bestFormula, best);
   }
 
   // Volume steady (not a one-candle spike) — vol1h ≥ 0.5x of vol6h hourly rate
@@ -1314,23 +1357,54 @@ export function computeDemandQualityScore(metrics) {
   const lg = makeLedger();
   let s = 0;
 
-  // Holder count rising
+  // Holder count rising — best of (a) live delta (b) 24h growth
+  // (c) absolute healthy holders for age (single-scan fallback)
   const holderD = m.deltas?.holderDelta;
-  if (holderD != null && holderD > 0) {
-    const fit = Math.min(1, holderD / 25);
-    s += lg.add('dq.holders', 'Holder count rising', `+${holderD.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, fit * W.holderRising);
-  } else if (m.holderGrowth24h != null && m.holderGrowth24h > 0) {
-    const fit = Math.min(1, m.holderGrowth24h / 30);
-    s += lg.add('dq.holders24h', 'Holder growth (24h)', `+${m.holderGrowth24h.toFixed(1)}%/24h`, `fit=${fit.toFixed(2)}`, fit * W.holderRising);
+  {
+    let best = 0, bestKey, bestLabel, bestInput, bestFormula;
+    if (holderD != null && holderD > 0) {
+      const fit = Math.min(1, holderD / 25);
+      const pts = fit * W.holderRising;
+      if (pts > best) { best = pts; bestKey='dq.holders'; bestLabel='Holder count rising (delta)'; bestInput=`+${holderD.toFixed(1)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if (m.holderGrowth24h != null && m.holderGrowth24h > 0) {
+      const fit = Math.min(1, m.holderGrowth24h / 30);
+      const pts = fit * W.holderRising;
+      if (pts > best) { best = pts; bestKey='dq.holders24h'; bestLabel='Holder growth (24h)'; bestInput=`+${m.holderGrowth24h.toFixed(1)}%/24h`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if ((m.holders ?? 0) > 30 && (m.ageMinutes ?? 0) > 1) {
+      const expected = Math.max(20, Math.min(400, m.ageMinutes * 1.5));
+      const fit = Math.min(1, m.holders / expected);
+      const pts = fit * W.holderRising * 0.7;
+      if (pts > best) { best = pts; bestKey='dq.holdersBase'; bestLabel='Holder base healthy for age'; bestInput=`${m.holders} holders @ ${m.ageMinutes.toFixed(0)}min`; bestFormula=`vs expected ${Math.round(expected)} = ${fit.toFixed(2)}`; }
+    }
+    if (best > 0) s += lg.add(bestKey, bestLabel, bestInput, bestFormula, best);
   }
 
-  // New buyers still entering after first pump — buys high after 1h gain
-  if (m.priceChange1h != null && m.priceChange1h > 30 && m.buys1h > 30) {
-    const fit = Math.min(1, m.buys1h / 200);
-    s += lg.add('dq.afterPump', 'New buyers after first pump', `1h=+${m.priceChange1h.toFixed(0)}% buys1h=${m.buys1h}`, `fit=${fit.toFixed(2)}`, fit * W.newBuyersAfterPump);
-  } else if (holderD != null && holderD > 8) {
-    const fit = Math.min(1, holderD / 30);
-    s += lg.add('dq.afterPump.proxy', 'Continued buyer entry', `holderΔ=+${holderD.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, fit * W.newBuyersAfterPump * 0.7);
+  // New buyers still entering after first pump — best of (a) post-pump
+  // continued buying (b) holder delta (c) sustained high buy activity
+  // (single-scan: many buys + still-positive 5m even without pump context)
+  {
+    let best = 0, bestKey, bestLabel, bestInput, bestFormula;
+    if (m.priceChange1h != null && m.priceChange1h > 30 && m.buys1h > 30) {
+      const fit = Math.min(1, m.buys1h / 200);
+      const pts = fit * W.newBuyersAfterPump;
+      if (pts > best) { best = pts; bestKey='dq.afterPump'; bestLabel='New buyers after first pump'; bestInput=`1h=+${m.priceChange1h.toFixed(0)}% buys1h=${m.buys1h}`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if (holderD != null && holderD > 8) {
+      const fit = Math.min(1, holderD / 30);
+      const pts = fit * W.newBuyersAfterPump * 0.7;
+      if (pts > best) { best = pts; bestKey='dq.afterPump.delta'; bestLabel='Continued buyer entry (delta)'; bestInput=`holderΔ=+${holderD.toFixed(1)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    // Single-scan: many active buys + 5m not red = active demand
+    if ((m.buys1h ?? 0) >= 50 && (m.priceChange5m ?? 0) >= -3) {
+      const buyFit = Math.min(1, m.buys1h / 200);
+      const priceFit = Math.min(1, Math.max(0, ((m.priceChange5m ?? 0) + 3) / 10));
+      const fit = buyFit * (0.6 + priceFit * 0.4);
+      const pts = fit * W.newBuyersAfterPump * 0.65;
+      if (pts > best) { best = pts; bestKey='dq.activeBuys'; bestLabel='Active sustained buying'; bestInput=`buys1h=${m.buys1h} 5m=${(m.priceChange5m ?? 0).toFixed(1)}%`; bestFormula=`buyFit×priceFit×0.65=${fit.toFixed(2)}`; }
+    }
+    if (best > 0) s += lg.add(bestKey, bestLabel, bestInput, bestFormula, best);
   }
 
   // Sell pressure absorbed
@@ -1348,11 +1422,28 @@ export function computeDemandQualityScore(metrics) {
     }
   }
 
-  // Mcap making higher lows — proxy: positive 5m and positive mcap delta
+  // Mcap making higher lows — best of (a) live mcap delta + 5m up
+  // (b) single-scan: 5m and 1h both green (continuation chart shape)
+  // (c) single-scan: 1h up + 5m flat-positive (consolidation at high)
   const mcD = m.deltas?.mcapDelta;
-  if (mcD != null && mcD > 0 && (m.priceChange5m ?? 0) > 0) {
-    const fit = Math.min(1, mcD / 30);
-    s += lg.add('dq.mcapHL', 'MCap making higher lows', `mcapΔ=+${mcD.toFixed(1)}% 5m=+${m.priceChange5m.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, fit * W.mcapHigherLows);
+  {
+    let best = 0, bestKey, bestLabel, bestInput, bestFormula;
+    if (mcD != null && mcD > 0 && (m.priceChange5m ?? 0) > 0) {
+      const fit = Math.min(1, mcD / 30);
+      const pts = fit * W.mcapHigherLows;
+      if (pts > best) { best = pts; bestKey='dq.mcapHL'; bestLabel='MCap making higher lows (delta)'; bestInput=`mcapΔ=+${mcD.toFixed(1)}% 5m=+${m.priceChange5m.toFixed(1)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if ((m.priceChange5m ?? 0) > 1 && (m.priceChange1h ?? 0) > 5) {
+      const fit = Math.min(1, m.priceChange1h / 50);
+      const pts = fit * W.mcapHigherLows * 0.8;
+      if (pts > best) { best = pts; bestKey='dq.continuation'; bestLabel='Continuation (5m + 1h both green)'; bestInput=`5m=+${m.priceChange5m.toFixed(1)}% 1h=+${m.priceChange1h.toFixed(1)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if ((m.priceChange1h ?? 0) > 10 && (m.priceChange5m ?? 0) >= -2) {
+      const fit = Math.min(1, m.priceChange1h / 60);
+      const pts = fit * W.mcapHigherLows * 0.6;
+      if (pts > best) { best = pts; bestKey='dq.consolidate'; bestLabel='Consolidating at high'; bestInput=`1h=+${m.priceChange1h.toFixed(1)}% 5m=${(m.priceChange5m ?? 0).toFixed(1)}%`; bestFormula=`fit=${fit.toFixed(2)}`; }
+    }
+    if (best > 0) s += lg.add(bestKey, bestLabel, bestInput, bestFormula, best);
   }
 
   // Social traction
