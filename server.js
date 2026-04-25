@@ -11670,6 +11670,57 @@ app.get('/api/diagnose/apis', async (req, res) => {
   });
 });
 
+// FAST DB-only outcome fix — just promotes any call to WIN where the
+// stored peak_multiple is already >=1.5x but outcome wasn't set correctly.
+// No external API calls. Should be the first thing run before the GeckoTerminal
+// backfill (which is slower and depends on the pool still being indexed).
+app.post('/api/calls/fix-stored-peaks', (req, res) => {
+  setCors(res);
+  try {
+    const WIN_PEAK = 1.5;
+    // Find all rows that should be WIN but aren't
+    const eligible = dbInstance.prepare(`
+      SELECT id, token, contract_address, peak_multiple, outcome
+      FROM calls
+      WHERE peak_multiple IS NOT NULL
+        AND peak_multiple >= ?
+        AND (outcome IS NULL OR outcome != 'WIN')
+    `).all(WIN_PEAK);
+
+    let upgraded = 0;
+    const changes = [];
+    for (const c of eligible) {
+      const ca = c.contract_address;
+      try {
+        dbInstance.prepare(`
+          UPDATE calls SET
+            outcome = 'WIN',
+            outcome_source = COALESCE(outcome_source, 'PEAK_FIX'),
+            outcome_set_at = COALESCE(outcome_set_at, datetime('now')),
+            auto_resolved = 1,
+            auto_resolved_at = COALESCE(auto_resolved_at, datetime('now'))
+          WHERE id = ?
+        `).run(c.id);
+        // Cascade
+        if (ca) {
+          try { dbInstance.prepare(`UPDATE audit_archive SET outcome='WIN', outcome_locked_at=datetime('now') WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(ca); } catch {}
+          try { dbInstance.prepare(`UPDATE calls_archive SET outcome='WIN' WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(ca); } catch {}
+          try { dbInstance.prepare(`UPDATE coin_fingerprints SET outcome='WIN', resolved_at_ms=COALESCE(resolved_at_ms, ?) WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(Date.now(), ca); } catch {}
+        }
+        upgraded++;
+        changes.push({ token: c.token, peak: c.peak_multiple, was: c.outcome });
+      } catch (err) {
+        console.warn('[peak-fix] update failed for $' + c.token + ':', err.message);
+      }
+    }
+    console.log('[peak-fix] upgraded ' + upgraded + ' calls to WIN');
+    res.json({ ok: true, eligible: eligible.length, upgraded, changes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.get('/api/calls/fix-stored-peaks', (req, res) => { req.method='POST'; return app._router.handle(req, res); });
+
 // One-shot ATH backfill — corrects past calls whose peak_multiple was
 // understated because the live tracker only saw current price (often dead
 // by the time it checks). Pulls historical OHLCV from GeckoTerminal,
