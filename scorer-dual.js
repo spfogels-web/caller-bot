@@ -945,13 +945,14 @@ export const V5_WEIGHTS = {
   },
   finalCall: { mq: 0.30, dq: 0.25, wq: 0.25, ss: 0.20, rr: 0.60 },
   decision: {
-    // Post gates relaxed from spec defaults (75/70/70 → 68/65/65) so that
-    // quality coins can hit POST on first scan. Single-scan momentum/demand
-    // typically max around 60-70 because delta signals don't exist yet —
-    // a clean fresh launch with strong velocity + buys + clean wallets
-    // should still earn POST status. Rug filter stays strict at <35.
-    postFinal: 68, postRug: 35, postMomentum: 65, postDemand: 65,
-    watchlistFinalLow: 52, watchlistFinalHigh: 67,
+    // POST gates calibrated against production data (top 12 fresh coins
+    // were stuck at finalCall 60-64, mq/dq capped ~46-78 on first scan
+    // because the wallet DB has no winners on brand-new coins → wq pins
+    // near 50 for everyone). Loosened gates to actually produce POSTs
+    // while keeping rug filter strict (<35) as the real safety wall.
+    //   spec defaults: 75/70/70  →  v1: 68/65/65  →  current: 62/58/55
+    postFinal: 62, postRug: 35, postMomentum: 58, postDemand: 55,
+    watchlistFinalLow: 48, watchlistFinalHigh: 61,
     watchlistRugMin: 35, watchlistRugMax: 50,
     blockRug: 66,
   },
