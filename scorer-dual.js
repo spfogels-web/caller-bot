@@ -2056,7 +2056,9 @@ export function runDualModel(candidate, discoveryWeights = null) {
   const confidence = buildConfidence(candidate, metrics, primary);
 
   // Stuff v5 outputs into parts so they persist via the existing
-  // dual_parts JSON column (no DB migration needed).
+  // dual_parts JSON column (no DB migration needed). Includes the new
+  // activity + reactivation + decision + triggers + context layer so
+  // the dashboard's V5 DECISION CARD has data to render.
   const enrichedParts = {
     ...primary.parts,
     _v5: {
@@ -2073,6 +2075,13 @@ export function runDualModel(candidate, discoveryWeights = null) {
         wallet:   v5.breakdowns.wallet.ledger,
         demand:   v5.breakdowns.demand.ledger,
       },
+      // Activity / reactivation / decision layer
+      activity:     v5.activity,
+      reactivation: v5.reactivation,
+      decision:     v5.decision,
+      triggers:     v5.triggers,
+      context:      v5.context,
+      ageMinutes,
     },
   };
 
