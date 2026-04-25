@@ -30,6 +30,7 @@ import {
   initDb, insertCandidate, insertSubScores, insertCall,
   markCandidatePosted, isRecentlySeen, recordSeen,
   getStats, getRecentCalls, logEvent,
+  recordFingerprint, backfillFingerprintOutcome, getFingerprintStats,
   getCandidates, getCandidateById, getAllCalls,
   getSystemLog, getScoreDistribution, getDecisionBreakdown,
   getTopIgnoredFull, getPendingCalls,
@@ -77,6 +78,7 @@ import {
 import {
   startLearningLoop, detectMissedWinners, runOutcomeTracker, getLearningStats,
   setTelegramHook as setMilestoneTelegramHook,
+  setFingerprintHook,
 } from './missed-winner-tracker.js';
 import {
   startWalletScanner, runDuneWalletScan, crossReferenceHolders as duneXRef,
@@ -3623,6 +3625,10 @@ async function processCandidate(candidate, isRescan = false) {
       const act = v5.activity?.state || '?';
       const rx  = v5.reactivation?.score ? ` rx=${v5.reactivation.score}/${v5.reactivation.status}` : '';
       console.log(`[auto-caller:v5] $${enrichedCandidate.token??ca.slice(0,6)} state=${v5.state}/${act} → ${dec}${rx} · scan=${v5.scores.scanner} rug=${v5.scores.rugRisk} mq=${v5.scores.momentum} wq=${v5.scores.wallet} dq=${v5.scores.demand} → final=${v5.scores.finalCall}`);
+      // Capture fingerprint for the pattern matching library. CALL_NOW /
+      // REVIVING / HARD_REJECT always captured; WATCH / IGNORE throttled
+      // to 1 per 30min per CA per decision label inside the helper.
+      recordFingerprint(enrichedCandidate, { v5 });
     }
 
     // ── STEP 2: Dune Wallet Intelligence Cross-Reference ──────────────────────
@@ -11664,6 +11670,19 @@ app.get('/api/diagnose/apis', async (req, res) => {
   });
 });
 
+// Pattern matching library status — counts of captured fingerprints,
+// resolved outcomes, and a readiness gauge (GROWING / EARLY / READY / STRONG).
+// Once `resolved >= 50`, the matching engine becomes weakly informative.
+app.get('/api/fingerprints/stats', (req, res) => {
+  setCors(res);
+  try {
+    const stats = getFingerprintStats();
+    res.json({ ok: true, ...stats });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/db/health', (req, res) => {
   setCors(res);
   try {
@@ -12649,6 +12668,13 @@ app.listen(PORT, async () => {
   // Wire up milestone TG alerts (2x / 5x / 10x on active calls). Uses the
   // group chat, and respects pausePosting so a paused bot stays silent.
   // Milestone alerts go to VIP always; at 2x we ALSO post the original call
+  // Wire the fingerprint backfill — outcome tracker calls this whenever
+  // peak_multiple gets rolled forward, so the pattern matching library
+  // continuously learns from resolved coins.
+  setFingerprintHook((ca, peakMultiple, peakMcap, peakAtMs, outcome) => {
+    backfillFingerprintOutcome(ca, peakMultiple, peakMcap, peakAtMs, outcome);
+  });
+
   // to the free channel (AXIOSCAN-style 2x-delayed free tier), and every
   // subsequent milestone (5/10/25x) also hits the free channel.
   setMilestoneTelegramHook(async (msg, meta = {}) => {

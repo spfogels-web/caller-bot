@@ -691,6 +691,65 @@ function runMigrations() {
     `ALTER TABLE calls ADD COLUMN peak_mcap_6h REAL`,
     `ALTER TABLE calls ADD COLUMN last_snapshot_at TEXT`,
     `ALTER TABLE calls ADD COLUMN peak_mcap REAL`,
+    // v11: Pattern matching infrastructure — coin fingerprints library.
+    // Captures a snapshot of every meaningful evaluation (CALL_NOW /
+    // WATCH_FOR_TRIGGER / REVIVING / HARD_REJECT) so that once we have
+    // enough resolved outcomes we can do similarity matching against
+    // historical patterns. NO auto-cleanup — this is the training set.
+    `CREATE TABLE IF NOT EXISTS coin_fingerprints (
+      id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+      contract_address         TEXT    NOT NULL,
+      token                    TEXT,
+      taken_at_ms              INTEGER NOT NULL,
+      -- Context at capture time
+      age_minutes              REAL,
+      lifecycle_state          TEXT,
+      activity_state           TEXT,
+      decision                 TEXT,
+      -- Fingerprint feature vector (raw inputs the scorer used)
+      market_cap               REAL,
+      liquidity                REAL,
+      liq_mcap_ratio           REAL,
+      buy_velocity             REAL,
+      buy_sell_ratio_1h        REAL,
+      buys_1h                  INTEGER,
+      sells_1h                 INTEGER,
+      total_txns_1h            INTEGER,
+      volume_1h                REAL,
+      volume_acceleration      REAL,
+      dev_wallet_pct           REAL,
+      top10_holder_pct         REAL,
+      holders                  INTEGER,
+      holder_growth_24h        REAL,
+      sniper_wallet_count      INTEGER,
+      cluster_wallet_count     INTEGER,
+      known_winner_count       INTEGER,
+      smart_money_score        REAL,
+      bundle_risk              TEXT,
+      price_change_5m          REAL,
+      price_change_1h          REAL,
+      momentum_shift           REAL,
+      -- Scores at capture (V5)
+      scanner_score            INTEGER,
+      rug_risk_score           INTEGER,
+      momentum_quality_score   INTEGER,
+      wallet_quality_score     INTEGER,
+      demand_quality_score     INTEGER,
+      final_call_score         INTEGER,
+      reactivation_score       INTEGER,
+      labels                   TEXT,
+      -- Outcome (NULL until resolved by missed-winner-tracker)
+      outcome                  TEXT,
+      peak_multiple            REAL,
+      peak_mcap                REAL,
+      peak_at_ms               INTEGER,
+      resolved_at_ms           INTEGER,
+      created_at               TEXT    DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_fp_ca       ON coin_fingerprints(contract_address, taken_at_ms DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_fp_outcome  ON coin_fingerprints(outcome)`,
+    `CREATE INDEX IF NOT EXISTS idx_fp_decision ON coin_fingerprints(decision, taken_at_ms DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_fp_pending  ON coin_fingerprints(outcome) WHERE outcome IS NULL`,
   ];
 
   let added = 0;
@@ -1582,6 +1641,159 @@ export function getScannerFeed({ limit = 200, action = null, minAge = null, maxA
   `).all();
 
   return { rows, total, actionCounts };
+}
+
+// ─── COIN FINGERPRINTS — pattern matching infrastructure ──────────────────
+// Captures a feature vector + V5 scores + decision at significant evaluation
+// moments. Outcome (WIN/LOSS/etc + peak_multiple) gets backfilled by the
+// missed-winner-tracker when resolved. Once we have ~100 resolved
+// fingerprints we can flip on the matching engine that finds historical
+// neighbors for each new coin.
+//
+// Capture rules (enforced by recordFingerprint):
+//   - Always capture: CALL_NOW, REVIVING, HARD_REJECT (high-signal moments)
+//   - Throttled capture for WATCH_FOR_TRIGGER / IGNORE_FOR_NOW: max 1 per
+//     CA per decision label per 30 minutes (avoids bloat from rescans)
+const _fpThrottle = new Map(); // ca:decision -> lastCaptureMs
+const FP_THROTTLE_MS = 30 * 60 * 1000;
+
+export function recordFingerprint(candidate, scoreResult) {
+  try {
+    const v5 = scoreResult?.v5 ?? scoreResult?.parts?._v5;
+    if (!v5 || !v5.decision) return null;
+    const ca = candidate.contractAddress ?? candidate.contract_address;
+    if (!ca) return null;
+
+    const decision = v5.decision.label;
+    // Throttle low-signal repeat captures (WATCH/IGNORE on same coin)
+    const isHighSignal = decision === 'CALL_NOW' || decision === 'REVIVING' || decision === 'HARD_REJECT';
+    if (!isHighSignal) {
+      const key  = ca + ':' + decision;
+      const last = _fpThrottle.get(key) ?? 0;
+      if (Date.now() - last < FP_THROTTLE_MS) return null;
+      _fpThrottle.set(key, Date.now());
+    }
+
+    const m = v5.scores ?? {};
+    const txns = (candidate.buys1h ?? 0) + (candidate.sells1h ?? 0);
+    const v1 = candidate.volume1h ?? 0;
+    const v6 = candidate.volume6h ?? 0;
+    const volAccel = (v1 > 0 && v6 > 0) ? (v1 / Math.max(1, v6 / 6)) : null;
+    const liqMcap = (candidate.liquidity > 0 && candidate.marketCap > 0)
+      ? candidate.liquidity / candidate.marketCap : null;
+    // momentumShift is on metrics; recompute simply from price changes
+    let momentumShift = null;
+    const p5 = candidate.priceChange5m, p1 = candidate.priceChange1h;
+    if (p5 != null && p1 != null) momentumShift = (p5 / 5) - (p1 / 60);
+
+    db.prepare(`
+      INSERT INTO coin_fingerprints (
+        contract_address, token, taken_at_ms,
+        age_minutes, lifecycle_state, activity_state, decision,
+        market_cap, liquidity, liq_mcap_ratio,
+        buy_velocity, buy_sell_ratio_1h, buys_1h, sells_1h, total_txns_1h,
+        volume_1h, volume_acceleration,
+        dev_wallet_pct, top10_holder_pct, holders, holder_growth_24h,
+        sniper_wallet_count, cluster_wallet_count, known_winner_count,
+        smart_money_score, bundle_risk,
+        price_change_5m, price_change_1h, momentum_shift,
+        scanner_score, rug_risk_score, momentum_quality_score,
+        wallet_quality_score, demand_quality_score, final_call_score,
+        reactivation_score, labels
+      ) VALUES (?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?,  ?, ?, ?, ?,  ?, ?, ?,  ?, ?,  ?, ?, ?,  ?, ?, ?, ?, ?, ?,  ?, ?)
+    `).run(
+      ca,
+      candidate.token ?? null,
+      Date.now(),
+      v5.ageMinutes ?? candidate.ageMinutes ?? (candidate.pairAgeHours != null ? candidate.pairAgeHours * 60 : null),
+      v5.state ?? null,
+      v5.activity?.state ?? null,
+      decision,
+      candidate.marketCap ?? null,
+      candidate.liquidity ?? null,
+      liqMcap,
+      candidate.buyVelocity ?? null,
+      candidate.buySellRatio1h ?? null,
+      candidate.buys1h ?? null,
+      candidate.sells1h ?? null,
+      txns || null,
+      v1 || null,
+      volAccel,
+      candidate.devWalletPct ?? null,
+      candidate.top10HolderPct ?? null,
+      candidate.holders ?? null,
+      candidate.holderGrowth24h ?? null,
+      candidate.sniperWalletCount ?? null,
+      candidate.clusterWalletCount ?? null,
+      candidate.knownWinnerWalletCount ?? candidate.knownWinnerCount ?? null,
+      candidate.smartMoneyScore ?? null,
+      candidate.bundleRisk ?? null,
+      candidate.priceChange5m ?? null,
+      candidate.priceChange1h ?? null,
+      momentumShift,
+      m.scanner ?? null,
+      m.rugRisk ?? null,
+      m.momentum ?? null,
+      m.wallet ?? null,
+      m.demand ?? null,
+      m.finalCall ?? null,
+      v5.reactivation?.score ?? null,
+      Array.isArray(v5.labels) ? v5.labels.join(',') : null
+    );
+    return true;
+  } catch (err) {
+    // Never crash scoring on a fingerprint write failure
+    console.warn('[fingerprint] write failed:', err.message);
+    return false;
+  }
+}
+
+// Backfill outcome on all fingerprints for this CA. Called from the
+// outcome tracker once peak_multiple is known.
+export function backfillFingerprintOutcome(ca, peakMultiple, peakMcap, peakAtMs, outcomeOverride = null) {
+  if (!ca || peakMultiple == null) return 0;
+  const outcome = outcomeOverride
+    ?? (peakMultiple >= 1.5 ? 'WIN'
+      : peakMultiple >= 0.9 ? 'NEUTRAL'
+      : peakMultiple >= 0.5 ? 'LOSS'
+      : 'RUG');
+  try {
+    const r = db.prepare(`
+      UPDATE coin_fingerprints
+      SET outcome = ?,
+          peak_multiple = CASE WHEN peak_multiple IS NULL OR ? > peak_multiple THEN ? ELSE peak_multiple END,
+          peak_mcap     = CASE WHEN peak_mcap     IS NULL OR ? > peak_mcap     THEN ? ELSE peak_mcap     END,
+          peak_at_ms    = COALESCE(peak_at_ms, ?),
+          resolved_at_ms = ?
+      WHERE contract_address = ?
+    `).run(outcome, peakMultiple, peakMultiple, peakMcap, peakMcap, peakAtMs ?? null, Date.now(), ca);
+    return r.changes ?? 0;
+  } catch (err) {
+    console.warn('[fingerprint] backfill failed:', err.message);
+    return 0;
+  }
+}
+
+// Stats helper for /api/fingerprints/stats — shows training-set readiness
+export function getFingerprintStats() {
+  const total = db.prepare('SELECT COUNT(*) AS n FROM coin_fingerprints').get().n;
+  const resolved = db.prepare('SELECT COUNT(*) AS n FROM coin_fingerprints WHERE outcome IS NOT NULL').get().n;
+  const pending  = total - resolved;
+  const byDecision = db.prepare(`
+    SELECT decision, COUNT(*) AS n
+    FROM coin_fingerprints GROUP BY decision ORDER BY n DESC
+  `).all();
+  const byOutcome = db.prepare(`
+    SELECT outcome, COUNT(*) AS n
+    FROM coin_fingerprints WHERE outcome IS NOT NULL GROUP BY outcome ORDER BY n DESC
+  `).all();
+  // Readiness gates — when matching engine becomes statistically viable
+  let readiness;
+  if (resolved >= 200)      readiness = { level: 'STRONG', detail: 'Pattern matching ready — large sample' };
+  else if (resolved >= 100) readiness = { level: 'READY',  detail: 'Pattern matching viable — moderate sample' };
+  else if (resolved >= 50)  readiness = { level: 'EARLY',  detail: 'Pattern matching weakly informative — small sample' };
+  else                      readiness = { level: 'GROWING',detail: `Need ${50 - resolved} more resolved fingerprints to enable matching` };
+  return { total, resolved, pending, byDecision, byOutcome, readiness };
 }
 
 export function logEvent(level = 'INFO', event, detail = null) {

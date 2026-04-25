@@ -25,6 +25,16 @@ const DEXSCREENER_API = 'https://api.dexscreener.com';
 // When set, milestone alerts (2x/5x/10x) get pushed to TG.
 let _telegramHook = null;
 export function setTelegramHook(fn) { _telegramHook = typeof fn === 'function' ? fn : null; }
+
+// Optional fingerprint backfill — server.js wires this via setFingerprintHook.
+// Called whenever an outcome (peak_multiple) is set or rolled forward, so the
+// pattern matching library learns from resolved coins.
+let _fpHook = null;
+export function setFingerprintHook(fn) { _fpHook = typeof fn === 'function' ? fn : null; }
+function backfillFp(ca, peakMult, peakMcap, peakAtMs, outcome) {
+  try { if (_fpHook && ca && peakMult != null) _fpHook(ca, peakMult, peakMcap, peakAtMs, outcome); }
+  catch (err) { /* never crash the tracker on a backfill error */ }
+}
 const CLAUDE_API_URL  = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL    = 'claude-sonnet-4-20250514';
 
@@ -360,6 +370,8 @@ export async function runOutcomeTracker(dbInstance) {
         if (ca) {
           try { dbInstance.prepare(`UPDATE audit_archive SET outcome='WIN', outcome_locked_at=datetime('now'), peak_multiple=CASE WHEN peak_multiple IS NULL OR ?> peak_multiple THEN ? ELSE peak_multiple END WHERE contract_address=?`).run(call.peak_multiple, call.peak_multiple, ca); } catch {}
           try { dbInstance.prepare(`UPDATE calls_archive SET outcome='WIN', peak_multiple=CASE WHEN peak_multiple IS NULL OR ?>peak_multiple THEN ? ELSE peak_multiple END WHERE contract_address=?`).run(call.peak_multiple, call.peak_multiple, ca); } catch {}
+          // Backfill into pattern matching library
+          backfillFp(ca, call.peak_multiple, call.peak_mcap ?? null, null, 'WIN');
         }
         console.log(`[outcome-tracker] ✅ FIXED: $${call.token} peak=${call.peak_multiple.toFixed(2)}x was ${call.outcome} → WIN`);
         await sleep(300); continue;
@@ -423,6 +435,8 @@ export async function runOutcomeTracker(dbInstance) {
             w6, w6, w6,
             call.id
           );
+          // Roll the same outcome forward into the pattern matching library
+          backfillFp(ca, multNow, currentMc, Date.now(), null);
         } catch (err) {
           console.warn('[outcome-tracker] calls-row snapshot update failed:', err.message);
         }
