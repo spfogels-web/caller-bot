@@ -7056,14 +7056,48 @@ function renderAuditList(){
       ? '<div style="font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:3px;background:'+confCol+'14;border:1px solid '+confCol+'44;color:'+confCol+';margin-top:2px;letter-spacing:0.5px" title="Bot confidence in this call (data completeness + score clarity + AI agreement + structure + penalties)">🎯 '+confVal+'%</div>'
       : '';
 
-    // Score block — show ⏳ SCORING badge (clickable to trigger) for unscored rows
+    // V5 decision pill — pull from dualParts._v5 if available. Replaces the
+    // legacy decision label on the right side of each card so the user sees
+    // CALL_NOW / WATCH_FOR_TRIGGER / REVIVING / IGNORE_FOR_NOW / HARD_REJECT
+    // alongside the activity state pill.
+    var v5Dp = (function(){
+      try {
+        var dp = r.dualParts || r.dual_parts;
+        if (typeof dp === 'string') dp = JSON.parse(dp);
+        return dp && dp._v5 ? dp._v5 : null;
+      } catch(e){ return null; }
+    })();
+    var v5DecLabel = v5Dp?.decision?.label || null;
+    var v5ActState = v5Dp?.activity?.state || null;
+    var V5_DEC_STYLE = {
+      CALL_NOW:          { col:'#00e676', label:'CALL NOW',   emoji:'🟢' },
+      WATCH_FOR_TRIGGER: { col:'#ffd740', label:'WATCH',      emoji:'👁' },
+      REVIVING:          { col:'#18ffff', label:'REVIVING',   emoji:'🔄' },
+      IGNORE_FOR_NOW:    { col:'#88aacc', label:'IGNORE',     emoji:'⏸' },
+      HARD_REJECT:       { col:'#ff1744', label:'REJECT',     emoji:'⛔' },
+    };
+    var V5_ACT_COL = { NEW:'#80deea', WATCHING:'#ffd740', QUIET:'#88aacc', REVIVING:'#18ffff', HOT:'#00e676', REJECTED:'#ff1744' };
+    var v5DecBadge = '';
+    var v5ActBadge = '';
+    if (v5DecLabel && V5_DEC_STYLE[v5DecLabel]) {
+      var st = V5_DEC_STYLE[v5DecLabel];
+      v5DecBadge = '<div style="font-family:var(--mono);font-size:8px;font-weight:800;padding:3px 8px;border-radius:4px;background:'+st.col+'22;border:1.5px solid '+st.col+';color:'+st.col+';margin-top:3px;letter-spacing:0.8px">'+st.emoji+' '+st.label+'</div>';
+    }
+    if (v5ActState && V5_ACT_COL[v5ActState]) {
+      var ac = V5_ACT_COL[v5ActState];
+      v5ActBadge = '<div style="font-family:var(--mono);font-size:7px;font-weight:700;padding:2px 6px;border-radius:3px;background:'+ac+'14;border:1px solid '+ac+'44;color:'+ac+';margin-top:2px;letter-spacing:0.6px">'+v5ActState+'</div>';
+    }
+
+    // Score block — show ⏳ SCORING badge (clickable to trigger) for unscored rows.
+    // When V5 decision is available, prefer the V5 pill over the legacy decision label.
     var scoreBlock = isScoring
       ? '<div class="score-pending" data-ca="'+esc(r.contractAddress||'')+'" style="text-align:right;flex-shrink:0">'+
           '<div style="font-family:var(--mono);font-size:9px;font-weight:700;padding:4px 9px;border-radius:4px;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.25);color:var(--cyan);letter-spacing:1px">⏳ SCORING</div>'+
         '</div>'
       : '<div style="text-align:right;flex-shrink:0">'+
           '<div class="coin-score-big" style="color:'+sCol+';text-shadow:0 0 10px '+sCol+'44">'+displayScore+'</div>'+
-          '<div style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:'+decCol2+'18;border:1px solid '+decCol2+'44;color:'+decCol2+';margin-top:3px">'+esc(dec)+'</div>'+
+          (v5DecBadge || '<div style="font-family:var(--mono);font-size:7px;padding:2px 6px;border-radius:3px;background:'+decCol2+'18;border:1px solid '+decCol2+'44;color:'+decCol2+';margin-top:3px">'+esc(dec)+'</div>')+
+          v5ActBadge+
           confBadge+
         '</div>';
 
