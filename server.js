@@ -1255,11 +1255,19 @@ const SCORING_CONFIG_DEFAULTS = {
   rugGuardMinScore:       55,   // AXIOSCAN-MODE — loosened from 58. $13K-$17.5K requires this score.
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
-  winPeakMultiple:       2.0,  // peak X to lock WIN — 2x minimum bar. Target: 2x floor, sweet spot 3-5x, >5x bonus. Below 2x is LOSS.
+  // ── USER-ONLY KNOB ────────────────────────────────────────────────────
+  // The ONLY knob the auto-optimizer cannot touch. User sets their target
+  // multiplier here (e.g. 5 = "tune the system to find 5x coins"). Auto-
+  // optimizer reads this and tunes everything else (foundation weights,
+  // thresholds, bonuses) to maximize the number of coins that hit this
+  // target. winPeakMultiple stays a fallback WIN bar — anything ≥2.5x
+  // counts as a win even if it didn't reach the target.
+  targetMultiplier:      5.0,   // USER-ONLY. Tuning goal for the whole system.
+  winPeakMultiple:       2.5,   // Fallback WIN threshold — ≥2.5x = WIN, <2.5x = LOSS.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  1500,   // AXIOSCAN-MODE — $1.5K min liquidity (was $3K). Many 10x moonshots start with thin liquidity and grow it.
-  lockedKnobs: ['winPeakMultiple', 'neutralDrawdownPct'],  // knobs auto-optimize cannot touch
+  lockedKnobs: ['targetMultiplier'],  // ONLY the user-target multiplier is locked — bot tunes everything else
   earlyMCapDeferMinutes:   0,   // DISABLED — was deferring $6K-$9K coins 3min, which was holding too many. Set to 0 to skip defer entirely.
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
   earlyMCapDeferMax:    9000,   // upper edge of the defer band ($)
@@ -1298,12 +1306,13 @@ try {
     // the scorer finds coins with that profile via pre-breakout + early-
     // entry + winner-wallet bonuses already shipped.
     const MIGRATE_FORCE = {
-      winPeakMultiple:    2.0,
+      winPeakMultiple:    2.5,  // fallback WIN threshold, was 2.0
       neutralDrawdownPct: 10,
-      sweetSpotBonus:     0,   // user disabled: MCap range isn't a signal
-      secondaryBonus:     0,   // user disabled: MCap range isn't a signal
+      sweetSpotBonus:     0,    // user disabled: MCap range isn't a signal
+      secondaryBonus:     0,    // user disabled: MCap range isn't a signal
+      targetMultiplier:   5.0,  // NEW user-only tuning target
     };
-    const MIGRATE_FORCE_VERSION = 'v5';   // bump to force re-migration (was v4)
+    const MIGRATE_FORCE_VERSION = 'v6';   // bump to force re-migration (was v5)
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -2832,6 +2841,54 @@ async function handleTelegramMessageAIOS(chatId, text, fromUserId) {
 
 let cycleRunning = false;
 
+// Smart-money retry queue — when a fresh coin from the smart-money watcher
+// arrives before DexScreener/Birdeye have indexed it, we queue it for a
+// single retry 2min later. If still empty at retry, drop. Prevents us
+// from losing alpha on coins that are SO fresh the data sources lag.
+const _smRetryQueue = new Map();   // ca → { candidate, retryAt, attempts }
+const SM_RETRY_DELAY_MS    = 2 * 60 * 1000;
+const SM_RETRY_MAX_ATTEMPTS = 1;   // 1 retry then give up
+
+function enqueueSmartMoneyRetry(ca, candidate) {
+  if (!ca) return;
+  const existing = _smRetryQueue.get(ca);
+  const attempts = (existing?.attempts ?? candidate?._smRetryAttempt ?? 0) + 1;
+  if (attempts > SM_RETRY_MAX_ATTEMPTS) return;
+  _smRetryQueue.set(ca, { candidate, retryAt: Date.now() + SM_RETRY_DELAY_MS, attempts });
+}
+
+async function processSmartMoneyRetries() {
+  if (_smRetryQueue.size === 0) return;
+  const now = Date.now();
+  const due = [];
+  for (const [ca, entry] of _smRetryQueue.entries()) {
+    if (entry.retryAt <= now) { due.push([ca, entry]); }
+  }
+  for (const [ca, entry] of due) {
+    _smRetryQueue.delete(ca);
+    try {
+      console.log(`[sm-retry] attempting retry for ${ca.slice(0,8)} (attempt ${entry.attempts})`);
+      await processCandidate(entry.candidate, false);
+    } catch (err) {
+      console.warn(`[sm-retry] retry failed for ${ca.slice(0,8)}: ${err.message}`);
+    }
+  }
+}
+
+// Scanner health telemetry — surfaces via /api/health/scanner so we can
+// diagnose "scanner stopped scanning" droughts without Railway log access.
+let _scannerHealth = {
+  lastCycleStartedAt:   null,
+  lastCycleCompletedAt: null,
+  lastCycleElapsedMs:   null,
+  lastCycleError:       null,
+  totalCyclesCompleted: 0,
+  totalCycleErrors:     0,
+  lastRawPairsCount:    null,
+  lastCandidatesCount:  null,
+  lastDexscreenerHttp:  null,
+};
+
 async function processCandidate(candidate, isRescan = false) {
   if (!_botActive) return; // Master toggle OFF — skip everything
   const ca = candidate.contractAddress;
@@ -2947,9 +3004,19 @@ async function processCandidate(candidate, isRescan = false) {
 
     // ── DATA QUALITY GATE: reject tokens with zero enrichment data ────────
     // If Birdeye AND Helius both failed AND we have no market cap, this token
-    // has no real data — scoring is meaningless. Don't waste Claude/OpenAI
-    // credits evaluating air.
+    // has no real data. Always drop — no useful signal with this little
+    // information. Smart-money alerts get queued for ONE retry at +2min
+    // (DexScreener usually indexes fresh pools in that window) before being
+    // dropped permanently.
     if (!enrichedCandidate.birdeyeOk && !enrichedCandidate.heliusOk && enrichedCandidate.marketCap == null) {
+      const sm = enrichedCandidate._smartMoney;
+      const alreadyRetried = !!enrichedCandidate._smRetryAttempt;
+      if (sm && !alreadyRetried) {
+        console.log(`[auto-caller] 🔁 $${ca.slice(0,8)} — ${sm.kind} signal, enrichment empty → queueing 2min retry`);
+        enqueueSmartMoneyRetry(ca, { ...candidate, _smRetryAttempt: 1 });
+        fnl('dataVoidRetry');
+        return;
+      }
       console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — zero enrichment data (no Birdeye, no Helius, no mcap). Skipping.`);
       fnl('dataVoidSkip');
       logEvent('INFO', 'DATA_VOID_SKIP', `${enrichedCandidate.token ?? ca.slice(0,8)} — birdeye=✗ helius=✗ mcap=null`);
@@ -3183,6 +3250,26 @@ async function processCandidate(candidate, isRescan = false) {
           console.log(`[auto-caller] 🎯 META $${enrichedCandidate.token ?? ca.slice(0,6)} matched: ${words} · +${applied}`);
         }
       }
+
+      // Whale-funded holders — whales that funded fresh wallets within 48h.
+      // If ≥1 such wallet is holding this candidate, it's a near-real-time
+      // "whale is buying X through a burner" signal. +4 for 1, +6 for 2+.
+      try {
+        const holders = enrichedCandidate.knownWinnerWallets ?? [];
+        if (holders.length > 0) {
+          const { countRecentlyWhaleFunded } = await import('./whale-funding-tracker.js');
+          const n = countRecentlyWhaleFunded(dbInstance, holders, 48);
+          if (n > 0) {
+            const bonus = n >= 2 ? 6 : 4;
+            const applied = addBonusCapped(bonus);
+            if (applied > 0) {
+              (scoreResult.signals = scoreResult.signals || {}).wallet = scoreResult.signals.wallet || [];
+              scoreResult.signals.wallet.push(`+${applied} WHALE_FUNDED_HOLDER — ${n} wallet${n>1?'s':''} funded by whale in last 48h`);
+              console.log(`[auto-caller] 🔗 WHALE_FUNDED $${enrichedCandidate.token ?? ca.slice(0,6)} — ${n} holder(s) freshly whale-funded · +${applied}`);
+            }
+          }
+        }
+      } catch {}
 
       // #5 Liquidity trajectory (needs ≥2 snapshots, so first scans won't trigger)
       const traj = getLiquidityTrajectory(dbInstance, ca);
@@ -4270,6 +4357,17 @@ async function processCandidate(candidate, isRescan = false) {
       });
     }
 
+    // ── FINAL HARD GATE: never post a call without a market cap ──────────
+    // Catches all upstream paths — smart-money overrides, fast-lane bypass,
+    // AI upgrades — if mcap is missing, the call has no useful info for the
+    // reader. Downgrade to WATCHLIST so we can revisit if data arrives.
+    if (finalDecision === 'AUTO_POST' &&
+        (enrichedCandidate.marketCap == null || enrichedCandidate.marketCap === 0)) {
+      console.log(`[auto-caller] 🚫 $${enrichedCandidate.token ?? ca.slice(0,8)} — blocked AUTO_POST: no marketCap available (would post blind). → WATCHLIST`);
+      logEvent('INFO', 'NO_MCAP_BLOCK', `${ca} — blocked AUTO_POST, no mcap to show reader`);
+      finalDecision = 'WATCHLIST';
+    }
+
     // Post if AUTO_POST — even if Claude verdict is null (Claude may have timed out/failed)
     // A null verdict means we fall back to scorer decision, which is still valid
     if (finalDecision === 'AUTO_POST') {
@@ -4312,21 +4410,12 @@ async function processCandidate(candidate, isRescan = false) {
       const coinImg  = enrichedCandidate.imageUrl
                     || (caForImg ? `https://dd.dexscreener.com/ds-data/tokens/solana/${caForImg}.png` : null);
 
-      // Respect pausePosting config override (set via dashboard or /config Telegram command)
-      if (AI_CONFIG_OVERRIDES.pausePosting) {
-        fnl('pausedPosting');
-        console.log(`[ai-os] ⏸ Posting PAUSED — $${enrichedCandidate.token} would have posted (score ${scoreResult.score})`);
-        logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
-      } else {
-        fnl('posted');
-        await sendCallAlertWithImage(caption, null, coinImg);
-      }
-
-      await sleep(1500);
-      // ── CA beacon for third-party bots (Phanes, Sect, etc.) ──────────────
-      // Sent as plain text, no HTML parse_mode, no preview, just the CA —
-      // this is what the leaderboard bots scan the chat for.
-      // Respect pausePosting — if posting is paused, don't send the beacon either.
+      // ── CA beacon FIRST (Phanes, Sect Board, leaderboard trackers) ──────
+      // Posted as a plain-text message with just the CA — mirrors the way
+      // a human user would drop a call in the group. This is what Phanes
+      // and Sect scan for to credit the caller on their leaderboards. MUST
+      // go out BEFORE the analysis card so the attribution sticks to the
+      // Pulse bot account. Respect pausePosting.
       const caBeacon = enrichedCandidate.contractAddress ?? '';
       if (caBeacon && TELEGRAM_BOT_TOKEN && TELEGRAM_GROUP_CHAT_ID && !AI_CONFIG_OVERRIDES.pausePosting) {
         try {
@@ -4341,10 +4430,21 @@ async function processCandidate(candidate, isRescan = false) {
             signal: AbortSignal.timeout(10_000),
           });
           if (!r.ok) console.warn(`[TG-CA] beacon status ${r.status}: ${(await r.text()).slice(0,150)}`);
-          else console.log(`[TG-CA] ✓ CA beacon posted for Phanes/Sect: ${caBeacon}`);
+          else console.log(`[TG-CA] ✓ CA beacon posted FIRST for Phanes/Sect: ${caBeacon}`);
         } catch (err) {
           console.warn(`[TG-CA] beacon failed: ${err.message}`);
         }
+        await sleep(1500); // give leaderboard bots a moment to pick up the CA
+      }
+
+      // Respect pausePosting config override (set via dashboard or /config Telegram command)
+      if (AI_CONFIG_OVERRIDES.pausePosting) {
+        fnl('pausedPosting');
+        console.log(`[ai-os] ⏸ Posting PAUSED — $${enrichedCandidate.token} would have posted (score ${scoreResult.score})`);
+        logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
+      } else {
+        fnl('posted');
+        await sendCallAlertWithImage(caption, null, coinImg);
       }
 
       // ── Archive this call permanently (AUTO_POST) ─────────────────────────
@@ -4603,11 +4703,12 @@ async function processRescanQueue() {
 }
 
 async function runAutoCallerCycle() {
-  if (!_botActive) return; // Master toggle OFF — don't scan
+  if (!_botActive) { _scannerHealth.lastCycleError = 'BOT_INACTIVE — master toggle OFF'; return; }
   if (cycleRunning) { console.log('[auto-caller] Previous cycle running — skipping'); return; }
 
   cycleRunning     = true;
   const cycleStart = Date.now();
+  _scannerHealth.lastCycleStartedAt = new Date().toISOString();
   console.log('[auto-caller] ━━━ Cycle start', new Date().toISOString());
   logEvent('INFO', 'CYCLE_START');
   botStartCycle('NEW_COINS');
@@ -4743,10 +4844,16 @@ async function runAutoCallerCycle() {
     console.error('[auto-caller] Cycle error:', err.message);
     logEvent('ERROR', 'CYCLE_ERROR', err.message);
     botError('NEW_COINS', err.message);
+    _scannerHealth.lastCycleError    = err.message + ' @ ' + new Date().toISOString();
+    _scannerHealth.totalCycleErrors++;
     await sendAdminAlert(`❌ Cycle error:\n${escapeHtml(err.message.slice(0,300))}`);
   } finally {
     cycleRunning  = false;
-    const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
+    const elapsedMs = Date.now() - cycleStart;
+    const elapsed   = (elapsedMs / 1000).toFixed(1);
+    _scannerHealth.lastCycleCompletedAt = new Date().toISOString();
+    _scannerHealth.lastCycleElapsedMs   = elapsedMs;
+    _scannerHealth.totalCyclesCompleted++;
     botEndCycle('NEW_COINS', { candidatesFound: 0 });
     console.log(`[auto-caller] ━━━ Cycle complete in ${elapsed}s`);
     logEvent('INFO', 'CYCLE_COMPLETE', `elapsed=${elapsed}s`);
@@ -4790,6 +4897,16 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
     basePart =
       `⚡ <b>FAST-LANE CALL</b> ⚡\n` +
       `<i>${fl.winners} winner wallets already holding · bypassed AI gate · Axioscan-mode.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
+  }
+
+  // Prepend a data-limited warning if enrichment was incomplete but the
+  // smart-money cluster/KOL signal overrode the data-void skip. Reader
+  // needs to know the MCap/liquidity numbers below may be stale or missing.
+  if (candidate._limitedData) {
+    basePart =
+      `⚠️ <b>DATA LIMITED</b> — coin is too fresh; Birdeye/DexScreener haven't indexed yet. Numbers may be incomplete. Signal trusted on wallet conviction alone.\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       basePart;
   }
@@ -6209,7 +6326,17 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
 
     const prompt = `You are the CONTROL STATION OPTIMIZER for Pulse Caller — a Solana micro-cap token sniper bot.
 
-You have FULL AUTHORITY to change ANY parameter below. No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL config systems to maximize win rate.
+═══ USER'S TUNING TARGET ═══
+The user has set targetMultiplier = ${SCORING_CONFIG.targetMultiplier ?? 5}x.
+This is the ONLY knob you cannot change. Your job is to tune EVERY other
+knob so the bot catches more coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x peaks.
+Any coin that hits at least winPeakMultiple (${SCORING_CONFIG.winPeakMultiple ?? 2.5}x) still counts as a WIN —
+so you're looking for high-quality signal that points at big-run coins, not
+ways to filter to only the ones that already pumped.
+
+You have FULL AUTHORITY to change ANY parameter below EXCEPT targetMultiplier.
+No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL
+config systems to maximize the rate of coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x+.
 
 SAFETY BOUNDS (you MUST stay within these):
 - minScoreToPost: 35-60 (NEVER below 35 — too much spam)
@@ -6314,15 +6441,15 @@ Respond ONLY with valid JSON:
       maxMarketCapOverride: [50000, 500000], minScoreOverride: [28, 55],
     };
 
-    // Locked-knobs list — user's strategic choices the auto-optimizer
-    // must NOT touch. Keeps the human in control of their target profile
-    // while letting Claude still optimize the surrounding knobs.
-    // winPeakMultiple is locked by default because it defines what
-    // "winning" means — that's a product decision, not a tuning lever.
+    // Locked-knobs list — per user directive, ONLY `targetMultiplier` is
+    // off-limits. That knob is the strategic goal ("tune the whole system
+    // to find 5x coins"). Everything else — scoring weights, gate floors,
+    // bonuses, caps, thresholds — is fully delegated to Claude to optimize
+    // toward the targetMultiplier target.
     const LOCKED_KNOBS = new Set(
       Array.isArray(SCORING_CONFIG.lockedKnobs) && SCORING_CONFIG.lockedKnobs.length
         ? SCORING_CONFIG.lockedKnobs
-        : ['winPeakMultiple', 'neutralDrawdownPct']
+        : ['targetMultiplier']
     );
 
     // AUTO-APPLY every change Claude recommends — no approval needed
@@ -10796,6 +10923,93 @@ app.get('/api/bot/status', (req, res) => {
   res.json({ ok: true, active: _botActive });
 });
 
+// Scanner-pipeline diagnostic — answers "why is the scanner not scanning?"
+// Returns in-process state + DB counts that let us pinpoint where the
+// pipeline is broken without needing Railway log access.
+app.get('/api/health/scanner', (req, res) => {
+  setCors(res);
+  try {
+    const nowIso = new Date().toISOString();
+    const sinceCompleteMs = _scannerHealth.lastCycleCompletedAt
+      ? Date.now() - new Date(_scannerHealth.lastCycleCompletedAt.includes('Z') ? _scannerHealth.lastCycleCompletedAt : _scannerHealth.lastCycleCompletedAt + 'Z').getTime()
+      : null;
+    const sinceStartMs = _scannerHealth.lastCycleStartedAt
+      ? Date.now() - new Date(_scannerHealth.lastCycleStartedAt.includes('Z') ? _scannerHealth.lastCycleStartedAt : _scannerHealth.lastCycleStartedAt + 'Z').getTime()
+      : null;
+
+    const scannerFeed1h = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM scanner_feed WHERE scanned_at > datetime('now','-1 hour')`).get().n; } catch { return null; }
+    })();
+    const scannerFeed5m = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM scanner_feed WHERE scanned_at > datetime('now','-5 minutes')`).get().n; } catch { return null; }
+    })();
+    const scannerFeedTotal = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM scanner_feed`).get().n; } catch { return null; }
+    })();
+    const lastScannerFeedAt = (() => {
+      try { return dbInstance.prepare(`SELECT MAX(scanned_at) as at FROM scanner_feed`).get().at; } catch { return null; }
+    })();
+    const candidates1h = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now','-1 hour') AND composite_score IS NOT NULL`).get().n; } catch { return null; }
+    })();
+    const autoPosted1h = (() => {
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at > datetime('now','-1 hour') AND final_decision='AUTO_POST'`).get().n; } catch { return null; }
+    })();
+
+    // Diagnosis — pick the most likely explanation based on the data.
+    let diagnosis = 'OK';
+    let remedy = null;
+    if (!_botActive) {
+      diagnosis = 'BOT_INACTIVE — master toggle is OFF';
+      remedy = 'Toggle the bot ON from the dashboard header, or POST /api/bot/toggle { active: true }';
+    } else if (cycleRunning && sinceStartMs != null && sinceStartMs > 5 * 60_000) {
+      diagnosis = `CYCLE_STUCK — cycleRunning=true for ${Math.round(sinceStartMs/60_000)} min (should reset in <60s)`;
+      remedy = 'Likely a hung fetch or uncaught promise. Restart the Railway service. If it recurs, check the last cycle error.';
+    } else if (sinceCompleteMs != null && sinceCompleteMs > 3 * 60_000 && !cycleRunning) {
+      diagnosis = `NO_RECENT_CYCLE — last cycle completed ${Math.round(sinceCompleteMs/60_000)} min ago (expected ≤2 min)`;
+      remedy = 'Scheduler interval may be dead. Restart the Railway service.';
+    } else if (scannerFeed1h === 0 && _scannerHealth.totalCyclesCompleted > 0) {
+      diagnosis = 'CYCLES_RUN_BUT_NO_INSERTS — scanner cycles fire but nothing lands in scanner_feed';
+      remedy = 'Likely DexScreener returning no Solana pairs, or runScanner filter stripping everything. Check Source 1/2 logs.';
+    } else if (_scannerHealth.lastCycleError) {
+      diagnosis = `RECENT_ERROR — ${_scannerHealth.lastCycleError.slice(0, 100)}`;
+      remedy = 'Fix the underlying error. Check Railway logs for stack trace.';
+    }
+
+    res.json({
+      ok: true,
+      now: nowIso,
+      diagnosis,
+      remedy,
+      inProcess: {
+        botActive:              _botActive,
+        cycleRunning,
+        lastCycleStartedAt:     _scannerHealth.lastCycleStartedAt,
+        lastCycleCompletedAt:   _scannerHealth.lastCycleCompletedAt,
+        lastCycleElapsedMs:     _scannerHealth.lastCycleElapsedMs,
+        lastCycleError:         _scannerHealth.lastCycleError,
+        totalCyclesCompleted:   _scannerHealth.totalCyclesCompleted,
+        totalCycleErrors:       _scannerHealth.totalCycleErrors,
+        secondsSinceLastComplete: sinceCompleteMs == null ? null : Math.round(sinceCompleteMs / 1000),
+        secondsSinceLastStart:    sinceStartMs    == null ? null : Math.round(sinceStartMs    / 1000),
+      },
+      database: {
+        scannerFeedTotal,
+        scannerFeed1h,
+        scannerFeed5m,
+        lastScannerFeedAt,
+        candidatesEvaluated1h: candidates1h,
+        autoPosted1h,
+      },
+      config: {
+        scanIntervalMs: SCAN_INTERVAL_MS,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Health check endpoint for dashboard
 // Force reconnect Helius WebSocket
 app.post('/api/helius/reconnect', (req, res) => {
@@ -11136,6 +11350,37 @@ app.post('/api/midcap-harvester/run', async (req, res) => {
     const { triggerMidcapHarvest } = await import('./midcap-harvester.js');
     triggerMidcapHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[midcap] run err:', err.message));
     res.json({ ok: true, message: 'Midcap harvest triggered — Dune query (~1min) + Helius holder fetches. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Whale funding tracker — top WINNER wallets' outgoing SOL transfers
+app.get('/api/whale-funding/status', async (req, res) => {
+  setCors(res);
+  try {
+    const { getWhaleFundingStats } = await import('./whale-funding-tracker.js');
+    res.json({ ok: true, ...getWhaleFundingStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.get('/api/whale-funding/recent', async (req, res) => {
+  setCors(res);
+  try {
+    const { getRecentWhaleFundingEvents } = await import('./whale-funding-tracker.js');
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 40));
+    res.json({ ok: true, events: getRecentWhaleFundingEvents(dbInstance, limit) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/api/whale-funding/run', async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerWhaleFundingScan } = await import('./whale-funding-tracker.js');
+    triggerWhaleFundingScan(dbInstance).catch(err => console.warn('[whale-funding] run err:', err.message));
+    res.json({ ok: true, message: 'Whale funding scan triggered — ~50 Solscan calls, 30-60s to complete. Check logs.' });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -12260,6 +12505,13 @@ app.listen(PORT, async () => {
     setInterval(runAutoCallerCycle, intervalMs);
   }, 30_000);
 
+  // Smart-money retry queue processor — runs every 30s.
+  // Fresh coins from the smart-money watcher that arrived before
+  // DexScreener indexed them get re-tried once after a 2min delay.
+  setInterval(() => {
+    processSmartMoneyRetries().catch(err => console.warn('[sm-retry] tick err:', err.message));
+  }, 30_000);
+
   setInterval(() => {
     try { updateRegime(getCandidates({ limit: 50 }).rows); } catch {}
   }, 15 * 60 * 1000);
@@ -12441,6 +12693,18 @@ app.listen(PORT, async () => {
     startLegendaryHarvester(dbInstance, HELIUS_API_KEY);
   } catch (err) {
     console.warn('[legendary-harvester] failed to start:', err.message);
+  }
+
+  // ── Whale Funding Tracker ──────────────────────────────────────────────
+  // Every 15min: checks outgoing SOL transfers from top WINNER wallets via
+  // Solscan. New recipients become WHALE_FUNDED — freshly-funded burners
+  // that a whale is about to trade with. If any of them show up as holders
+  // of a candidate coin within 48h, scorer awards a big bonus.
+  try {
+    const { startWhaleFundingTracker } = await import('./whale-funding-tracker.js');
+    startWhaleFundingTracker(dbInstance);
+  } catch (err) {
+    console.warn('[whale-funding] failed to start:', err.message);
   }
 
   // ── Midcap Harvester (twice-daily mid-tier sweep) ──────────────────────
