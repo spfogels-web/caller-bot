@@ -11670,6 +11670,33 @@ app.get('/api/diagnose/apis', async (req, res) => {
   });
 });
 
+// One-shot ATH backfill — corrects past calls whose peak_multiple was
+// understated because the live tracker only saw current price (often dead
+// by the time it checks). Pulls historical OHLCV from GeckoTerminal,
+// finds the true peak between called_at and now, and rolls outcomes
+// forward (peak ≥1.5x → WIN). Cascades to audit_archive, calls_archive,
+// and coin_fingerprints. Use ?dryRun=1 to preview, ?limit=N to test small batch.
+app.post('/api/calls/backfill-outcomes', async (req, res) => {
+  setCors(res);
+  try {
+    const { backfillCallOutcomes } = await import('./backfill-outcomes.js');
+    const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+    const limit  = req.query.limit ? parseInt(req.query.limit) : null;
+    const onlyLossesAndPending = req.query.all === '1' ? false : true;
+    console.log(`[backfill] starting — dryRun=${dryRun} limit=${limit ?? 'all'} onlyLossesAndPending=${onlyLossesAndPending}`);
+    const summary = await backfillCallOutcomes(dbInstance, { dryRun, limit, onlyLossesAndPending });
+    res.json({ ok: true, dryRun, ...summary });
+  } catch (err) {
+    console.error('[backfill] failed:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.get('/api/calls/backfill-outcomes', async (req, res) => {
+  // Allow GET as alias for easier curl/browser triggering
+  req.method = 'POST';
+  return app._router.handle(req, res);
+});
+
 // Pattern matching library status — counts of captured fingerprints,
 // resolved outcomes, and a readiness gauge (GROWING / EARLY / READY / STRONG).
 // Once `resolved >= 50`, the matching engine becomes weakly informative.
