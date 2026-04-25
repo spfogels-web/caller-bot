@@ -2970,6 +2970,39 @@ async function processCandidate(candidate, isRescan = false) {
       }
     } catch {}
 
+    // Fetch the last 5 historical snapshots so the V5 activity classifier
+    // can detect QUIET → REVIVING patterns across multiple scans (not just
+    // the most recent delta). Each entry holds a minimal trajectory bundle.
+    try {
+      const histRows = dbInstance.prepare(`
+        SELECT snapshot_at_ms, market_cap, liquidity, volume_1h, buy_sell_ratio_1h,
+               buy_velocity, holders, dev_wallet_pct, top10_holder_pct, composite_score
+        FROM token_metrics_history
+        WHERE contract_address=? AND snapshot_at_ms < ?
+        ORDER BY snapshot_at_ms DESC LIMIT 5
+      `).all(ca, Date.now());
+      if (histRows.length > 0) {
+        enrichedCandidate._history = histRows.map(h => ({
+          minutesAgo:        Math.round((Date.now() - h.snapshot_at_ms) / 60_000),
+          buys1h:            null, // not in history table
+          sells1h:           null,
+          volume1h:          h.volume_1h,
+          marketCap:         h.market_cap,
+          liquidity:         h.liquidity,
+          buySellRatio1h:    h.buy_sell_ratio_1h,
+          buyVelocity:       h.buy_velocity,
+          holders:           h.holders,
+          devWalletPct:      h.dev_wallet_pct,
+          top10HolderPct:    h.top10_holder_pct,
+          compositeScore:    h.composite_score,
+          // Cross-snapshot deltas for prior-rug detection in reactivation score
+          liquidityDelta:    null,
+          devPctDelta:       null,
+          priceChange1h:     null,
+        }));
+      }
+    } catch {}
+
     fnl('evaluated');
     let scoreResult;
     try {
@@ -3586,7 +3619,10 @@ async function processCandidate(candidate, isRescan = false) {
     const v5HardBlock = v5 && v5.action === 'BLOCK';
     let ftResult = null; // legacy compat
     if (v5) {
-      console.log(`[auto-caller:v5] $${enrichedCandidate.token??ca.slice(0,6)} state=${v5.state} action=${v5.action} labels=[${(v5.labels||[]).join(',')}] · scan=${v5.scores.scanner} rug=${v5.scores.rugRisk} mq=${v5.scores.momentum} wq=${v5.scores.wallet} dq=${v5.scores.demand} → final=${v5.scores.finalCall}`);
+      const dec = v5.decision?.label || v5.action;
+      const act = v5.activity?.state || '?';
+      const rx  = v5.reactivation?.score ? ` rx=${v5.reactivation.score}/${v5.reactivation.status}` : '';
+      console.log(`[auto-caller:v5] $${enrichedCandidate.token??ca.slice(0,6)} state=${v5.state}/${act} → ${dec}${rx} · scan=${v5.scores.scanner} rug=${v5.scores.rugRisk} mq=${v5.scores.momentum} wq=${v5.scores.wallet} dq=${v5.scores.demand} → final=${v5.scores.finalCall}`);
     }
 
     // ── STEP 2: Dune Wallet Intelligence Cross-Reference ──────────────────────

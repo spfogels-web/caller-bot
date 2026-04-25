@@ -1593,13 +1593,395 @@ export function scoreCoinV5(candidate, metricsIn = null) {
   // Build human-readable explanation
   const explain = buildV5Explanation(state, scoreSet, labels, action, m);
 
+  // ── ACTIVITY + REACTIVATION LAYER ────────────────────────────────────────
+  // Classify the token's activity state (different axis from lifecycle state).
+  // Lifecycle state = NEW_BIRTH/FIRST_EXPANSION/... based on AGE.
+  // Activity  state = NEW/WATCHING/QUIET/REVIVING/HOT/REJECTED based on
+  //                   ACTIVITY trajectory (volume/buys/wallets over time).
+  const history = candidate?._history || candidate?.history || [];
+  const activity = classifyActivityState(m, history, scoreSet, labels);
+
+  // Reactivation only fires when activity says REVIVING — second-leg detection.
+  const reactivation = (activity.state === 'REVIVING' || activity.state === 'HOT')
+    ? computeReactivationScore(m, history, scoreSet)
+    : { score: 0, status: 'NOT_REVIVING', ledger: [] };
+
+  // Translate V5 action + activity into the new decision label set
+  // (CALL_NOW / WATCH_FOR_TRIGGER / REVIVING / IGNORE_FOR_NOW / HARD_REJECT).
+  const decision = buildDecision(action, activity, reactivation, scoreSet, labels);
+
+  // Triggers — explicit entry/exit conditions in plain English
+  const triggers = buildTriggers(scoreSet, labels, m, activity, candidate);
+
+  // Context summary — "what changed"
+  const context = buildContextSummary(activity, history, m, scoreSet);
+
   return {
     state, action, labels,
     scores: scoreSet,
     finalCallRaw: +finalCallRaw.toFixed(2),
     breakdowns: { scanner, rugRisk, momentum, wallet, demand },
     explain,
+    // NEW additive outputs
+    activity,           // { state, transitions[], confidence, reasons[] }
+    reactivation,       // { score, status, ledger[] }
+    decision,           // { label, reasoning, phase }
+    triggers,           // { call, kill }
+    context,            // "Previously quiet, now showing X"
   };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ACTIVITY STATE CLASSIFIER
+// Tracks the token's TRAJECTORY across recent scans:
+//   NEW       — first scan, no history
+//   WATCHING  — scored before, modest signals, awaiting confirmation
+//   QUIET     — activity dropped (vol/txns/holders flat or down for ≥10min)
+//   REVIVING  — was QUIET, now showing volume + buys + wallets returning
+//   HOT       — strong sustained activity, recent positive deltas
+//   REJECTED  — rug-risk hard block triggered (NEVER comes from low score alone)
+// ═════════════════════════════════════════════════════════════════════════════
+export function classifyActivityState(metrics, history = [], scores = null, labels = []) {
+  const m = metrics;
+  const reasons = [];
+  const transitions = [];
+
+  // REJECTED = HARD criteria only (per spec: "LOW SCORE ≠ DEAD")
+  const rugRisk = scores?.rugRisk ?? 0;
+  const hardReject =
+       rugRisk >= V5_WEIGHTS.decision.blockRug
+    || (m.devWalletPct != null && m.devWalletPct > 15)
+    || m.deployerHistoryRisk === 'SERIAL_RUGGER'
+    || (labels || []).includes('BLOCKED_RUG_RISK')
+    || (labels || []).includes('DEV_EXIT_RISK')
+    || (m.deltas?.liquidityDelta != null && m.deltas.liquidityDelta < -50);
+  if (hardReject) {
+    if (rugRisk >= V5_WEIGHTS.decision.blockRug) reasons.push(`Rug risk ${rugRisk} ≥ block threshold`);
+    if (m.devWalletPct > 15) reasons.push(`Dev wallet ${m.devWalletPct.toFixed(1)}% — extreme`);
+    if (m.deployerHistoryRisk === 'SERIAL_RUGGER') reasons.push('Serial rugger deployer');
+    if ((m.deltas?.liquidityDelta ?? 0) < -50) reasons.push('Liquidity removed (>50% drop)');
+    return { state: 'REJECTED', transitions: [], confidence: 'HIGH', reasons };
+  }
+
+  // Build trajectory signals from current scan + deltas + history
+  const buys     = (m.buys1h ?? 0);
+  const sells    = (m.sells1h ?? 0);
+  const txns     = buys + sells;
+  const v1       = m.volume1h ?? 0;
+  const v6Rate   = (m.volume6h ?? 0) / 6;
+  const volRatio = v6Rate > 0 ? v1 / v6Rate : null;
+
+  const d        = m.deltas || {};
+  const mcapUp   = (d.mcapDelta     ?? 0) > 5;
+  const mcapDn   = (d.mcapDelta     ?? 0) < -5;
+  const volUp    = (d.volumeDelta   ?? 0) > 20;
+  const volDn    = (d.volumeDelta   ?? 0) < -25;
+  const buyUp    = (d.buyRatioDelta ?? 0) > 0.05;
+  const buyDn    = (d.buyRatioDelta ?? 0) < -0.05;
+  const holdUp   = (d.holderDelta   ?? 0) > 5;
+  const holdDn   = (d.holderDelta   ?? 0) < -3;
+  const velUp    = (d.velocityDelta ?? 0) > 0.3;
+
+  // HOT = strong activity + positive deltas + recent (or no) history
+  const isHot =
+    ((scores?.momentum ?? 0) >= 65 && (scores?.demand ?? 0) >= 60 && rugRisk < 35
+      && (mcapUp || holdUp || volUp || velUp || (volRatio != null && volRatio > 1.2)));
+
+  if (isHot) {
+    if (mcapUp) reasons.push(`MCap +${d.mcapDelta.toFixed(0)}% since last scan`);
+    if (holdUp) reasons.push(`Holders +${d.holderDelta.toFixed(0)}%`);
+    if (volUp)  reasons.push(`Volume +${d.volumeDelta.toFixed(0)}%`);
+    if (volRatio > 1.2) reasons.push(`Volume ${volRatio.toFixed(1)}x vs 6h baseline`);
+    return { state: 'HOT', transitions, confidence: 'HIGH', reasons };
+  }
+
+  // First-time observation (no history, no deltas)
+  const noHistory = history.length === 0 && (!d || d.minutesAgo == null);
+  if (noHistory) {
+    reasons.push('First observation — awaiting rescan to build trajectory');
+    return { state: 'NEW', transitions, confidence: 'LOW', reasons };
+  }
+
+  // Build a quiet-then-revive signal from history if available.
+  // Quiet window = at least one prior snapshot 10+ min ago with low activity.
+  let wasQuiet = false;
+  let prevTxns = null;
+  let prevVol  = null;
+  if (history.length > 0) {
+    const stale = history.find(h => (h.minutesAgo ?? 0) >= 10);
+    if (stale) {
+      prevTxns = (stale.buys1h ?? 0) + (stale.sells1h ?? 0);
+      prevVol  = stale.volume1h ?? 0;
+      const wasFlat = prevTxns < 25 && prevVol < 3000;
+      const wasFalling = stale.priceChange1h != null && stale.priceChange1h < -5;
+      wasQuiet = wasFlat || wasFalling;
+    }
+  }
+  // Fallback: deltas show big drop in vol/buys = was active, now quiet
+  if (!wasQuiet && d.volumeDelta != null && d.buyRatioDelta != null) {
+    if (d.volumeDelta < -40 && d.buyRatioDelta < -0.1) wasQuiet = true;
+  }
+
+  // Current scan shows activity returning?
+  const activityReturning =
+    (volUp || mcapUp || buyUp || holdUp || velUp)
+    && (txns >= 20 || v1 > 2000)
+    && (m.buySellRatio1h ?? 0) >= 0.50;
+
+  if (wasQuiet && activityReturning) {
+    if (volUp)  reasons.push(`Volume +${d.volumeDelta.toFixed(0)}% after quiet period`);
+    if (buyUp)  reasons.push(`Buy pressure +${(d.buyRatioDelta*100).toFixed(0)}pp returning`);
+    if (holdUp) reasons.push(`New holders +${d.holderDelta.toFixed(0)}% entering`);
+    if (velUp)  reasons.push(`Velocity rising +${d.velocityDelta.toFixed(2)} buys/min`);
+    transitions.push('QUIET → REVIVING');
+    return { state: 'REVIVING', transitions, confidence: 'MEDIUM', reasons };
+  }
+
+  // Quiet — current activity is anemic
+  const isQuiet =
+       (txns < 25 && v1 < 3000)
+    || (volDn && buyDn)
+    || (volRatio != null && volRatio < 0.4 && (m.priceChange1h ?? 0) < 5);
+  if (isQuiet) {
+    if (txns < 25)               reasons.push(`Only ${txns} txns/1h — low activity`);
+    if (volDn)                   reasons.push(`Volume ${d.volumeDelta.toFixed(0)}% — fading`);
+    if (volRatio != null && volRatio < 0.4) reasons.push(`Volume ${volRatio.toFixed(2)}x vs 6h — drying up`);
+    if (history.length > 0)      transitions.push('WATCHING → QUIET');
+    return { state: 'QUIET', transitions, confidence: 'MEDIUM', reasons };
+  }
+
+  // Default: WATCHING — there is some activity, awaiting confirmation
+  if ((scores?.finalCall ?? 0) >= 50)             reasons.push(`Final score ${scores.finalCall} — building`);
+  if (m.buySellRatio1h != null && m.buySellRatio1h >= 0.55) reasons.push(`Buy ratio ${(m.buySellRatio1h*100).toFixed(0)}% — modest demand`);
+  if (txns >= 25)                                 reasons.push(`${txns} txns/1h — present but unconfirmed`);
+  if (!reasons.length)                            reasons.push('Mixed signals — needs confirmation');
+  return { state: 'WATCHING', transitions, confidence: 'MEDIUM', reasons };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// REACTIVATION SCORE — second-leg breakout detector (only runs when REVIVING/HOT)
+// ═════════════════════════════════════════════════════════════════════════════
+export const REACTIVATION_WEIGHTS = {
+  volumeResurgence:   25, // highest — vol returning is the primary trigger
+  buyPressureReturn:  15,
+  structureShift:     20, // higher low / reclaim of prior breakdown
+  smartWalletLate:    25, // VERY high — late smart entry is the strongest signal
+  newHolderEntry:     10,
+  priorRugSignals:   -15, // deduction if prior history showed rug-like patterns
+};
+
+export function computeReactivationScore(metrics, history = [], scores = null) {
+  const m = metrics;
+  const W = REACTIVATION_WEIGHTS;
+  const lg = makeLedger();
+  let s = 0;
+  const d = m.deltas || {};
+
+  // 1. Volume resurgence — vol1h vs prior snapshot vol1h, and vs 6h baseline
+  if (d.volumeDelta != null && d.volumeDelta > 25) {
+    const fit = Math.min(1, d.volumeDelta / 200);
+    s += lg.add('rx.volume', 'Volume resurgence (delta)', `+${d.volumeDelta.toFixed(0)}%`, `fit=${fit.toFixed(2)}`, fit * W.volumeResurgence);
+  } else if (m.volume1h != null && m.volume6h != null && m.volume6h > 0) {
+    const ratio = m.volume1h / Math.max(1, m.volume6h / 6);
+    if (ratio > 1.3) {
+      const fit = Math.min(1, (ratio - 1.3) / 2);
+      s += lg.add('rx.volume', 'Volume above 6h baseline', `${ratio.toFixed(2)}x`, `fit=${fit.toFixed(2)}`, fit * W.volumeResurgence * 0.7);
+    }
+  }
+
+  // 2. Buy pressure return — buy ratio recovering after being weak
+  if (d.buyRatioDelta != null && d.buyRatioDelta > 0.10) {
+    const fit = Math.min(1, d.buyRatioDelta / 0.40);
+    s += lg.add('rx.buyReturn', 'Buy pressure returning', `buyRatioΔ=+${(d.buyRatioDelta*100).toFixed(0)}pp`, `fit=${fit.toFixed(2)}`, fit * W.buyPressureReturn);
+  }
+
+  // 3. Structure shift — higher low formation, reclaim of prior breakdown
+  // Proxy: 5m positive after prior dip in history OR current 5m positive
+  // following a 1h drop with mcap delta now positive.
+  let structurePts = 0;
+  if (m.priceChange5m != null && m.priceChange1h != null) {
+    if (m.priceChange1h < -10 && m.priceChange5m > 3) {
+      const fit = Math.min(1, m.priceChange5m / 15);
+      structurePts = fit * W.structureShift;
+      lg.add('rx.structure', 'Structure shift (5m up after 1h dip)', `1h=${m.priceChange1h.toFixed(0)}% 5m=+${m.priceChange5m.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, structurePts);
+    } else if ((d.mcapDelta ?? 0) > 8 && m.priceChange5m > 1) {
+      const fit = Math.min(1, d.mcapDelta / 30);
+      structurePts = fit * W.structureShift * 0.7;
+      lg.add('rx.structure', 'Reclaiming prior level', `mcapΔ=+${d.mcapDelta.toFixed(0)}% 5m=+${m.priceChange5m.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, structurePts);
+    }
+  }
+  s += structurePts;
+
+  // 4. SMART WALLET LATE ENTRY — strongest signal. Detect known winner OR
+  // smart money score increase from history baseline.
+  const winners = m.knownWinnerCount ?? 0;
+  const sm = m.smartMoneyScore ?? 0;
+  const ageMin = m.ageMinutes ?? 0;
+  if (winners >= 1 && ageMin > 30) {
+    // Late entry = winner present AFTER 30min mark (not just an early sniper)
+    const fit = Math.min(1, winners / 3);
+    s += lg.add('rx.smartLate', 'Smart wallet LATE entry (high signal)', `${winners} winners @ ${ageMin.toFixed(0)}min`, `fit=${fit.toFixed(2)}`, fit * W.smartWalletLate);
+  } else if (sm >= 50 && ageMin > 30) {
+    const fit = Math.min(1, (sm - 50) / 40);
+    s += lg.add('rx.smartLate', 'Smart money signal (late phase)', `sm=${sm} @ ${ageMin.toFixed(0)}min`, `fit=${fit.toFixed(2)}`, fit * W.smartWalletLate * 0.7);
+  }
+
+  // 5. New holder entry after lull
+  if (d.holderDelta != null && d.holderDelta > 5) {
+    const fit = Math.min(1, d.holderDelta / 30);
+    s += lg.add('rx.newHolders', 'New holders entering after lull', `+${d.holderDelta.toFixed(1)}%`, `fit=${fit.toFixed(2)}`, fit * W.newHolderEntry);
+  }
+
+  // 6. Prior rug signals — deduct if history shows previous rug-like activity
+  // (e.g. liquidity dropped a lot before, dev pct moved heavily)
+  if (history && history.length > 0) {
+    const everLiqDrop = history.some(h => h.liquidityDelta != null && h.liquidityDelta < -25);
+    const everDevSell = history.some(h => h.devPctDelta    != null && h.devPctDelta    < -2);
+    if (everLiqDrop || everDevSell) {
+      const pen = W.priorRugSignals;
+      lg.add('rx.priorRug', 'Prior rug-like signals in history', everLiqDrop ? 'liq drop seen' : 'dev sell seen', `=${pen}`, pen, 'neg');
+      s += pen;
+    }
+  }
+
+  const score = clampScore(Math.round(s));
+  // Status: REAL re-accumulation requires multiple positive signals + low rug
+  const positiveCount = lg.lines.filter(L => L.p > 0).length;
+  const rug = scores?.rugRisk ?? 0;
+  let status;
+  if (score >= 60 && positiveCount >= 3 && rug < 35)      status = 'RE_ACCUMULATION';
+  else if (score >= 40 && positiveCount >= 2 && rug < 50) status = 'POSSIBLE_RECLAIM';
+  else if (score > 0)                                     status = 'FALSE_REVIVAL';
+  else                                                    status = 'NOT_REVIVING';
+
+  return { score, scoreRaw: +s.toFixed(2), status, ledger: lg.lines };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DECISION ENGINE — translates V5 action + activity + reactivation into the
+// final decision label set the user requested:
+//   CALL_NOW · WATCH_FOR_TRIGGER · REVIVING · IGNORE_FOR_NOW · HARD_REJECT
+// ═════════════════════════════════════════════════════════════════════════════
+export function buildDecision(v5Action, activity, reactivation, scores, labels) {
+  // HARD_REJECT — only from rug/dev/honeypot/extreme-concentration. Per spec:
+  // "LOW SCORE ≠ DEAD. Only HARD REJECT removes a token."
+  if (activity.state === 'REJECTED' || v5Action === 'BLOCK') {
+    return {
+      label: 'HARD_REJECT',
+      reasoning: activity.reasons.join(' · ') || 'Rug-class signals detected — token removed from rotation',
+      phase: 'REJECTED',
+    };
+  }
+
+  // REVIVING — only fires when activity state is literally REVIVING (was
+  // QUIET, now returning). HOT runners with strong deltas go to CALL_NOW,
+  // not REVIVING — REVIVING is specifically the "second leg" detection.
+  if (activity.state === 'REVIVING'
+      && reactivation.score >= 40
+      && reactivation.status !== 'FALSE_REVIVAL'
+      && (scores?.rugRisk ?? 0) < 50) {
+    const reasoning = reactivation.status === 'RE_ACCUMULATION'
+      ? `Re-accumulation confirmed: ${activity.reasons.slice(0,2).join(' · ')}`
+      : `Possible reclaim forming: ${activity.reasons.slice(0,2).join(' · ')}`;
+    return { label: 'REVIVING', reasoning, phase: 'REVIVING' };
+  }
+
+  // CALL_NOW = V5 said POST and activity isn't quiet/rejected
+  if (v5Action === 'POST' && activity.state !== 'QUIET' && activity.state !== 'REJECTED') {
+    const r = [];
+    if (scores.momentum >= 65) r.push(`Momentum quality ${scores.momentum} confirmed`);
+    if (scores.demand   >= 65) r.push(`Demand quality ${scores.demand} sustained`);
+    if (scores.rugRisk  < 25)  r.push(`Rug risk ${scores.rugRisk} — clean`);
+    if (activity.state === 'HOT') r.unshift('HOT activity state');
+    return { label: 'CALL_NOW', reasoning: r.join(' · ') || 'All gates cleared', phase: 'EARLY' };
+  }
+
+  // WATCH_FOR_TRIGGER = V5 said WATCHLIST OR activity is HOT but final didn't hit POST
+  if (v5Action === 'WATCHLIST' || (activity.state === 'HOT' && v5Action !== 'IGNORE')) {
+    const r = [];
+    if (scores.momentum < 65 && scores.momentum >= 50) r.push(`Momentum ${scores.momentum} building, awaiting 65+`);
+    if (scores.demand   < 65 && scores.demand   >= 50) r.push(`Demand ${scores.demand} forming, awaiting 65+`);
+    if (scores.rugRisk >= 25 && scores.rugRisk < 50)   r.push(`Rug risk ${scores.rugRisk} — caution`);
+    if (labels.includes('WATCH_FOR_RECLAIM'))           r.push('Reclaim setup forming');
+    if (labels.includes('EARLY_CLEAN_SEND'))            r.push('Clean early launch — wallet flow not yet confirmed');
+    return { label: 'WATCH_FOR_TRIGGER', reasoning: r.join(' · ') || 'Modest signals, awaiting confirmation', phase: activity.state === 'HOT' ? 'MID' : 'EARLY' };
+  }
+
+  // IGNORE_FOR_NOW (NOT permanent — token stays in rotation per spec)
+  return {
+    label: 'IGNORE_FOR_NOW',
+    reasoning: activity.reasons.slice(0,2).join(' · ') || 'Weak signals — keeping in rescan rotation',
+    phase: activity.state === 'QUIET' ? 'QUIET' : 'EARLY',
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CALL TRIGGER + KILL TRIGGER — explicit entry/exit conditions for the user
+// ═════════════════════════════════════════════════════════════════════════════
+export function buildTriggers(scores, labels, m, activity, candidate) {
+  const mcap   = m.marketCap ?? 0;
+  const liq    = m.liquidity ?? 0;
+  const action = activity.state;
+  const fmt$   = v => v >= 1000 ? '$' + (v/1000).toFixed(1) + 'K' : '$' + v.toFixed(0);
+
+  // Call Trigger — what would upgrade this to CALL_NOW
+  let call;
+  if (action === 'REJECTED') {
+    call = 'No entry — token hard-rejected';
+  } else if (action === 'HOT' && scores.finalCall >= V5_WEIGHTS.decision.postFinal) {
+    call = 'Already qualified — enter on next clean dip <5% from current';
+  } else if (action === 'REVIVING') {
+    const target = Math.round(mcap * 1.10);
+    call = `Breaks ${fmt$(target)} mcap with sustained buy pressure (br ≥60%) and continued holder growth`;
+  } else if (scores.momentum < 65 || scores.demand < 65) {
+    const need = [];
+    if (scores.momentum < 65) need.push(`momentum ≥65 (now ${scores.momentum})`);
+    if (scores.demand   < 65) need.push(`demand ≥65 (now ${scores.demand})`);
+    if (scores.finalCall < V5_WEIGHTS.decision.postFinal) need.push(`final ≥${V5_WEIGHTS.decision.postFinal} (now ${scores.finalCall})`);
+    call = need.length ? `Hits ${need.join(' + ')}` : `Final score reaches ${V5_WEIGHTS.decision.postFinal}`;
+  } else if (scores.rugRisk >= 25) {
+    call = `Rug risk drops below 25 (currently ${scores.rugRisk})`;
+  } else {
+    call = 'Continued buy pressure + new holder entry on next rescan';
+  }
+
+  // Kill Trigger — what would downgrade or trigger exit
+  const killConditions = [];
+  if (mcap > 0)              killConditions.push(`Drops below ${fmt$(mcap * 0.75)} (-25% from current)`);
+  killConditions.push('Buy ratio flips below 40% with rising sell volume');
+  killConditions.push('Dev wallet % drops by ≥2pp (active distribution)');
+  if (liq > 0)               killConditions.push(`Liquidity drops by ≥30% (current ${fmt$(liq)})`);
+  killConditions.push(`Rug risk climbs above 50 (currently ${scores.rugRisk})`);
+  const kill = killConditions.slice(0,3).join(' · ');
+
+  return { call, kill };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CONTEXT SUMMARY — "what changed since last observation"
+// ═════════════════════════════════════════════════════════════════════════════
+export function buildContextSummary(activity, history, m, scores) {
+  if (!history || history.length === 0) {
+    if (activity.state === 'NEW') return 'First observation — no prior context';
+    const d = m.deltas;
+    if (d && d.minutesAgo != null) {
+      const bits = [];
+      if (d.mcapDelta     != null && Math.abs(d.mcapDelta) > 5)   bits.push(`mcap ${d.mcapDelta>=0?'+':''}${d.mcapDelta.toFixed(0)}%`);
+      if (d.holderDelta   != null && Math.abs(d.holderDelta) > 3) bits.push(`holders ${d.holderDelta>=0?'+':''}${d.holderDelta.toFixed(0)}%`);
+      if (d.volumeDelta   != null && Math.abs(d.volumeDelta) > 15)bits.push(`volume ${d.volumeDelta>=0?'+':''}${d.volumeDelta.toFixed(0)}%`);
+      if (d.buyRatioDelta != null && Math.abs(d.buyRatioDelta) > 0.05) bits.push(`buy ratio ${d.buyRatioDelta>=0?'+':''}${(d.buyRatioDelta*100).toFixed(0)}pp`);
+      if (bits.length) return `Since ${d.minutesAgo}min ago: ${bits.join(', ')}`;
+    }
+    return 'No significant change since last scan';
+  }
+
+  // We have history — describe trajectory
+  if (activity.state === 'REVIVING')  return `Previously quiet for ~${Math.round(history[0]?.minutesAgo ?? 10)}min, now showing ${activity.reasons[0] || 'volume return'}`;
+  if (activity.state === 'HOT')       return `Sustained activity — ${activity.reasons.slice(0,2).join(', ')}`;
+  if (activity.state === 'QUIET')     return `Activity has dwindled — ${activity.reasons[0] || 'volume drying up'}`;
+  if (activity.state === 'WATCHING')  return `Holding pattern — ${activity.reasons[0] || 'modest signals continue'}`;
+  if (activity.state === 'REJECTED')  return `Hard-rejected — ${activity.reasons[0] || 'rug-class signal'}`;
+  return 'Trajectory neutral';
 }
 
 function buildV5Explanation(state, s, labels, action, m) {

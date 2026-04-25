@@ -7398,6 +7398,58 @@ function buildAuditDetail(c){
     </div>`;
   }
 
+  // ═══ V5 DECISION CARD — top-level CALL/WATCH/REVIVING/IGNORE/REJECT ════
+  function renderV5DecisionCard(c) {
+    var dp = c.dualParts || {};
+    var v5 = dp._v5;
+    if (!v5 || !v5.decision) return '';
+    var DEC = v5.decision || {};
+    var ACT = v5.activity || {};
+    var RX  = v5.reactivation || {};
+    var TR  = v5.triggers || {};
+    var DEC_STYLE = {
+      CALL_NOW:          { col:'#00e676', bg:'rgba(0,230,118,0.18)',   brd:'rgba(0,230,118,0.55)',  emoji:'\uD83D\uDFE2', label:'CALL NOW' },
+      WATCH_FOR_TRIGGER: { col:'#ffd740', bg:'rgba(255,215,64,0.15)',  brd:'rgba(255,215,64,0.5)',  emoji:'\uD83D\uDC41', label:'WATCH FOR TRIGGER' },
+      REVIVING:          { col:'#18ffff', bg:'rgba(24,255,255,0.15)',  brd:'rgba(24,255,255,0.5)',  emoji:'\uD83D\uDD04', label:'REVIVING' },
+      IGNORE_FOR_NOW:    { col:'#88aacc', bg:'rgba(136,170,204,0.10)', brd:'rgba(136,170,204,0.35)',emoji:'\u23F8',       label:'IGNORE FOR NOW' },
+      HARD_REJECT:       { col:'#ff1744', bg:'rgba(255,23,68,0.18)',   brd:'rgba(255,23,68,0.55)',  emoji:'\u26D4',       label:'HARD REJECT' },
+    };
+    var ACT_COL = { NEW:'#80deea', WATCHING:'#ffd740', QUIET:'#88aacc', REVIVING:'#18ffff', HOT:'#00e676', REJECTED:'#ff1744' };
+    var st = DEC_STYLE[DEC.label] || { col:'var(--text3)', bg:'rgba(0,0,0,0.3)', brd:'var(--border)', emoji:'?', label:DEC.label || '?' };
+    var actCol = ACT_COL[ACT.state] || 'var(--text3)';
+    var reactivationBlock = '';
+    if (RX && RX.score > 0) {
+      var rxCol = RX.status === 'RE_ACCUMULATION' ? 'var(--green)' : RX.status === 'POSSIBLE_RECLAIM' ? 'var(--cyan)' : 'var(--text3)';
+      var rxLines = (RX.ledger || []).map(function(L){
+        var col = (L.t === 'neg' || L.p < 0) ? 'var(--red)' : 'var(--green)';
+        var sign = L.p >= 0 ? '+' : '';
+        return '<div style="font-family:var(--mono);font-size:8.5px;color:var(--text2);line-height:1.5;padding:2px 0;display:flex;justify-content:space-between;gap:8px"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:' + col + ';font-weight:700;margin-right:6px;display:inline-block;min-width:42px">' + sign + L.p.toFixed(2) + '</span><span style="color:var(--text1);font-weight:600">' + esc(L.l) + '</span>' + (L.i ? '<span style="color:var(--text3);margin-left:6px">\u00B7 ' + esc(String(L.i).slice(0,55)) + '</span>' : '') + '</span></div>';
+      }).join('');
+      reactivationBlock = '<div style="padding:10px 14px;border-top:1px solid rgba(255,255,255,0.04);background:rgba(24,255,255,0.04)"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span style="font-family:Orbitron,var(--mono);font-size:10px;font-weight:700;color:' + rxCol + ';letter-spacing:1.5px">\uD83D\uDD04 REACTIVATION ' + RX.status.replace(/_/g,' ') + '</span><span style="font-family:Orbitron,var(--mono);font-size:14px;font-weight:800;color:' + rxCol + '">' + RX.score + '/100</span></div>' + rxLines + '</div>';
+    }
+    var actReasons = (ACT.reasons || []).slice(0,3).map(function(r){
+      return '<div style="font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.5;padding:2px 0">\u00B7 ' + esc(r) + '</div>';
+    }).join('');
+    return '<div style="background:rgba(0,0,0,0.6);border:2px solid ' + st.brd + ';border-radius:12px;margin-bottom:10px;overflow:hidden;box-shadow:0 0 20px ' + st.col + '22">' +
+      '<div style="padding:14px;background:linear-gradient(90deg,' + st.bg + ',transparent);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">' +
+        '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">' +
+          '<span style="font-family:Orbitron,var(--mono);font-size:16px;font-weight:900;padding:8px 16px;border-radius:6px;background:' + st.bg + ';border:2px solid ' + st.brd + ';color:' + st.col + ';letter-spacing:2px">' + st.emoji + ' ' + st.label + '</span>' +
+          '<div style="display:flex;flex-direction:column">' +
+            '<span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">ACTIVITY</span>' +
+            '<span style="font-family:Orbitron,var(--mono);font-size:13px;font-weight:700;color:' + actCol + ';letter-spacing:1px">' + (ACT.state || '?') + '</span>' +
+          '</div>' +
+          (DEC.phase ? '<div style="display:flex;flex-direction:column"><span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px">PHASE</span><span style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text2)">' + DEC.phase + '</span></div>' : '') +
+        '</div>' +
+      '</div>' +
+      (DEC.reasoning ? '<div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.04);font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.55"><span style="color:var(--text3);font-size:7.5px;letter-spacing:1.5px;margin-right:8px">REASONING</span>' + esc(DEC.reasoning) + '</div>' : '') +
+      (v5.context ? '<div style="padding:6px 14px;border-top:1px solid rgba(255,255,255,0.04);font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.5"><span style="color:var(--text3);font-size:7.5px;letter-spacing:1.5px;margin-right:8px">CONTEXT</span>' + esc(v5.context) + '</div>' : '') +
+      (actReasons ? '<div style="padding:6px 14px;border-top:1px solid rgba(255,255,255,0.04)"><div style="font-family:var(--mono);font-size:7.5px;color:var(--text3);letter-spacing:1.5px;margin-bottom:3px">ACTIVITY SIGNALS</div>' + actReasons + '</div>' : '') +
+      reactivationBlock +
+      (TR.call ? '<div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.04);background:rgba(0,230,118,0.04)"><div style="font-family:var(--mono);font-size:7.5px;color:var(--green);letter-spacing:1.5px;margin-bottom:3px">\u25B2 CALL TRIGGER (entry condition)</div><div style="font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.5">' + esc(TR.call) + '</div></div>' : '') +
+      (TR.kill ? '<div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.04);background:rgba(255,23,68,0.04)"><div style="font-family:var(--mono);font-size:7.5px;color:var(--red);letter-spacing:1.5px;margin-bottom:3px">\u25BC KILL TRIGGER (exit condition)</div><div style="font-family:var(--mono);font-size:10px;color:var(--text1);line-height:1.5">' + esc(TR.kill) + '</div></div>' : '') +
+    '</div>';
+  }
+
   // ═══ V5 CARD — state-based 5-score breakdown (authoritative) ═══════════
   function renderV5Card(c) {
     var dp = c.dualParts || {};
@@ -8017,6 +8069,9 @@ function buildAuditDetail(c){
     <!-- WHY card moved below foundation signals so Claude's AI VERDICT
          card (rendered above, right after timestamps) keeps the prime
          top-of-panel slot. See _auditWhyCard(c) block below. -->
+
+    <!-- ═══ V5 DECISION — top-level CALL/WATCH/REVIVING/IGNORE/REJECT ═══ -->
+    ${renderV5DecisionCard(c)}
 
     <!-- ═══ V5 SCORING — state-based 5-score authoritative breakdown ═══ -->
     ${renderV5Card(c)}
