@@ -35,6 +35,17 @@ function backfillFp(ca, peakMult, peakMcap, peakAtMs, outcome) {
   try { if (_fpHook && ca && peakMult != null) _fpHook(ca, peakMult, peakMcap, peakAtMs, outcome); }
   catch (err) { /* never crash the tracker on a backfill error */ }
 }
+
+// Optional wallet credit hook — server.js wires this via setWalletCreditHook.
+// Fires once per call when outcome locks as WIN with peak >= 1.5x. Credits
+// every early holder captured at call time. Builds OUR self-trained
+// leaderboard based on actual outcomes (separate from Dune's labels).
+let _walletHook = null;
+export function setWalletCreditHook(fn) { _walletHook = typeof fn === 'function' ? fn : null; }
+function creditWalletsForWin(ca, peakMult) {
+  try { if (_walletHook && ca && peakMult >= 1.5) _walletHook(ca, peakMult); }
+  catch (err) { /* never crash the tracker on a credit error */ }
+}
 const CLAUDE_API_URL  = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL    = 'claude-sonnet-4-20250514';
 
@@ -372,6 +383,8 @@ export async function runOutcomeTracker(dbInstance) {
           try { dbInstance.prepare(`UPDATE calls_archive SET outcome='WIN', peak_multiple=CASE WHEN peak_multiple IS NULL OR ?>peak_multiple THEN ? ELSE peak_multiple END WHERE contract_address=?`).run(call.peak_multiple, call.peak_multiple, ca); } catch {}
           // Backfill into pattern matching library
           backfillFp(ca, call.peak_multiple, call.peak_mcap ?? null, null, 'WIN');
+          // Credit early holders — builds our self-trained wallet intelligence
+          creditWalletsForWin(ca, call.peak_multiple);
         }
         console.log(`[outcome-tracker] ✅ FIXED: $${call.token} peak=${call.peak_multiple.toFixed(2)}x was ${call.outcome} → WIN`);
         await sleep(300); continue;
@@ -539,6 +552,9 @@ export async function runOutcomeTracker(dbInstance) {
               WHERE contract_address = ?
             `).run(peakNow, peakNow, ca);
           } catch {}
+          // Credit early holders — builds our self-trained wallet intelligence.
+          // Only fires once per call (creditWalletsForWin de-dupes via our_win_tokens)
+          creditWalletsForWin(ca, peakNow);
         }
         const wasUpgrade = call.outcome && call.outcome !== 'WIN' && call.outcome !== 'PENDING';
         console.log(`[outcome-tracker] ✅ ${wasUpgrade ? 'UPGRADED' : 'Auto'}-WIN: $${call.token} peak=${peakNow.toFixed(2)}x (${minutesSince}m since call)${wasUpgrade ? ' (was ' + call.outcome + ')' : ''} — LOCKED`);

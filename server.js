@@ -31,6 +31,7 @@ import {
   markCandidatePosted, isRecentlySeen, recordSeen,
   getStats, getRecentCalls, logEvent,
   recordFingerprint, backfillFingerprintOutcome, getFingerprintStats,
+  creditWalletsForWin, getSelfTrainedWalletStats,
   getCandidates, getCandidateById, getAllCalls,
   getSystemLog, getScoreDistribution, getDecisionBreakdown,
   getTopIgnoredFull, getPendingCalls,
@@ -79,6 +80,7 @@ import {
   startLearningLoop, detectMissedWinners, runOutcomeTracker, getLearningStats,
   setTelegramHook as setMilestoneTelegramHook,
   setFingerprintHook,
+  setWalletCreditHook,
 } from './missed-winner-tracker.js';
 import {
   startWalletScanner, runDuneWalletScan, crossReferenceHolders as duneXRef,
@@ -4687,7 +4689,12 @@ async function processCandidate(candidate, isRescan = false) {
         structureGrade:  scoreResult.structureGrade,
         priceUsd:        enrichedCandidate.priceUsd,
         marketCap:       enrichedCandidate.marketCap,
+        liquidity:       enrichedCandidate.liquidity,
         called_at:       new Date().toISOString(),
+        // Capture top holders for self-trained wallet intelligence
+        holderAddresses: enrichedCandidate.holderAddresses
+                      ?? enrichedCandidate.holders_list
+                      ?? null,
       });
 
       logEvent('INFO', 'AUTO_POST', `${enrichedCandidate.token} score=${scoreResult.score}`);
@@ -11819,6 +11826,19 @@ app.get('/api/diagnose/solscan', async (req, res) => {
   });
 });
 
+// Self-trained wallet leaderboard — shows wallets credited from OUR call
+// outcomes (separate from Dune's labels). Each WIN call credits its early
+// holders; wallets reach WINNER tier at 3 wins @ 2x average multiple.
+app.get('/api/wallets/self-trained-stats', (req, res) => {
+  setCors(res);
+  try {
+    const stats = getSelfTrainedWalletStats();
+    res.json({ ok: true, ...stats });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Pattern matching library status — counts of captured fingerprints,
 // resolved outcomes, and a readiness gauge (GROWING / EARLY / READY / STRONG).
 // Once `resolved >= 50`, the matching engine becomes weakly informative.
@@ -12822,6 +12842,16 @@ app.listen(PORT, async () => {
   // continuously learns from resolved coins.
   setFingerprintHook((ca, peakMultiple, peakMcap, peakAtMs, outcome) => {
     backfillFingerprintOutcome(ca, peakMultiple, peakMcap, peakAtMs, outcome);
+  });
+
+  // Wire the wallet credit hook — fires when a call locks as WIN with peak
+  // >= 1.5x. Pulls early_holders from the calls row and credits each wallet's
+  // our_win_count + our_avg_win_multiple. Promotes to WINNER at 3 wins @ 2x avg.
+  setWalletCreditHook((ca, peakMultiple) => {
+    const result = creditWalletsForWin(ca, peakMultiple);
+    if (result.promoted > 0) {
+      logEvent('INFO', 'WALLET_PROMOTED', `${result.promoted} wallets promoted to WINNER on ${ca.slice(0,8)} (${peakMultiple.toFixed(2)}x)`);
+    }
   });
 
   // to the free channel (AXIOSCAN-style 2x-delayed free tier), and every

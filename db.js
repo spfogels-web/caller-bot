@@ -691,6 +691,17 @@ function runMigrations() {
     `ALTER TABLE calls ADD COLUMN peak_mcap_6h REAL`,
     `ALTER TABLE calls ADD COLUMN last_snapshot_at TEXT`,
     `ALTER TABLE calls ADD COLUMN peak_mcap REAL`,
+    // v12: Self-trained wallet intelligence — capture top holders at call
+    // time, then credit them when the call resolves to WIN. Builds OUR
+    // own wallet leaderboard based on real outcomes.
+    `ALTER TABLE calls ADD COLUMN early_holders TEXT`, // JSON array of top 100 holder addresses at call time
+    `ALTER TABLE tracked_wallets ADD COLUMN our_win_count INTEGER DEFAULT 0`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_total_win_multiple REAL DEFAULT 0`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_avg_win_multiple REAL`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_last_win_token TEXT`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_last_win_at TEXT`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_win_tokens TEXT`, // JSON array, last 20 winning CAs
+    `CREATE INDEX IF NOT EXISTS idx_tw_our_wins ON tracked_wallets(our_win_count DESC, our_avg_win_multiple DESC)`,
     // v11: Pattern matching infrastructure — coin fingerprints library.
     // Captures a snapshot of every meaningful evaluation (CALL_NOW /
     // WATCH_FOR_TRIGGER / REVIVING / HARD_REJECT) so that once we have
@@ -1012,16 +1023,23 @@ export function insertCall(data) {
       setup_type_at_call, structure_grade_at_call,
       price_at_call, market_cap_at_call, liquidity_at_call,
       regime_at_call, outcome,
-      bot_source, sltp, called_at
+      bot_source, sltp, called_at, early_holders
     ) VALUES (
       @candidate_id, @token, @contract_address, @chain,
       @score_at_call, @sub_scores_at_call, @risk_at_call,
       @setup_type_at_call, @structure_grade_at_call,
       @price_at_call, @market_cap_at_call, @liquidity_at_call,
       @regime_at_call, 'PENDING',
-      @bot_source, @sltp, @called_at
+      @bot_source, @sltp, @called_at, @early_holders
     )
   `);
+
+  // Capture top holder addresses (for self-trained wallet intelligence —
+  // when this call resolves to WIN, these wallets get credited)
+  const holders = data.holderAddresses || data.early_holders || data.holders_list || null;
+  const earlyHoldersJson = holders && Array.isArray(holders) && holders.length
+    ? JSON.stringify(holders.slice(0, 100))
+    : null;
 
   const result = stmt.run({
     candidate_id:            data.candidateId              ?? null,
@@ -1040,9 +1058,119 @@ export function insertCall(data) {
     bot_source:              data.botSource                ?? null,
     sltp:                    sltpStr,
     called_at:               data.called_at                ?? new Date().toISOString(),
+    early_holders:           earlyHoldersJson,
   });
 
   return result.lastInsertRowid;
+}
+
+// ─── Self-trained wallet intelligence ──────────────────────────────────────
+// When a call resolves to WIN with peak >= 1.5x, credit each early holder.
+// Builds OUR own leaderboard based on actual outcomes — not Dune's opinion.
+// Promotion rules: our_win_count >= 3 AND our_avg_win_multiple >= 2.0 = WINNER
+export function creditWalletsForWin(contractAddress, peakMultiple, earlyHolders = null) {
+  if (!contractAddress || !Number.isFinite(peakMultiple)) return { credited: 0, promoted: 0 };
+
+  // If no holder list passed in, try to pull from the calls row
+  let holders = earlyHolders;
+  if (!holders) {
+    try {
+      const row = db.prepare('SELECT early_holders FROM calls WHERE contract_address = ? AND outcome = ? LIMIT 1').get(contractAddress, 'WIN');
+      if (row?.early_holders) holders = JSON.parse(row.early_holders);
+    } catch {}
+  }
+  if (!Array.isArray(holders) || holders.length === 0) return { credited: 0, promoted: 0 };
+
+  let credited = 0;
+  let promoted = 0;
+  const nowIso = new Date().toISOString();
+
+  // Use a single transaction for performance
+  const upsert = db.transaction((holderList) => {
+    for (const addr of holderList) {
+      if (!addr || typeof addr !== 'string') continue;
+      try {
+        // Try update first — track if this token was already credited (avoid double-counting)
+        const existing = db.prepare('SELECT our_win_count, our_total_win_multiple, our_win_tokens, category FROM tracked_wallets WHERE address = ?').get(addr);
+
+        if (existing) {
+          // Skip if this token already in our_win_tokens (prevents re-credit on multiple resolutions)
+          let tokens = [];
+          try { tokens = JSON.parse(existing.our_win_tokens || '[]'); } catch {}
+          if (tokens.includes(contractAddress)) continue;
+          tokens = [...tokens.slice(-19), contractAddress]; // keep last 20
+
+          const newWinCount = (existing.our_win_count || 0) + 1;
+          const newTotalMult = (existing.our_total_win_multiple || 0) + peakMultiple;
+          const newAvg = newTotalMult / newWinCount;
+
+          // Promote to WINNER if criteria met (and not already)
+          let newCategory = existing.category;
+          let wasPromoted = false;
+          if (newWinCount >= 3 && newAvg >= 2.0 && existing.category !== 'WINNER') {
+            newCategory = 'WINNER';
+            wasPromoted = true;
+          }
+
+          db.prepare(`
+            UPDATE tracked_wallets SET
+              our_win_count = ?,
+              our_total_win_multiple = ?,
+              our_avg_win_multiple = ?,
+              our_last_win_token = ?,
+              our_last_win_at = ?,
+              our_win_tokens = ?,
+              category = ?
+            WHERE address = ?
+          `).run(newWinCount, newTotalMult, newAvg, contractAddress, nowIso, JSON.stringify(tokens), newCategory, addr);
+          credited++;
+          if (wasPromoted) promoted++;
+        } else {
+          // New wallet — insert with first credit
+          db.prepare(`
+            INSERT INTO tracked_wallets (
+              address, category, source, added_at,
+              our_win_count, our_total_win_multiple, our_avg_win_multiple,
+              our_last_win_token, our_last_win_at, our_win_tokens
+            ) VALUES (?, ?, 'self-trained', datetime('now'), 1, ?, ?, ?, ?, ?)
+          `).run(addr, 'NEUTRAL', peakMultiple, peakMultiple, contractAddress, nowIso, JSON.stringify([contractAddress]));
+          credited++;
+        }
+      } catch (err) {
+        // Skip individual wallet errors (don't break the whole batch)
+      }
+    }
+  });
+
+  try { upsert(holders); } catch (err) {
+    console.warn('[wallet-credit] batch failed:', err.message);
+  }
+
+  if (credited > 0) {
+    console.log(`[wallet-credit] $${contractAddress.slice(0,8)}... ${peakMultiple.toFixed(2)}x → credited ${credited} holders${promoted ? ' · 🏆 promoted ' + promoted + ' to WINNER' : ''}`);
+  }
+  return { credited, promoted };
+}
+
+// Stats for the new self-trained leaderboard
+export function getSelfTrainedWalletStats() {
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*) AS wallets_with_wins,
+      SUM(our_win_count) AS total_wins_credited,
+      AVG(our_avg_win_multiple) AS avg_win_multiple_across_wallets
+    FROM tracked_wallets WHERE our_win_count > 0
+  `).get();
+  const top = db.prepare(`
+    SELECT address, our_win_count, our_avg_win_multiple, our_last_win_token, category
+    FROM tracked_wallets WHERE our_win_count > 0
+    ORDER BY our_win_count DESC, our_avg_win_multiple DESC LIMIT 20
+  `).all();
+  const promoted = db.prepare(`
+    SELECT COUNT(*) AS n FROM tracked_wallets
+    WHERE category = 'WINNER' AND source = 'self-trained'
+  `).get();
+  return { totals, promotedFromOurCalls: promoted.n, topWallets: top };
 }
 
 export function updateCallPerformance(callId, data) {
