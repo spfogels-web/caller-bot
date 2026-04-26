@@ -11758,6 +11758,45 @@ app.get('/api/calls/backfill-outcomes', async (req, res) => {
   return app._router.handle(req, res);
 });
 
+// Solscan deep diagnostic — tries multiple endpoint/auth combos so we can
+// figure out whether the configured key is v1 free, v2 Pro, expired, or
+// has a whitespace issue. Returns the first variant that works (if any).
+app.get('/api/diagnose/solscan', async (req, res) => {
+  setCors(res);
+  const key = process.env.SOLSCAN_API_KEY ?? '';
+  const testCA = 'So11111111111111111111111111111111111111112';
+  const variants = [
+    { name: 'v2 token-header (current)',  url: `https://pro-api.solscan.io/v2.0/token/meta?address=${testCA}`,                     headers: { token: key, accept: 'application/json' } },
+    { name: 'v2 Bearer auth',             url: `https://pro-api.solscan.io/v2.0/token/meta?address=${testCA}`,                     headers: { Authorization: `Bearer ${key}`, accept: 'application/json' } },
+    { name: 'v2 token + holders endpoint',url: `https://pro-api.solscan.io/v2.0/token/holders?address=${testCA}&page_size=1&page=1`, headers: { token: key, accept: 'application/json' } },
+    { name: 'v1 public token-meta',       url: `https://public-api.solscan.io/token/meta?tokenAddress=${testCA}`,                  headers: { token: key, accept: 'application/json' } },
+    { name: 'v1 public account',          url: `https://public-api.solscan.io/account/${testCA}`,                                  headers: { token: key, accept: 'application/json' } },
+  ];
+  const results = [];
+  for (const v of variants) {
+    const t0 = Date.now();
+    let status = null, errSnip = null, sample = null;
+    try {
+      const r = await fetch(v.url, { headers: v.headers, signal: AbortSignal.timeout(8_000) });
+      status = r.status;
+      if (r.ok) {
+        try { sample = JSON.stringify(await r.json()).slice(0, 100); } catch {}
+      } else {
+        try { errSnip = (await r.text()).slice(0, 120); } catch {}
+      }
+    } catch (e) { errSnip = e.message; }
+    results.push({ name: v.name, status, ms: Date.now() - t0, ok: status === 200, error: errSnip, sample });
+  }
+  res.json({
+    ok: true,
+    keyPresent: !!key,
+    keyLength: key.length,
+    keyHasWhitespace: /^\s|\s$/.test(key),
+    keyPreview: key ? key.slice(0,4) + '...' + key.slice(-4) : null,
+    variants: results,
+  });
+});
+
 // Pattern matching library status — counts of captured fingerprints,
 // resolved outcomes, and a readiness gauge (GROWING / EARLY / READY / STRONG).
 // Once `resolved >= 50`, the matching engine becomes weakly informative.
