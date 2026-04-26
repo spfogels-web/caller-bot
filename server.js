@@ -2009,7 +2009,7 @@ async function uploadBannerToTelegram() {
   }
 }
 
-async function sendCallAlertWithImage(caption, _unusedFullText, coinImageUrl = null) {
+async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageUrl = null) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
 
   // Prefer the coin's own image (DexScreener info.imageUrl). Fall back to
@@ -2024,6 +2024,8 @@ async function sendCallAlertWithImage(caption, _unusedFullText, coinImageUrl = n
   }
 
   console.log(`[TG] Sending ${usingCoinImage ? 'coin' : 'banner'}+caption (${safeCaption.length} chars)`);
+
+  let photoMessageId = null;
 
   try {
     const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
@@ -2041,6 +2043,7 @@ async function sendCallAlertWithImage(caption, _unusedFullText, coinImageUrl = n
     const photoData = await photoRes.json();
 
     if (photoRes.ok && photoData.ok) {
+      photoMessageId = photoData.result?.message_id ?? null;
       // Only cache the PULSE banner file_id (coin images are per-token, not reusable)
       if (!usingCoinImage) {
         const photos = photoData.result?.photo;
@@ -2050,23 +2053,57 @@ async function sendCallAlertWithImage(caption, _unusedFullText, coinImageUrl = n
         }
       }
       console.log(`[TG] ✓ Photo+caption sent`);
-      return;
-    }
+    } else {
+      console.warn(`[TG] Photo send failed: ${JSON.stringify(photoData).slice(0, 400)}`);
 
-    console.warn(`[TG] Photo send failed: ${JSON.stringify(photoData).slice(0, 400)}`);
-
-    // If the coin image URL was rejected by Telegram, retry with pulse banner
-    if (usingCoinImage) {
-      console.warn(`[TG] Retrying with pulse banner fallback`);
-      await sendCallAlertWithImage(caption, null, null);
-      return;
+      // If the coin image URL was rejected by Telegram, retry with pulse banner
+      if (usingCoinImage) {
+        console.warn(`[TG] Retrying with pulse banner fallback`);
+        await sendCallAlertWithImage(caption, fullDetailText, null);
+        return;
+      }
+      // Pulse banner also failed → text-only
+      if (_bannerFileId) { _bannerFileId = null; console.warn('[TG] banner file_id cleared'); }
+      await sendTelegramGroupMessage(safeCaption).catch(() => {});
     }
-    // Pulse banner also failed → text-only
-    if (_bannerFileId) { _bannerFileId = null; console.warn('[TG] banner file_id cleared'); }
-    await sendTelegramGroupMessage(safeCaption).catch(() => {});
   } catch (err) {
     console.warn(`[TG] Photo error: ${err.message}`);
     await sendTelegramGroupMessage(safeCaption).catch(() => {});
+  }
+
+  // ── FOLLOW-UP: Full detailed analysis ──────────────────────────────────
+  // Telegram message limit is 4096 chars. Send the full Foundation Signals
+  // breakdown, sub-scores, market data, holders, risk, launch intel, etc.
+  // as a reply to the photo so it threads underneath.
+  if (fullDetailText && fullDetailText.length > 0) {
+    let full = fullDetailText;
+    if (full.length > 4090) {
+      full = full.slice(0, 4087) + '…';
+      console.warn(`[TG] Full report truncated from ${fullDetailText.length} to 4090 chars`);
+    }
+    try {
+      const body = {
+        chat_id: TELEGRAM_GROUP_CHAT_ID,
+        text: full,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      };
+      // Thread the full report under the photo if we have its message_id
+      if (photoMessageId) body.reply_to_message_id = photoMessageId;
+      const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!r.ok) {
+        console.warn(`[TG] Full-report send failed: ${r.status} ${(await r.text()).slice(0,200)}`);
+      } else {
+        console.log(`[TG] ✓ Full detailed report sent (${full.length} chars)`);
+      }
+    } catch (err) {
+      console.warn(`[TG] Full-report error: ${err.message}`);
+    }
   }
 }
 
@@ -4510,7 +4547,20 @@ async function processCandidate(candidate, isRescan = false) {
         logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
       } else {
         fnl('posted');
-        await sendCallAlertWithImage(caption, null, coinImg);
+        // Build the full detailed analysis (Foundation Signals, sub-scores,
+        // market data, holders, risk, launch intel, etc.) and send it as a
+        // reply to the photo+caption — so the user gets BOTH the compact
+        // call card AND the deep-dive report on every post.
+        let fullDetailMessage = null;
+        try {
+          fullDetailMessage = buildCallAlertMessage(enrichedCandidate, verdict ?? {}, scoreResult, similarity, ftResult);
+          // Append SL/TP block + Trade Levels (already part of the full message in some paths)
+          const sltpBlock = buildSLTPBlock(enrichedCandidate);
+          if (sltpBlock) fullDetailMessage += sltpBlock;
+        } catch (err) {
+          console.warn(`[TG] full-message build failed: ${err.message}`);
+        }
+        await sendCallAlertWithImage(caption, fullDetailMessage, coinImg);
       }
 
       // ── Archive this call permanently (AUTO_POST) ─────────────────────────
