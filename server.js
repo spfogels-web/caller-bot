@@ -1283,6 +1283,19 @@ const SCORING_CONFIG_DEFAULTS = {
   fastLaneMinWinners:      2,   // ≥ this many WINNER wallets in holders → fast lane
   fastLaneMinLiquidityUsd: 2000,// still must have $2K+ liquidity
   fastLaneMaxAgeHours:    12,   // only fires on coins <12h old
+
+  // ── SCORE-TRUMP OVERRIDE ───────────────────────────────────────────────
+  // Direct response to missed-call analysis: $HENRY scored 72 → 65.9x miss.
+  // $OBAMA 71 → 11.4x miss. $TIME MACHINE 52 → 28.2x miss. The pattern is
+  // that V5/Claude downgrade high-score young coins to WATCHLIST and then
+  // they go on to run. Two-tier override: trust the scorer when a young
+  // gem-range coin is clearly enthusiastic. Auto-optimizer can tune.
+  scoreTrumpEnabled:           1,    // 1=on, 0=off
+  scoreTrumpFreshThreshold:   55,    // FRESH GEM (<30min) score floor
+  scoreTrumpFreshMaxAgeMin:   30,    // "fresh" = age <= 30min
+  scoreTrumpYoungThreshold:   60,    // young (<2h) score floor
+  scoreTrumpYoungMaxAgeHours:  2,    // "young" = age <= 2h
+  scoreTrumpMaxMcap:       80000,    // gem-range cap
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -4023,6 +4036,47 @@ async function processCandidate(candidate, isRescan = false) {
       }
     }
 
+    // ── SCORE-TRUMP OVERRIDE ─────────────────────────────────────────────────
+    // From missed-call analysis: $HENRY scored 72 → 65.9x. $OBAMA 71 → 11.4x.
+    // $TIME MACHINE 52 → 28.2x. Pattern: V5/Claude downgraded high-score
+    // young gem-range coins to WATCHLIST. Two-tier override that trusts the
+    // scorer when the structural signal is clearly enthusiastic AND the
+    // coin is in a setup where missed alpha is most painful (young + small).
+    // Respects v5HardBlock — rugs still get blocked, no AI override.
+    if (
+      SCORING_CONFIG.scoreTrumpEnabled &&
+      finalDecision !== 'AUTO_POST' &&
+      finalDecision !== 'BLOCKLIST' &&
+      !v5HardBlock &&
+      !enrichedCandidate._fastLane &&
+      !enrichedCandidate._smartMoney &&
+      (enrichedCandidate.walletIntel?.rugWalletCount ?? 0) === 0
+    ) {
+      const score    = scoreResult?.score ?? 0;
+      const ageHrs   = Number(enrichedCandidate.pairAgeHours ?? 99);
+      const ageMins  = ageHrs * 60;
+      const mcap     = Number(enrichedCandidate.marketCap ?? 0);
+      const maxMcap  = SCORING_CONFIG.scoreTrumpMaxMcap ?? 80_000;
+
+      const freshTier = score >= (SCORING_CONFIG.scoreTrumpFreshThreshold ?? 55)
+                     && ageMins <= (SCORING_CONFIG.scoreTrumpFreshMaxAgeMin ?? 30)
+                     && mcap > 0 && mcap <= maxMcap;
+      const youngTier = score >= (SCORING_CONFIG.scoreTrumpYoungThreshold ?? 60)
+                     && ageHrs <= (SCORING_CONFIG.scoreTrumpYoungMaxAgeHours ?? 2)
+                     && mcap > 0 && mcap <= maxMcap;
+
+      if (freshTier || youngTier) {
+        const tier = freshTier ? 'FRESH' : 'YOUNG';
+        enrichedCandidate._scoreTrump = {
+          tier, score, ageHrs, mcap,
+          previousDecision: finalDecision,
+        };
+        finalDecision = 'AUTO_POST';
+        logEvent('INFO', 'SCORE_TRUMP', `${enrichedCandidate.token ?? ca.slice(0,6)} ${tier} tier — score=${score} age=${ageHrs.toFixed(2)}h mcap=$${Math.round(mcap/1000)}K → AUTO_POST`);
+        console.log(`[auto-caller] 📊 SCORE_TRUMP — $${enrichedCandidate.token ?? ca.slice(0,6)} ${tier} tier (score ${score}, age ${ageHrs.toFixed(2)}h, $${Math.round(mcap/1000)}K mcap) → forcing AUTO_POST`);
+      }
+    }
+
     // ── Smart Money Watcher override ─────────────────────────────────────────
     // Cluster of ≥3 WINNER wallets in 10min is the highest-conviction signal
     // we have — force AUTO_POST regardless of scorer / Claude / OpenAI. A
@@ -4968,6 +5022,16 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
     basePart =
       `⚡ <b>FAST-LANE CALL</b> ⚡\n` +
       `<i>${fl.winners} winner wallets already holding · bypassed AI gate · Axioscan-mode.</i>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n` +
+      basePart;
+  } else if (candidate._scoreTrump) {
+    // High-conviction scorer call that overrode Claude's WATCHLIST/IGNORE.
+    // Tag explicitly so reader knows this was a structural-signal call.
+    const st = candidate._scoreTrump;
+    const tierLabel = st.tier === 'FRESH' ? 'FRESH GEM' : 'YOUNG GEM';
+    basePart =
+      `📊 <b>HIGH-SCORE OVERRIDE</b>\n` +
+      `<i>Composite ${st.score} · ${tierLabel} (${st.tier === 'FRESH' ? Math.round(st.ageHrs * 60) + 'min' : st.ageHrs.toFixed(1) + 'h'} old, $${Math.round(st.mcap/1000)}K MCap) · scorer trumped AI gate.</i>\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       basePart;
   }
