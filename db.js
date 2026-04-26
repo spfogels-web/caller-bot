@@ -702,6 +702,31 @@ function runMigrations() {
     `ALTER TABLE tracked_wallets ADD COLUMN our_last_win_at TEXT`,
     `ALTER TABLE tracked_wallets ADD COLUMN our_win_tokens TEXT`, // JSON array, last 20 winning CAs
     `CREATE INDEX IF NOT EXISTS idx_tw_our_wins ON tracked_wallets(our_win_count DESC, our_avg_win_multiple DESC)`,
+    // v13: Exit signal monitor — fires real-time alerts when posted calls
+    // show rug/dump patterns. Tracks per-call which alert types have fired
+    // so we don't spam the group with the same signal repeatedly.
+    `CREATE TABLE IF NOT EXISTS exit_alerts (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id         INTEGER NOT NULL,
+      contract_address TEXT NOT NULL,
+      token           TEXT,
+      trigger_type    TEXT NOT NULL,  -- LP_PULL | SELL_FLIP | WHALE_DUMP | DEEP_DROP | DEV_MOVE
+      trigger_detail  TEXT,            -- human-readable trigger reason
+      mcap_at_alert   REAL,
+      mcap_at_peak    REAL,
+      drop_from_peak  REAL,            -- percentage
+      fired_at        TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_exit_call    ON exit_alerts(call_id, trigger_type)`,
+    `CREATE INDEX IF NOT EXISTS idx_exit_fired   ON exit_alerts(fired_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_exit_ca      ON exit_alerts(contract_address, trigger_type)`,
+    // Track last exit check on each call so we know when to next poll
+    `ALTER TABLE calls ADD COLUMN exit_monitor_last_check_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN exit_monitor_last_liquidity REAL`,
+    `ALTER TABLE calls ADD COLUMN exit_monitor_last_buy_ratio REAL`,
+    `ALTER TABLE calls ADD COLUMN exit_monitor_last_top10_pct REAL`,
+    `ALTER TABLE calls ADD COLUMN exit_monitor_last_dev_pct REAL`,
+    `ALTER TABLE calls ADD COLUMN exit_monitor_disabled INTEGER DEFAULT 0`,
     // v11: Pattern matching infrastructure — coin fingerprints library.
     // Captures a snapshot of every meaningful evaluation (CALL_NOW /
     // WATCH_FOR_TRIGGER / REVIVING / HARD_REJECT) so that once we have

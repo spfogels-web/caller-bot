@@ -58,6 +58,7 @@ import {
   applyRegimeAdjustments, getRegimeSummaryForClaude, getRegimeDashboardData,
 } from './regime.js';
 import { runPerformanceTracker, exportFineTuningData }                                 from './performance-tracker.js';
+import { runExitMonitor, setExitTelegramHook, getExitMonitorStats }                  from './exit-signal-monitor.js';
 import {
   getAllBotStatus, botStartCycle, botEndCycle, botPosted, botError,
 } from './bot-status.js';
@@ -7733,6 +7734,21 @@ Respond with valid JSON:
 
 // Run missed winner analysis every 12 hours
 setInterval(runMissedWinnerDeepAnalysis, 12 * 60 * 60_000);
+
+// Exit-signal monitor — checks all active POSTed calls every 60s for
+// rug/dump patterns (LP pull, sell flip, deep drop from peak). Fires
+// 🚨 EXIT NOW alerts to the Telegram group on first sign of trouble.
+// Self-contained — handles its own DB updates + Telegram via wired hook.
+async function runExitMonitorTick() {
+  if (!_botActive) return;
+  try {
+    await runExitMonitor(dbInstance);
+  } catch (err) {
+    console.warn('[exit] tick error:', err.message);
+  }
+}
+setInterval(runExitMonitorTick, 60_000);
+setTimeout(runExitMonitorTick, 90_000); // first run 90s after boot
 setTimeout(runMissedWinnerDeepAnalysis, 10 * 60_000); // first run 10min after boot
 console.log('[missed-analysis] Missed winner analysis scheduled: every 12h');
 
@@ -12048,6 +12064,18 @@ app.get('/api/diagnose/solscan', async (req, res) => {
   });
 });
 
+// Exit-signal monitor stats — shows recent rug/dump alerts fired on
+// posted calls + count of active calls under live monitoring.
+app.get('/api/exit-monitor/stats', (req, res) => {
+  setCors(res);
+  try {
+    const stats = getExitMonitorStats(dbInstance);
+    res.json({ ok: true, ...stats });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Self-trained wallet leaderboard — shows wallets credited from OUR call
 // outcomes (separate from Dune's labels). Each WIN call credits its early
 // holders; wallets reach WINNER tier at 3 wins @ 2x average multiple.
@@ -13074,6 +13102,28 @@ app.listen(PORT, async () => {
     if (result.promoted > 0) {
       logEvent('INFO', 'WALLET_PROMOTED', `${result.promoted} wallets promoted to WINNER on ${ca.slice(0,8)} (${peakMultiple.toFixed(2)}x)`);
     }
+  });
+
+  // Wire the exit-monitor Telegram hook — sends 🚨 EXIT NOW alerts to the
+  // group when posted calls show rug/dump patterns (LP pull, sell flip,
+  // deep drop from peak, dev wallet moving). Each alert type fires once
+  // per call (deduped via exit_alerts table).
+  setExitTelegramHook(async (msg) => {
+    if (AI_CONFIG_OVERRIDES.pausePosting) return;
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
+    try {
+      await fetch(`${TELEGRAM_API}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_GROUP_CHAT_ID,
+          text: msg,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (err) { console.warn('[exit-tg] send failed:', err.message); }
   });
 
   // to the free channel (AXIOSCAN-style 2x-delayed free tier), and every
