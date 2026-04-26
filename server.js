@@ -11602,7 +11602,9 @@ app.get('/api/diagnose/apis', async (req, res) => {
   if (out.solscan.keyPresent) {
     const t0 = Date.now();
     try {
-      const r = await fetch(`https://pro-api.solscan.io/v2.0/token/meta?address=${testCA}`, {
+      // Use the SAME endpoint as production code (server.js:7806) so the diagnose
+      // result actually reflects whether Solscan works for our use case
+      const r = await fetch(`https://pro-api.solscan.io/v2.0/token/holders?address=${testCA}&page_size=1&page=1`, {
         headers: { token: process.env.SOLSCAN_API_KEY, accept: 'application/json' },
         signal: AbortSignal.timeout(8_000),
       });
@@ -11632,13 +11634,17 @@ app.get('/api/diagnose/apis', async (req, res) => {
   if (out.dune.keyPresent) {
     const t0 = Date.now();
     try {
-      const r = await fetch('https://api.dune.com/api/v1/query?limit=1', {
-        headers: { 'X-Dune-Api-Key': process.env.DUNE_API_KEY },
-        signal: AbortSignal.timeout(8_000),
-      });
-      out.dune.status = r.status; out.dune.ms = Date.now() - t0;
-      out.dune.ok = r.ok || r.status === 401 ? true : false; // 401 means key issue, anything else connectivity
-      if (!r.ok) out.dune.error = 'HTTP ' + r.status;
+      // Dune doesn't have a flat /query endpoint — only /query/{id}/results works.
+      // Use the actual production wallet DB status as the health proxy:
+      // walletDbSize > 0 means Dune queries succeeded recently.
+      const status = (typeof getDuneWalletStatus === 'function') ? getDuneWalletStatus() : null;
+      const dbStats = status?.dbStats || {};
+      const totalWallets = dbStats.total ?? 0;
+      out.dune.ms = Date.now() - t0;
+      out.dune.ok = totalWallets > 0;
+      out.dune.status = totalWallets > 0 ? 200 : 503;
+      out.dune.sample = { wallets_loaded: totalWallets, ready: status?.ready, lastLoadedAt: status?.lastLoadedAt };
+      if (totalWallets === 0) out.dune.error = 'Wallet DB empty — Dune sync may not have run yet';
     } catch (e) { out.dune.error = e.message; out.dune.ms = Date.now() - t0; }
   }
 
