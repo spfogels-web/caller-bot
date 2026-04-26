@@ -2588,6 +2588,33 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
 
   const aiBar = buildAILearningBar();
 
+  // ── AI VERDICT BLOCK — compact, prominent, both Claude + OpenAI ────────
+  // Built once and injected near the top of the message. Includes:
+  //   - Claude's full verdict text + risk + setup
+  //   - OpenAI decision + conviction (when available)
+  //   - Confidence label
+  let aiVerdictBlock = `<b>🤖 AI VERDICT</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  if (vText && vText.trim()) {
+    aiVerdictBlock += `<b>Claude:</b> <b>${riskEmoji(risk)} ${risk}</b> · ${setup_type}\n`;
+    aiVerdictBlock += `<i>${escapeHtml(vText.slice(0, 600))}</i>\n`;
+  } else {
+    aiVerdictBlock += `<b>Claude:</b> <b>${riskEmoji(risk)} ${risk}</b> · ${setup_type}  <i>(no verdict text)</i>\n`;
+  }
+  // OpenAI decision (when present)
+  const oa = candidate.openaiDecision || candidate.openai_decision;
+  const oaConv = candidate.openaiConviction || candidate.openai_conviction;
+  const oaVerd = candidate.openaiVerdict || candidate.openai_verdict;
+  if (oa) {
+    const oaEmoji = oa === 'AUTO_POST' ? '✅' : oa === 'WATCHLIST' ? '👁' : oa === 'IGNORE' ? '🚫' : '⏳';
+    aiVerdictBlock += `\n<b>OpenAI:</b> ${oaEmoji} <b>${oa}</b>${oaConv ? ` · ${oaConv}` : ''}\n`;
+    if (oaVerd) aiVerdictBlock += `<i>${escapeHtml(String(oaVerd).slice(0, 400))}</i>\n`;
+  }
+  // Confidence
+  if (scoreResult?.confidence) {
+    aiVerdictBlock += `\n<b>Confidence:</b> ${Math.round(scoreResult.confidence.pct)}% · ${scoreResult.confidence.label}\n`;
+  }
+  aiVerdictBlock += '\n';
+
   return (
     `<b>📡 CALL ALERT — PULSE CALLER</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -2598,6 +2625,7 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
     `<b>Score: ${score}/100</b>  ${scoreBar(score)}\n` +
     `Risk: <b>${riskEmoji(risk)} ${risk}</b>   Setup: <b>${setup_type}</b>\n` +
     `Structure: <b>${gradeEmoji(grade)} ${grade}</b>   Stage: <b>${scoreResult?.stage ?? '?'}</b>\n\n` +
+    aiVerdictBlock +
     buildFoundationSignalsBlock(scoreResult) + `\n` +
     `<b>Sub-Scores (Structure):</b>\n` +
     `🚀 Launch: <b>${sub.launchQuality ?? '?'}</b>   👥 Wallet: <b>${sub.walletStructure ?? '?'}</b>   📈 Market: <b>${sub.marketBehavior ?? '?'}</b>   📣 Social: <b>${sub.socialNarrative ?? '?'}</b>\n\n` +
@@ -2629,7 +2657,6 @@ function buildCallAlertMessage(candidate, verdict, scoreResult, similarity = {},
     `<b>✅ Why It Passed:</b>\n${bullLines}\n\n` +
     `<b>⚠️ Watchouts:</b>\n${watchLines}\n\n` +
     buildSLTPBlock(candidate) +
-    `<b>📝 Verdict:</b>\n${escapeHtml(vText)}\n` +
     preliminary +
     ftLine +
     (ftLine ? '\n' : '') +
