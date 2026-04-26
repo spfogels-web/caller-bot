@@ -11635,15 +11635,19 @@ app.get('/api/diagnose/apis', async (req, res) => {
     const t0 = Date.now();
     try {
       // Dune doesn't have a flat /query endpoint — only /query/{id}/results works.
-      // Use the actual production wallet DB status as the health proxy:
-      // walletDbSize > 0 means Dune queries succeeded recently.
+      // Use production wallet DB status as health proxy: totalWallets > 0
+      // means Dune queries succeeded and the DB is loaded.
       const status = (typeof getDuneWalletStatus === 'function') ? getDuneWalletStatus() : null;
-      const dbStats = status?.dbStats || {};
-      const totalWallets = dbStats.total ?? 0;
+      const totalWallets = status?.totalWallets ?? 0;
       out.dune.ms = Date.now() - t0;
       out.dune.ok = totalWallets > 0;
       out.dune.status = totalWallets > 0 ? 200 : 503;
-      out.dune.sample = { wallets_loaded: totalWallets, ready: status?.ready, lastLoadedAt: status?.lastLoadedAt };
+      out.dune.sample = {
+        wallets_loaded: totalWallets,
+        ready: status?.ready,
+        winners: status?.categories?.WINNER ?? 0,
+        snipers: status?.categories?.SNIPER ?? 0,
+      };
       if (totalWallets === 0) out.dune.error = 'Wallet DB empty — Dune sync may not have run yet';
     } catch (e) { out.dune.error = e.message; out.dune.ms = Date.now() - t0; }
   }
