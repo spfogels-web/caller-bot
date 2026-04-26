@@ -103,17 +103,115 @@ export function selectScoringModel(ageMinutes) {
   return 'runner';
 }
 
+// ── Buy-velocity fallback ───────────────────────────────────────────────────
+// MISSED-WINNER FIX: $HENRY (107x), $Trump (5.96x) and others had buy_velocity
+// = NULL on first scan (Birdeye/DexScreener hadn't indexed buy txns yet).
+// Without this field, the V5 momentum scorer awarded only 7 pts (20% of max)
+// even when 200+ holders piled in within 2 minutes — clearly explosive.
+//
+// Fallback hierarchy (returns first non-null):
+//   1. Direct buyVelocity / buy_velocity field (preferred)
+//   2. Computed from buys_1h / 60 (true buys-per-minute)
+//   3. Computed from total txns × buy_ratio / 60 (mixed-tx fallback)
+//   4. Estimated from holders × discount / age_minutes (adoption proxy)
+//   5. Estimated from 5m price velocity * sign + buy ratio (last resort)
+//
+// Estimation paths (4 + 5) include sniper discount and require positive buy
+// ratio so we don't reward bot-driven holder spikes with no real demand.
+function computeBuyVelocityWithFallback(c) {
+  // 1. Direct field
+  const direct = safeNum(c.buyVelocity ?? c.buy_velocity);
+  if (direct != null && direct > 0) return { value: direct, source: 'direct' };
+
+  // 2. Computed from buys_1h
+  const buys1h = safeNum(c.buys1h ?? c.buys_1h);
+  if (buys1h != null && buys1h > 0) {
+    return { value: +(buys1h / 60).toFixed(2), source: 'buys_1h' };
+  }
+
+  // 3. Computed from total txns × buy ratio
+  const sells1h = safeNum(c.sells1h ?? c.sells_1h);
+  const br = safeNum(c.buySellRatio1h ?? c.buy_sell_ratio_1h);
+  if (buys1h != null && sells1h != null && (buys1h + sells1h) > 0 && br != null) {
+    const totalTx = buys1h + sells1h;
+    return { value: +((totalTx * br) / 60).toFixed(2), source: 'txn_ratio' };
+  }
+
+  // 4. Adoption-rate proxy (holders ÷ age)
+  const holders = safeNum(c.holders, 0);
+  const ageHours = safeNum(c.pairAgeHours ?? c.pair_age_hours);
+  const ageMin = ageHours != null ? ageHours * 60 : null;
+  if (holders >= 30 && ageMin != null && ageMin > 0.5) {
+    // Discount for snipers (they show up as holders but aren't real demand)
+    const snipers = safeNum(c.sniperWalletCount ?? c.sniper_wallet_count, 0);
+    const sniperRatio = Math.min(0.5, snipers / Math.max(1, holders));
+    const realHolders = holders * (1 - sniperRatio);
+    // Assume ~60% of real holders made one buy each over the coin's life
+    // (conservative — early launch usually sees 1-3 buys per holder)
+    const estimatedBuys = realHolders * 0.6;
+    const buysPerMin = estimatedBuys / ageMin;
+    // Require buy ratio support — if available, must be > 0.45 (no estimation
+    // for sell-dominated coins). If buy ratio is null, allow with discount.
+    if (br == null || br > 0.45) {
+      const discount = br == null ? 0.7 : 1.0;
+      return { value: +(buysPerMin * discount).toFixed(2), source: 'holders_per_min' };
+    }
+  }
+
+  // 5. Price-velocity proxy (last resort)
+  const p5 = safeNum(c.priceChange5m ?? c.price_change_5m);
+  if (p5 != null && p5 > 5 && (br == null || br > 0.50)) {
+    // Big positive 5m move = lots of buy pressure even without tx counts.
+    // Map: +20%/5m → ~3 buys/min, +50%/5m → ~6 buys/min, +100%/5m → ~10
+    const estimated = Math.min(15, Math.pow(p5 / 5, 0.55));
+    return { value: +estimated.toFixed(2), source: 'price_5m' };
+  }
+
+  // No fallback possible
+  return { value: null, source: 'none' };
+}
+
 // ── Shared behavior metrics ─────────────────────────────────────────────────
 export function calculateBehaviorMetrics(candidate) {
   const c = candidate || {};
+  const bvFallback = computeBuyVelocityWithFallback(c);
+
+  // buys/sells fallback — when raw counts are missing but we have an estimated
+  // buy velocity, estimate buys = bv*60 (1h window). Lets V5 momentum
+  // sub-signals (mq.uniqueBuyers, mq.spread, etc) fire on first-scan coins
+  // that would otherwise have ZERO transaction data. Use the buy ratio to
+  // derive sells from the implied total.
+  const rawBuys = safeNum(c.buys1h ?? c.buys_1h);
+  const rawSells = safeNum(c.sells1h ?? c.sells_1h);
+  const br = safeNum(c.buySellRatio1h ?? c.buy_sell_ratio_1h);
+  let buys1h = rawBuys, sells1h = rawSells, txnsEstimated = false;
+  if ((rawBuys == null || rawBuys === 0) && bvFallback.value != null && bvFallback.value > 0
+      && bvFallback.source !== 'direct') {
+    // Estimate from velocity (capped to 1h window worth of activity, cap at age)
+    const ageHours = safeNum(c.pairAgeHours ?? c.pair_age_hours, 1);
+    const windowH  = Math.min(1, Math.max(0.05, ageHours));
+    const estTotal = Math.round(bvFallback.value * 60 * windowH);
+    if (br != null && br > 0 && br < 1) {
+      buys1h  = Math.round(estTotal * br);
+      sells1h = estTotal - buys1h;
+    } else {
+      // Default to br=0.65 if missing (matches typical clean-launch pattern)
+      buys1h  = Math.round(estTotal * 0.65);
+      sells1h = estTotal - buys1h;
+    }
+    txnsEstimated = true;
+  }
+
   return {
     ageMinutes:           getCoinAgeMinutes(c),
-    buyVelocity:          safeNum(c.buyVelocity ?? c.buy_velocity),
+    buyVelocity:          bvFallback.value,
+    buyVelocitySource:    bvFallback.source,  // 'direct'|'buys_1h'|'txn_ratio'|'holders_per_min'|'price_5m'|'none'
     volumeVelocity:       safeNum(c.volumeVelocity ?? c.volume_velocity),
     launchUbr:            safeNum(c.launchUniqueBuyerRatio ?? c.launch_unique_buyer_ratio),
     buySellRatio1h:       safeNum(c.buySellRatio1h ?? c.buy_sell_ratio_1h),
-    buys1h:               safeNum(c.buys1h ?? c.buys_1h, 0),
-    sells1h:              safeNum(c.sells1h ?? c.sells_1h, 0),
+    buys1h:               buys1h ?? 0,
+    sells1h:              sells1h ?? 0,
+    txnsEstimated:        txnsEstimated,    // flag for ledger transparency
     marketCap:            safeNum(c.marketCap ?? c.market_cap, 0),
     liquidity:            safeNum(c.liquidity, 0),
     volume1h:             safeNum(c.volume1h ?? c.volume_1h, 0),
@@ -234,9 +332,16 @@ export function scoreDiscoveryCoin(candidate, metricsIn = null, weights = null) 
     risks.push('Volume velocity unknown — very early');
   } else {
     const base = curve(bv, 0, 12, maxVV * 0.82, 0.6); // up to ~28.7 from bv alone
-    vvAcc += add('vv.base', 'Velocity base', `bv=${bv.toFixed(2)}/min`, `curve(bv,0→12,28.7,s=0.6)=${base.toFixed(1)}`, base);
-    if (bv >= 8)        reasons.push(`EXPLOSIVE velocity (${bv.toFixed(1)} buys/min)`);
-    else if (bv >= 4)   reasons.push(`Strong velocity (${bv.toFixed(1)} buys/min)`);
+    // Surface velocity SOURCE in the ledger so we can audit which fallback fired.
+    // 'direct' / 'buys_1h' / 'txn_ratio' = real data. 'holders_per_min' /
+    // 'price_5m' = estimated from proxy signals (still valid but flagged).
+    const src = m.buyVelocitySource || 'direct';
+    const srcLabel = src === 'direct' || src === 'buys_1h' || src === 'txn_ratio'
+      ? `bv=${bv.toFixed(2)}/min`
+      : `bv=${bv.toFixed(2)}/min ESTIMATED (${src})`;
+    vvAcc += add('vv.base', 'Velocity base', srcLabel, `curve(bv,0→12,28.7,s=0.6)=${base.toFixed(1)}`, base);
+    if (bv >= 8)        reasons.push(`EXPLOSIVE velocity (${bv.toFixed(1)} buys/min${src !== 'direct' && src !== 'buys_1h' && src !== 'txn_ratio' ? ' est' : ''})`);
+    else if (bv >= 4)   reasons.push(`Strong velocity (${bv.toFixed(1)} buys/min${src !== 'direct' && src !== 'buys_1h' && src !== 'txn_ratio' ? ' est' : ''})`);
     else if (bv >= 1.5) reasons.push(`Developing velocity (${bv.toFixed(1)} buys/min)`);
     else if (bv < 0.7)  risks.push(`Weak velocity (${bv.toFixed(1)} buys/min)`);
   }
@@ -1579,7 +1684,32 @@ export function decideAction(scores, state, labels, metrics) {
                           && momentum >= 55
                           && (metrics.buySellRatio1h ?? 0) >= 0.60;
 
-  if (maturePost || earlyPost || cleanStructurePost) {
+  // EXPLOSIVE_LAUNCH override — MISSED-WINNER FIX inspired by $HENRY (107x).
+  // When a coin is genuinely exploding on first scan (huge price moves +
+  // strong adoption + clean rug + acceptable structure), force POST even
+  // if demand quality hasn't caught up. The pattern is unmistakable:
+  //   - Age < 15 minutes (very fresh — not chasing late entry)
+  //   - Holders >= 100 (real adoption, not bot army)
+  //   - Price 5m >= +25% AND price 1h >= +100% (explosive sustained move)
+  //   - Buy ratio >= 55% (real demand, not exit liquidity)
+  //   - Rug risk < 25 (clean) AND dev < 6% (acceptable)
+  //   - Mint revoked (no inflation rug vector)
+  // Keeps mcap floor ($15K) + rug filter strict — this is targeted at
+  // catching the obvious winners that buy_velocity NULL bug missed.
+  const ageMin = metrics.ageMinutes ?? 999;
+  const p5 = metrics.priceChange5m ?? 0;
+  const p1h = metrics.priceChange1h ?? 0;
+  const explosiveLaunch =
+       ageMin < 15
+    && (metrics.holders ?? 0) >= 100
+    && p5 >= 25
+    && p1h >= 100
+    && (metrics.buySellRatio1h ?? 0) >= 0.55
+    && rugRisk < 25
+    && dev != null && dev < 6
+    && mintOk;
+
+  if (maturePost || earlyPost || cleanStructurePost || explosiveLaunch) {
     // Micro-cap verification — coins under $18K mcap need extra proof
     // because sub-$18K post-quality has historically been worse.
     // FOUR escape paths (any one passes):
