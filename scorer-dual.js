@@ -945,16 +945,24 @@ export const V5_WEIGHTS = {
   },
   finalCall: { mq: 0.30, dq: 0.25, wq: 0.25, ss: 0.20, rr: 0.60 },
   decision: {
-    // POST gates calibrated against production data (top 12 fresh coins
-    // were stuck at finalCall 60-64, mq/dq capped ~46-78 on first scan
-    // because the wallet DB has no winners on brand-new coins → wq pins
-    // near 50 for everyone). Loosened gates to actually produce POSTs
-    // while keeping rug filter strict (<35) as the real safety wall.
-    //   spec defaults: 75/70/70  →  v1: 68/65/65  →  current: 62/58/55
-    postFinal: 62, postRug: 35, postMomentum: 58, postDemand: 55,
-    watchlistFinalLow: 48, watchlistFinalHigh: 61,
+    // POST gates calibrated to hit ~20 calls/day target while keeping
+    // rug filter strict. Real outcomes from 70+ resolved calls show:
+    //   - Score 65-75 band: 64% win rate (best)
+    //   - Score 50-65 band: 33% win rate but 3.4x avg peak (lottery)
+    //   - Sub-$18K mcap: high false-positive rate (extra gates needed)
+    //   spec defaults: 75/70/70 → v1: 68/65/65 → v2: 62/58/55 → v3: 55/52/48
+    postFinal: 55, postRug: 35, postMomentum: 52, postDemand: 48,
+    watchlistFinalLow: 42, watchlistFinalHigh: 54,
     watchlistRugMin: 35, watchlistRugMax: 50,
     blockRug: 66,
+    // Micro-cap verification: coins under $18K mcap need extra proof
+    // because most sub-$15K calls have lost. To still post a $15K-$18K
+    // coin we require: rug<microCapMaxRug AND momentum>=microCapMinMq
+    // AND wallet>=microCapMinWq, OR at least 1 known winner wallet.
+    microCapMcapCutoff: 18_000,
+    microCapMaxRug: 25,
+    microCapMinMq:  58,
+    microCapMinWq:  55,
   },
 };
 
@@ -1524,7 +1532,7 @@ export function assignLabels(state, scores, metrics) {
 // ── Decision engine ────────────────────────────────────────────────────────
 export function decideAction(scores, state, labels, metrics) {
   const D = V5_WEIGHTS.decision;
-  const { rugRisk, momentum, demand, finalCall } = scores;
+  const { rugRisk, momentum, demand, finalCall, wallet } = scores;
 
   // Hard BLOCK rules — never overridable
   if (rugRisk >= D.blockRug) return 'BLOCK';
@@ -1552,7 +1560,21 @@ export function decideAction(scores, state, labels, metrics) {
                   && momentum >= 60 && demand >= 55
                   && labels.includes('EARLY_CLEAN_SEND');
 
-  if (maturePost || earlyPost) return 'POST';
+  if (maturePost || earlyPost) {
+    // Micro-cap verification — coins under $18K mcap need extra proof
+    // because sub-$18K post-quality has historically been worse.
+    // Three escape paths: (a) clean rug+momentum+wallet (b) known winner present.
+    const mcap = metrics.marketCap ?? 0;
+    if (mcap > 0 && mcap < D.microCapMcapCutoff) {
+      const winners = metrics.knownWinnerCount ?? 0;
+      const passes  = winners >= 1
+        || (rugRisk < D.microCapMaxRug
+            && momentum >= D.microCapMinMq
+            && wallet   >= D.microCapMinWq);
+      if (!passes) return 'WATCHLIST';
+    }
+    return 'POST';
+  }
 
   // WATCHLIST conditions
   if (finalCall >= D.watchlistFinalLow && finalCall <= D.watchlistFinalHigh) return 'WATCHLIST';

@@ -2902,8 +2902,11 @@ async function processCandidate(candidate, isRescan = false) {
   // late entries are the #1 source of losses. Auto-reject regardless of
   // score, Claude, OpenAI, or smart-money signals. The cap is overridable
   // via AI_CONFIG_OVERRIDES.maxMarketCapOverride (set from dashboard / TG).
-  // ── HARD MCap FLOOR: $8K minimum — below this there's no real data to score
-  const MCAP_HARD_FLOOR = 8_000;
+  // ── HARD MCap FLOOR: $15K minimum — sub-$15K calls have a high false-
+  // positive rate (3 of 4 recent sub-$15K posts were losers). Coins between
+  // $15K-$18K still need to clear extra V5 verification (rug<25, mq>=58,
+  // wq>=55, OR a known winner wallet) before being eligible for POST.
+  const MCAP_HARD_FLOOR = 15_000;
   if ((candidate.marketCap ?? 0) > 0 && (candidate.marketCap ?? 0) < MCAP_HARD_FLOOR) {
     console.log(`[auto-caller] 🚫 $${candidate.token ?? ca.slice(0,6)} rejected — mcap $${Math.round((candidate.marketCap??0)/1000)}K below $${MCAP_HARD_FLOOR/1000}K floor`);
     return;
@@ -3618,6 +3621,13 @@ async function processCandidate(candidate, isRescan = false) {
     const v5ActionMap = { POST: 'AUTO_POST', WATCHLIST: 'WATCHLIST', IGNORE: 'IGNORE', BLOCK: 'BLOCKLIST' };
     const v5InitialDecision = v5 ? v5ActionMap[v5.action] : null;
     let finalDecision = v5InitialDecision || scorerDecision;
+    // REVIVING decisions (second-leg breakouts) get promoted to AUTO_POST
+    // when rug filter is clean — these are the "coin was quiet, now real
+    // buyers returning" patterns that historically run hardest.
+    if (v5?.decision?.label === 'REVIVING' && (v5.scores?.rugRisk ?? 99) < 35 && finalDecision !== 'BLOCKLIST') {
+      finalDecision = 'AUTO_POST';
+      console.log(`[auto-caller:v5] $${enrichedCandidate.token??ca.slice(0,6)} REVIVING → AUTO_POST (second-leg breakout, rug=${v5.scores.rugRisk})`);
+    }
     const v5HardBlock = v5 && v5.action === 'BLOCK';
     let ftResult = null; // legacy compat
     if (v5) {
