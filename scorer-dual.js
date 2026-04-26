@@ -1050,26 +1050,74 @@ export const V5_WEIGHTS = {
   },
   finalCall: { mq: 0.30, dq: 0.25, wq: 0.25, ss: 0.20, rr: 0.60 },
   decision: {
-    // POST gates calibrated to hit ~20 calls/day target while keeping
-    // rug filter strict. Real outcomes from 70+ resolved calls show:
-    //   - Score 65-75 band: 64% win rate (best)
-    //   - Score 50-65 band: 33% win rate but 3.4x avg peak (lottery)
-    //   - Sub-$18K mcap: high false-positive rate (extra gates needed)
-    //   spec defaults: 75/70/70 → v1: 68/65/65 → v2: 62/58/55 → v3: 55/52/48
+    // POST gates — AUTO-TUNABLE via setV5DecisionConfig() (called by the
+    // self-improvement loop / autotune system). Bounded in autotune_params.
     postFinal: 55, postRug: 35, postMomentum: 52, postDemand: 48,
     watchlistFinalLow: 42, watchlistFinalHigh: 54,
     watchlistRugMin: 35, watchlistRugMax: 50,
     blockRug: 66,
-    // Micro-cap verification: coins under $18K mcap need extra proof
-    // because most sub-$15K calls have lost. To still post a $15K-$18K
-    // coin we require: rug<microCapMaxRug AND momentum>=microCapMinMq
-    // AND wallet>=microCapMinWq, OR at least 1 known winner wallet.
+    // Micro-cap verification ($15K-$18K)
     microCapMcapCutoff: 18_000,
     microCapMaxRug: 25,
     microCapMinMq:  58,
     microCapMinWq:  55,
+    // Clean-structure escape thresholds
+    cleanStructDevMax:    3,
+    cleanStructTop10Max:  30,
+    cleanStructMinFinal:  50,
+    cleanStructMinMq:     55,
+    cleanStructMaxRug:    20,
+    cleanStructMinBuyRatio: 0.60,
+    // Explosive-launch override (HENRY-fix)
+    explosiveAgeMaxMin:  15,
+    explosiveMinHolders: 100,
+    explosiveMin5m:      25,
+    explosiveMin1h:      100,
+    explosiveMinBuyRatio:0.55,
+    explosiveMaxRug:     25,
+    explosiveDevMax:     6,
   },
 };
+
+// ── Runtime override registry for V5 decision gates ────────────────────────
+// Lets the autotune system + AI brain adjust V5 thresholds without editing
+// source. Only listed keys are mutable; updates are validated and clamped
+// upstream in autotune_params bounds. Returns the keys actually changed.
+const V5_TUNABLE_KEYS = new Set([
+  'postFinal', 'postRug', 'postMomentum', 'postDemand',
+  'watchlistFinalLow', 'watchlistFinalHigh',
+  'watchlistRugMin', 'watchlistRugMax',
+  'blockRug',
+  'microCapMcapCutoff', 'microCapMaxRug', 'microCapMinMq', 'microCapMinWq',
+  'cleanStructDevMax', 'cleanStructTop10Max', 'cleanStructMinFinal',
+  'cleanStructMinMq', 'cleanStructMaxRug', 'cleanStructMinBuyRatio',
+  'explosiveAgeMaxMin', 'explosiveMinHolders', 'explosiveMin5m',
+  'explosiveMin1h', 'explosiveMinBuyRatio', 'explosiveMaxRug',
+  'explosiveDevMax',
+]);
+
+export function setV5DecisionConfig(updates = {}) {
+  if (!updates || typeof updates !== 'object') return [];
+  const applied = [];
+  for (const [k, v] of Object.entries(updates)) {
+    if (!V5_TUNABLE_KEYS.has(k)) continue;
+    const num = Number(v);
+    if (!Number.isFinite(num)) continue;
+    if (V5_WEIGHTS.decision[k] !== num) {
+      V5_WEIGHTS.decision[k] = num;
+      applied.push(k);
+    }
+  }
+  return applied;
+}
+
+export function getV5DecisionConfig() {
+  const out = {};
+  for (const k of V5_TUNABLE_KEYS) out[k] = V5_WEIGHTS.decision[k];
+  return out;
+}
+
+export function listV5TunableKeys() { return [...V5_TUNABLE_KEYS]; }
 
 // ── State classifier ────────────────────────────────────────────────────────
 export function classifyCoinState(metricsOrCandidate) {
@@ -1675,38 +1723,31 @@ export function decideAction(scores, state, labels, metrics) {
   const top10  = metrics.top10HolderPct;
   const mintOk = metrics.mintAuthority === 0;
   const lpOk   = metrics.lpLocked === 1;
-  const cleanStructure = dev != null && dev < 3
-                      && top10 != null && top10 < 30
+  // All thresholds below now read from D (V5_WEIGHTS.decision) so the
+  // autotune system can adjust them via setV5DecisionConfig().
+  const cleanStructure = dev != null && dev < D.cleanStructDevMax
+                      && top10 != null && top10 < D.cleanStructTop10Max
                       && mintOk && lpOk;
   const cleanStructurePost = cleanStructure
-                          && finalCall >= 50
-                          && rugRisk < 20
-                          && momentum >= 55
-                          && (metrics.buySellRatio1h ?? 0) >= 0.60;
+                          && finalCall >= D.cleanStructMinFinal
+                          && rugRisk < D.cleanStructMaxRug
+                          && momentum >= D.cleanStructMinMq
+                          && (metrics.buySellRatio1h ?? 0) >= D.cleanStructMinBuyRatio;
 
-  // EXPLOSIVE_LAUNCH override — MISSED-WINNER FIX inspired by $HENRY (107x).
-  // When a coin is genuinely exploding on first scan (huge price moves +
-  // strong adoption + clean rug + acceptable structure), force POST even
-  // if demand quality hasn't caught up. The pattern is unmistakable:
-  //   - Age < 15 minutes (very fresh — not chasing late entry)
-  //   - Holders >= 100 (real adoption, not bot army)
-  //   - Price 5m >= +25% AND price 1h >= +100% (explosive sustained move)
-  //   - Buy ratio >= 55% (real demand, not exit liquidity)
-  //   - Rug risk < 25 (clean) AND dev < 6% (acceptable)
-  //   - Mint revoked (no inflation rug vector)
-  // Keeps mcap floor ($15K) + rug filter strict — this is targeted at
-  // catching the obvious winners that buy_velocity NULL bug missed.
+  // EXPLOSIVE_LAUNCH override — HENRY-fix. Catches obvious explosive
+  // launches that the buy_velocity NULL bug previously missed. All
+  // thresholds tunable via autotune system.
   const ageMin = metrics.ageMinutes ?? 999;
   const p5 = metrics.priceChange5m ?? 0;
   const p1h = metrics.priceChange1h ?? 0;
   const explosiveLaunch =
-       ageMin < 15
-    && (metrics.holders ?? 0) >= 100
-    && p5 >= 25
-    && p1h >= 100
-    && (metrics.buySellRatio1h ?? 0) >= 0.55
-    && rugRisk < 25
-    && dev != null && dev < 6
+       ageMin < D.explosiveAgeMaxMin
+    && (metrics.holders ?? 0) >= D.explosiveMinHolders
+    && p5 >= D.explosiveMin5m
+    && p1h >= D.explosiveMin1h
+    && (metrics.buySellRatio1h ?? 0) >= D.explosiveMinBuyRatio
+    && rugRisk < D.explosiveMaxRug
+    && dev != null && dev < D.explosiveDevMax
     && mintOk;
 
   if (maturePost || earlyPost || cleanStructurePost || explosiveLaunch) {

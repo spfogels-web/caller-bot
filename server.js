@@ -691,8 +691,10 @@ try {
     console.warn('[db] pulse_sub_scores setup:', err.message);
   }
 
-  // Seed default autotune parameter bounds
+  // Seed default autotune parameter bounds.
+  // Format: [key, current, min, max, max_step_per_change, cooldown_hours]
   const tuneParams = [
+    // Legacy params (kept for backward compat with existing autotune flows)
     ['sweetSpotMin',          '8000',  '5000',   '25000',  '2000',  6],
     ['sweetSpotMax',          '25000', '10000',  '100000', '5000',  6],
     ['maxMarketCapOverride',  '150000','50000',  '500000', '25000', 6],
@@ -704,6 +706,34 @@ try {
     ['top10HolderBlock',      '70',    '40',     '90',     '5',     12],
     ['walletIntelWeight',     '1.0',   '0.5',    '2.0',    '0.1',   12],
     ['agentConvictionThreshold','80',  '60',     '95',     '5',     6],
+    // V5 decision gates (NEW — bot can now self-tune what we've been hand-adjusting)
+    ['v5_postFinal',          '55',    '45',     '75',     '3',     6],
+    ['v5_postRug',            '35',    '20',     '50',     '3',     6],
+    ['v5_postMomentum',       '52',    '40',     '70',     '3',     6],
+    ['v5_postDemand',         '48',    '35',     '65',     '3',     6],
+    ['v5_blockRug',           '66',    '55',     '80',     '3',     12],
+    ['v5_watchlistFinalLow',  '42',    '30',     '55',     '3',     6],
+    ['v5_watchlistFinalHigh', '54',    '50',     '70',     '3',     6],
+    // Micro-cap verification
+    ['v5_microCapMcapCutoff', '18000', '15000',  '30000',  '1500',  12],
+    ['v5_microCapMaxRug',     '25',    '15',     '40',     '3',     12],
+    ['v5_microCapMinMq',      '58',    '45',     '75',     '3',     12],
+    ['v5_microCapMinWq',      '55',    '40',     '70',     '3',     12],
+    // Clean-structure escape
+    ['v5_cleanStructDevMax',  '3',     '1',      '6',      '0.5',   12],
+    ['v5_cleanStructTop10Max','30',    '20',     '40',     '3',     12],
+    ['v5_cleanStructMinFinal','50',    '40',     '65',     '3',     6],
+    ['v5_cleanStructMinMq',   '55',    '45',     '70',     '3',     6],
+    ['v5_cleanStructMaxRug',  '20',    '10',     '35',     '3',     12],
+    ['v5_cleanStructMinBuyRatio','0.60','0.45',  '0.80',   '0.05',  12],
+    // Explosive-launch override (HENRY-fix)
+    ['v5_explosiveAgeMaxMin', '15',    '5',      '30',     '3',     12],
+    ['v5_explosiveMinHolders','100',   '50',     '300',    '20',    12],
+    ['v5_explosiveMin5m',     '25',    '15',     '50',     '5',     12],
+    ['v5_explosiveMin1h',     '100',   '50',     '300',    '20',    12],
+    ['v5_explosiveMinBuyRatio','0.55', '0.45',   '0.75',   '0.05',  12],
+    ['v5_explosiveMaxRug',    '25',    '15',     '40',     '3',     12],
+    ['v5_explosiveDevMax',    '6',     '2',      '12',     '1',     12],
   ];
   const tuneUpsert = dbInstance.prepare(`INSERT OR IGNORE INTO autotune_params (key,current_value,min_value,max_value,max_step_change,cooldown_hours) VALUES (?,?,?,?,?,?)`);
   for (const p of tuneParams) tuneUpsert.run(...p);
@@ -6292,6 +6322,33 @@ function syncLatePumpConfig() {
 }
 syncLatePumpConfig(); // initial sync on boot
 
+// Sync V5 decision config from autotune_params on boot. Reads every v5_*
+// row, strips the prefix, and applies via setV5DecisionConfig() so the
+// live scorer reflects whatever the bot has tuned to over time. Without
+// this, V5 thresholds reset to defaults on every restart, undoing all
+// the autotune learning. Runs once at startup.
+async function syncV5ConfigFromDb() {
+  try {
+    const rows = dbInstance.prepare(`SELECT key, current_value FROM autotune_params WHERE key LIKE 'v5_%'`).all();
+    if (!rows.length) return;
+    const updates = {};
+    for (const r of rows) {
+      const v5Key = r.key.slice(3);
+      const num = Number(r.current_value);
+      if (Number.isFinite(num)) updates[v5Key] = num;
+    }
+    if (Object.keys(updates).length === 0) return;
+    const mod = await import('./scorer-dual.js');
+    if (typeof mod.setV5DecisionConfig === 'function') {
+      const applied = mod.setV5DecisionConfig(updates);
+      console.log(`[boot:v5] ✓ Hydrated ${applied.length}/${rows.length} V5 decision params from autotune_params`);
+    }
+  } catch (err) {
+    console.warn(`[boot:v5] sync failed: ${err.message}`);
+  }
+}
+syncV5ConfigFromDb(); // initial sync on boot
+
 // GET current config + audit log
 app.get('/api/tuning/config', (req, res) => {
   setCors(res);
@@ -6776,7 +6833,16 @@ MISSION: Find hidden Solana micro-cap gems before the market notices them. Study
 
 CANNOT CHANGE (EVER): CLAUDE_API_KEY, OPENAI_API_KEY, HELIUS_API_KEY, TELEGRAM_BOT_TOKEN, DUNE_API_KEY, BIRDEYE_API_KEY
 
-AUTOTUNE BOUNDS: sweetSpotMin 3000-50000 | sweetSpotMax 10000-100000 | maxMarketCapOverride 50000-500000 | minScoreOverride 28-60 | maxPairAgeHoursOverride 1-12h
+LEGACY AUTOTUNE: sweetSpotMin 3000-50000 | sweetSpotMax 10000-100000 | maxMarketCapOverride 50000-500000 | minScoreOverride 28-60 | maxPairAgeHoursOverride 1-12h
+
+V5 DECISION KNOBS (NEW — bot can now self-tune what was hand-adjusted):
+  Core gates: v5_postFinal 45-75 | v5_postRug 20-50 | v5_postMomentum 40-70 | v5_postDemand 35-65 | v5_blockRug 55-80
+  Watchlist band: v5_watchlistFinalLow 30-55 | v5_watchlistFinalHigh 50-70
+  Micro-cap ($15K-$18K): v5_microCapMcapCutoff 15000-30000 | v5_microCapMaxRug 15-40 | v5_microCapMinMq 45-75 | v5_microCapMinWq 40-70
+  Clean structure escape: v5_cleanStructDevMax 1-6 | v5_cleanStructTop10Max 20-40 | v5_cleanStructMinFinal 40-65 | v5_cleanStructMinMq 45-70 | v5_cleanStructMaxRug 10-35 | v5_cleanStructMinBuyRatio 0.45-0.80
+  Explosive launch (HENRY-fix): v5_explosiveAgeMaxMin 5-30 | v5_explosiveMinHolders 50-300 | v5_explosiveMin5m 15-50 | v5_explosiveMin1h 50-300 | v5_explosiveMinBuyRatio 0.45-0.75 | v5_explosiveMaxRug 15-40 | v5_explosiveDevMax 2-12
+
+When proposing changes use the EXACT key names above (with v5_ prefix for V5 knobs). The autotune system enforces bounds + step limits + cooldowns automatically.
 
 OUTPUT FORMAT (strict JSON, no markdown):
 {"bot":"A","msg_type":"PROPOSAL","analysis":"...","findings":["..."],"proposed_changes":[{"action":"UPDATE_CONFIG","key":"sweetSpotMin","current":10000,"proposed":8000,"rationale":"Win rate higher for $8K entry","evidence":"X resolved calls","confidence":82,"risk":"LOW","expected_effect":"Earlier entry"}],"recommendations":[{"priority":"HIGH","category":"DATA_SOURCE","title":"...","description":"...","rationale":"..."}],"requires_bot_b_review":true,"message":"Operator summary"}`.trim();
@@ -6906,6 +6972,21 @@ app.post('/api/agent/autonomous', async (req, res) => {
         if (change.key === 'sweetSpotMin') AI_CONFIG_OVERRIDES.sweetSpotMin = change.proposed;
         if (change.key === 'sweetSpotMax') AI_CONFIG_OVERRIDES.sweetSpotMax = change.proposed;
         if (change.key === 'maxPairAgeHoursOverride') activeMode.maxPairAgeHours = change.proposed;
+        // V5 decision gates — strip the 'v5_' prefix and push to scorer-dual.js
+        if (change.key.startsWith('v5_')) {
+          (async () => {
+            try {
+              const v5Key = change.key.slice(3);
+              const mod = await import('./scorer-dual.js');
+              if (typeof mod.setV5DecisionConfig === 'function') {
+                const applied = mod.setV5DecisionConfig({ [v5Key]: change.proposed });
+                if (applied.length) {
+                  console.log(`[autotune:v5] ✓ ${v5Key}: ${prev ?? '?'} → ${change.proposed} (applied to live scorer)`);
+                }
+              }
+            } catch (e) { console.warn(`[autotune:v5] apply failed for ${change.key}: ${e.message}`); }
+          })();
+        }
         try {
           dbInstance.prepare(`UPDATE agent_actions SET approved=1,result='AUTO_APPLIED' WHERE session_id=? AND params LIKE ?`).run(sid, '%' + change.key + '%');
           dbInstance.prepare(`UPDATE autotune_params SET current_value=?,last_changed_at=datetime('now') WHERE key=?`).run(String(change.proposed), change.key);
