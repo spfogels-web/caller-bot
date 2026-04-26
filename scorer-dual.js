@@ -1560,17 +1560,44 @@ export function decideAction(scores, state, labels, metrics) {
                   && momentum >= 60 && demand >= 55
                   && labels.includes('EARLY_CLEAN_SEND');
 
-  if (maturePost || earlyPost) {
+  // CLEAN-STRUCTURE override — wallet DB is too thin (~178 curated wallets)
+  // for every quality coin to have a tracked winner. Allow POST when the
+  // coin has CLEAN structure + decent momentum + clean rug, even if the
+  // demand quality score is below the standard gate. Demand often can't
+  // hit the gate on first-scan coins because most demand signals need
+  // multi-snapshot delta data that doesn't exist yet.
+  const dev    = metrics.devWalletPct;
+  const top10  = metrics.top10HolderPct;
+  const mintOk = metrics.mintAuthority === 0;
+  const lpOk   = metrics.lpLocked === 1;
+  const cleanStructure = dev != null && dev < 3
+                      && top10 != null && top10 < 30
+                      && mintOk && lpOk;
+  const cleanStructurePost = cleanStructure
+                          && finalCall >= 50
+                          && rugRisk < 20
+                          && momentum >= 55
+                          && (metrics.buySellRatio1h ?? 0) >= 0.60;
+
+  if (maturePost || earlyPost || cleanStructurePost) {
     // Micro-cap verification — coins under $18K mcap need extra proof
     // because sub-$18K post-quality has historically been worse.
-    // Three escape paths: (a) clean rug+momentum+wallet (b) known winner present.
+    // FOUR escape paths (any one passes):
+    //   (a) known winner wallet present
+    //   (b) clean rug + strong momentum + decent wallet score
+    //   (c) clean STRUCTURE: low dev, low top10, mint revoked, LP locked
+    //       — wallet DB is thin so structure has to be allowed to count
+    //   (d) strong momentum signal (velocity ≥4 buys/min + buy ratio ≥65%)
     const mcap = metrics.marketCap ?? 0;
     if (mcap > 0 && mcap < D.microCapMcapCutoff) {
       const winners = metrics.knownWinnerCount ?? 0;
+      const microCleanStructure = cleanStructure && rugRisk < 25;
+      const strongMomentum = (metrics.buyVelocity ?? 0) >= 4
+                          && (metrics.buySellRatio1h ?? 0) >= 0.65;
       const passes  = winners >= 1
-        || (rugRisk < D.microCapMaxRug
-            && momentum >= D.microCapMinMq
-            && wallet   >= D.microCapMinWq);
+        || (rugRisk < D.microCapMaxRug && momentum >= D.microCapMinMq && wallet >= D.microCapMinWq)
+        || microCleanStructure
+        || strongMomentum;
       if (!passes) return 'WATCHLIST';
     }
     return 'POST';

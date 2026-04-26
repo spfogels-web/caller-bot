@@ -3589,23 +3589,35 @@ async function processCandidate(candidate, isRescan = false) {
                         || (enrichedCandidate.smartMoneyScore  ?? 0) > 0
                         || (enrichedCandidate.knownWinnerWalletCount ?? 0) > 0
                         || enrichedCandidate._smartMoney;
-    // Momentum override: if the coin is genuinely exploding (velocity ≥12 buys/min
-    // or strong buy ratio + real volume), the cap is lifted. Our wallet DB is
-    // small and can't possibly hit every good coin — we shouldn't punish a
-    // coin running at 15 buys/min just because no tracked wallet is in it.
+    // Cap-lift overrides — wallet DB is thin (~178 curated wallets), so we
+    // can't expect every quality coin to have a tracked winner. Lift the
+    // cap when EITHER:
+    //   (a) Strong momentum (velocity ≥12 buys/min OR buy ratio ≥75% on $20K+ vol)
+    //   (b) Clean structure (dev<3% + top10<30% + mint revoked + LP locked)
+    //   (c) Smart money / wallet intel present (handled above)
     const buyVel = enrichedCandidate.buyVelocity ?? enrichedCandidate.buy_velocity ?? 0;
     const brRatio = enrichedCandidate.buySellRatio1h ?? enrichedCandidate.buy_sell_ratio_1h ?? 0;
     const v1h = enrichedCandidate.volume1h ?? enrichedCandidate.volume_1h ?? 0;
     const strongMomentum = (buyVel >= 12) || (brRatio >= 0.75 && v1h >= 20_000);
+    const dev   = enrichedCandidate.devWalletPct ?? enrichedCandidate.dev_wallet_pct;
+    const top10 = enrichedCandidate.top10HolderPct ?? enrichedCandidate.top10_holder_pct;
+    const mintOk = (enrichedCandidate.mintAuthority ?? enrichedCandidate.mint_authority) === 0;
+    const lpOk   = (enrichedCandidate.lpLocked ?? enrichedCandidate.lp_locked) === 1;
+    const cleanStructure = dev != null && dev < 3
+                        && top10 != null && top10 < 30
+                        && mintOk && lpOk;
     const CAP = SCORING_CONFIG.noSignalCap;
-    if (!hasWalletIntel && !strongMomentum && scoreResult.score > CAP) {
+    if (!hasWalletIntel && !strongMomentum && !cleanStructure && scoreResult.score > CAP) {
       const prior = scoreResult.score;
       scoreResult.score = CAP;
       (scoreResult.penalties = scoreResult.penalties || {}).wallet = scoreResult.penalties.wallet || [];
-      scoreResult.penalties.wallet.push(`-${prior - CAP} NO_ALPHA_SIGNAL cap — no smart money or strong momentum`);
-      console.log(`[auto-caller] 🚧 $${enrichedCandidate.token??ca.slice(0,6)} capped at ${CAP} (was ${prior}) — structure-only, no alpha signal`);
-    } else if (!hasWalletIntel && strongMomentum && scoreResult.score > CAP) {
-      console.log(`[auto-caller] ✅ $${enrichedCandidate.token??ca.slice(0,6)} cap lifted — strong momentum (vel=${buyVel.toFixed(1)} br=${(brRatio*100).toFixed(0)}% vol=${Math.round(v1h/1000)}K)`);
+      scoreResult.penalties.wallet.push(`-${prior - CAP} NO_ALPHA_SIGNAL cap — no smart money, no strong momentum, no clean structure`);
+      console.log(`[auto-caller] 🚧 $${enrichedCandidate.token??ca.slice(0,6)} capped at ${CAP} (was ${prior}) — needs wallet intel, momentum, or clean structure`);
+    } else if (!hasWalletIntel && (strongMomentum || cleanStructure) && scoreResult.score > CAP) {
+      const why = strongMomentum && cleanStructure ? 'strong momentum + clean structure'
+                : strongMomentum ? `strong momentum (vel=${buyVel.toFixed(1)} br=${(brRatio*100).toFixed(0)}% vol=${Math.round(v1h/1000)}K)`
+                : `clean structure (dev=${dev?.toFixed(1)}% top10=${top10?.toFixed(0)}% mint✓ LP✓)`;
+      console.log(`[auto-caller] ✅ $${enrichedCandidate.token??ca.slice(0,6)} cap lifted — ${why}`);
     }
 
     let similarity = {};
