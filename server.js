@@ -11947,56 +11947,83 @@ app.get('/api/diagnose/apis', async (req, res) => {
   });
 });
 
-// FAST DB-only outcome fix — just promotes any call to WIN where the
-// stored peak_multiple is already >=1.5x but outcome wasn't set correctly.
-// No external API calls. Should be the first thing run before the GeckoTerminal
-// backfill (which is slower and depends on the pool still being indexed).
+// FAST DB-only outcome fix — promotes any call to WIN where the stored
+// peak_multiple is already >=1.5x but outcome wasn't flipped. No external
+// API calls. Cascades to audit_archive, calls_archive, coin_fingerprints.
+// Called both on-demand via the endpoint AND every 5 min by the scheduler
+// below so outcomes never drift again.
+function fixStoredPeaks() {
+  const WIN_PEAK = 1.5;
+  const eligible = dbInstance.prepare(`
+    SELECT id, token, contract_address, peak_multiple, outcome
+    FROM calls
+    WHERE peak_multiple IS NOT NULL
+      AND peak_multiple >= ?
+      AND (outcome IS NULL OR outcome != 'WIN')
+  `).all(WIN_PEAK);
+
+  let upgraded = 0;
+  const changes = [];
+  for (const c of eligible) {
+    const ca = c.contract_address;
+    try {
+      dbInstance.prepare(`
+        UPDATE calls SET
+          outcome = 'WIN',
+          outcome_source = COALESCE(outcome_source, 'PEAK_FIX'),
+          outcome_set_at = COALESCE(outcome_set_at, datetime('now')),
+          auto_resolved = 1,
+          auto_resolved_at = COALESCE(auto_resolved_at, datetime('now'))
+        WHERE id = ?
+      `).run(c.id);
+      if (ca) {
+        try { dbInstance.prepare(`UPDATE audit_archive SET outcome='WIN', outcome_locked_at=datetime('now') WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(ca); } catch {}
+        try { dbInstance.prepare(`UPDATE calls_archive SET outcome='WIN' WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(ca); } catch {}
+        try { dbInstance.prepare(`UPDATE coin_fingerprints SET outcome='WIN', resolved_at_ms=COALESCE(resolved_at_ms, ?) WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(Date.now(), ca); } catch {}
+      }
+      upgraded++;
+      changes.push({ token: c.token, peak: c.peak_multiple, was: c.outcome });
+    } catch (err) {
+      console.warn('[peak-fix] update failed for $' + c.token + ':', err.message);
+    }
+  }
+  return { eligible: eligible.length, upgraded, changes };
+}
+
+// Manual endpoint — kept for backwards compat + ad-hoc trigger
 app.post('/api/calls/fix-stored-peaks', (req, res) => {
   setCors(res);
   try {
-    const WIN_PEAK = 1.5;
-    // Find all rows that should be WIN but aren't
-    const eligible = dbInstance.prepare(`
-      SELECT id, token, contract_address, peak_multiple, outcome
-      FROM calls
-      WHERE peak_multiple IS NOT NULL
-        AND peak_multiple >= ?
-        AND (outcome IS NULL OR outcome != 'WIN')
-    `).all(WIN_PEAK);
-
-    let upgraded = 0;
-    const changes = [];
-    for (const c of eligible) {
-      const ca = c.contract_address;
-      try {
-        dbInstance.prepare(`
-          UPDATE calls SET
-            outcome = 'WIN',
-            outcome_source = COALESCE(outcome_source, 'PEAK_FIX'),
-            outcome_set_at = COALESCE(outcome_set_at, datetime('now')),
-            auto_resolved = 1,
-            auto_resolved_at = COALESCE(auto_resolved_at, datetime('now'))
-          WHERE id = ?
-        `).run(c.id);
-        // Cascade
-        if (ca) {
-          try { dbInstance.prepare(`UPDATE audit_archive SET outcome='WIN', outcome_locked_at=datetime('now') WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(ca); } catch {}
-          try { dbInstance.prepare(`UPDATE calls_archive SET outcome='WIN' WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(ca); } catch {}
-          try { dbInstance.prepare(`UPDATE coin_fingerprints SET outcome='WIN', resolved_at_ms=COALESCE(resolved_at_ms, ?) WHERE contract_address=? AND (outcome IS NULL OR outcome != 'WIN')`).run(Date.now(), ca); } catch {}
-        }
-        upgraded++;
-        changes.push({ token: c.token, peak: c.peak_multiple, was: c.outcome });
-      } catch (err) {
-        console.warn('[peak-fix] update failed for $' + c.token + ':', err.message);
-      }
-    }
-    console.log('[peak-fix] upgraded ' + upgraded + ' calls to WIN');
-    res.json({ ok: true, eligible: eligible.length, upgraded, changes });
+    const result = fixStoredPeaks();
+    if (result.upgraded > 0) console.log('[peak-fix:manual] upgraded ' + result.upgraded + ' calls to WIN');
+    res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 app.get('/api/calls/fix-stored-peaks', (req, res) => { req.method='POST'; return app._router.handle(req, res); });
+
+// AUTO-SYNC — runs the same fix every 5 minutes so peak/outcome can't
+// drift. Silent unless something gets upgraded. Logs upgrades to the
+// system event log so they're visible in the audit feed.
+setInterval(() => {
+  try {
+    const r = fixStoredPeaks();
+    if (r.upgraded > 0) {
+      console.log('[peak-fix:auto] upgraded ' + r.upgraded + ' calls to WIN: ' +
+        r.changes.map(c => '\$' + c.token + '=' + c.peak.toFixed(2) + 'x').join(', '));
+      logEvent('INFO', 'PEAK_FIX_AUTO', 'Upgraded ' + r.upgraded + ' calls: ' +
+        r.changes.map(c => c.token + '@' + c.peak.toFixed(2) + 'x').join(', '));
+    }
+  } catch (err) { console.warn('[peak-fix:auto] tick err:', err.message); }
+}, 5 * 60_000);
+// First run 2 min after boot (gives the outcome tracker time to do its first pass)
+setTimeout(() => {
+  try {
+    const r = fixStoredPeaks();
+    if (r.upgraded > 0) console.log('[peak-fix:boot] upgraded ' + r.upgraded + ' calls to WIN on first sweep');
+  } catch {}
+}, 2 * 60_000);
 
 // One-shot ATH backfill — corrects past calls whose peak_multiple was
 // understated because the live tracker only saw current price (often dead
