@@ -7278,14 +7278,31 @@ REQUIRED for every proposed change:
   - confidence: 0-100. Anything below 60 → don't propose the change.
   - risk: what's the worst case if this change is wrong?
 
+═══ CORE THESIS: EVERY CALL SHOULD BE A 5x CANDIDATE ═══
+The operator's stated goal: "get 5x on every call and hopefully more.
+By studying the bigger wins maybe we can prevent the losses and
+increase our winning percentage along with our peak for each coin."
+
+That means your job is NOT just "avoid losers". It's:
+  Match the patterns of the 10x+ moonshots → if a coin doesn't look
+  like one of those, it probably isn't worth calling. The bar is
+  "this looks like a 5x+ setup" — not "this isn't a rug".
+
 ═══ TUNING PRIORITIES ═══
-1. RUG REDUCTION — losses where peak_multiple < 0.7 or dev_wallet_pct
-   was high. What signal did losses share that wins didn't? Tighten
-   filters or raise penalties on that signal.
-2. MOMENTUM-LOSS REDUCTION — coins that hit 1.0-1.3x then died.
-   buy_velocity, volume_velocity, sniper_count, holder distribution
-   patterns. Look for the difference between "fizzle" and "real run".
-3. WIN-RATE IMPROVEMENT generally.
+1. MOONSHOT PATTERN MATCHING — what signals do the 10x+ called
+   moonshots share that the losses don't? buy_velocity?
+   volume_velocity floor? holder spread? bundle_risk pattern? Tighten
+   filters or raise score weights on those distinguishing signals so
+   future scoring favors moonshot-shaped coins.
+2. RUG REDUCTION — losses where peak < 0.7 or dev_wallet_pct was high.
+   Patterns of failure to penalize.
+3. MOMENTUM-LOSS REDUCTION — 1.0-1.3x fizzles. Distinguish these from
+   real runs in the moonshot data.
+4. RAW WIN-RATE last.
+
+Don't simply lower minScoreToPost to fire more calls. Tighten the
+scoring math so a 5x-shaped coin scores higher and a fizzle-shaped
+coin scores lower — same threshold, smarter signal.
 
 ═══ HARD CONSTRAINT: DON'T BOTTLENECK MOONSHOTS ═══
 Below is the MOONSHOT REFERENCE SET — every coin that hit 10x+, both
