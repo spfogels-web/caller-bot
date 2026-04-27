@@ -269,6 +269,91 @@ export function getGroupStats(db, timeframe = '7d') {
   }
 }
 
+/**
+ * Full profile for a single user — stats over all-time + last 10 calls.
+ * Accepts numeric user_id, '@username', or plain username string.
+ * Returns null if no calls exist for the resolved id.
+ */
+export function getUserProfileData(db, userIdOrUsername) {
+  if (!userIdOrUsername) return null;
+  let target = String(userIdOrUsername).trim();
+  if (target.startsWith('@')) target = target.slice(1);
+
+  // Try resolving username → user_id if the input wasn't already numeric
+  let userId = target;
+  if (!/^\d+$/.test(target) && target !== PULSE_USER_ID) {
+    try {
+      const row = db.prepare(
+        `SELECT user_id FROM user_calls
+         WHERE username = ? OR username = ?
+         ORDER BY called_at DESC LIMIT 1`
+      ).get(target, '@' + target);
+      if (row) userId = row.user_id;
+    } catch {}
+  }
+
+  let stats;
+  try {
+    stats = db.prepare(`
+      SELECT
+        COALESCE(MAX(username), MAX(first_name), user_id) AS display_name,
+        COUNT(*) AS calls,
+        SUM(CASE WHEN peak_multiple >= 2 THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN peak_multiple IS NOT NULL AND peak_multiple < 1 THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN peak_multiple IS NULL THEN 1 ELSE 0 END) AS pending,
+        ROUND(AVG(peak_multiple), 2) AS avg_multiple,
+        ROUND(MAX(peak_multiple), 2) AS best_multiple,
+        MIN(called_at) AS first_call
+      FROM user_calls
+      WHERE user_id = ?
+    `).get(userId);
+  } catch (err) {
+    console.warn('[user-lb] profile stats:', err.message);
+    return null;
+  }
+  if (!stats || !stats.calls) return null;
+
+  let recent = [];
+  try {
+    recent = db.prepare(`
+      SELECT contract_address, token, peak_multiple, called_at, mcap_at_call, peak_mcap
+      FROM user_calls
+      WHERE user_id = ?
+      ORDER BY called_at DESC
+      LIMIT 10
+    `).all(userId);
+  } catch {}
+
+  let median = null;
+  try {
+    const peaks = db.prepare(`
+      SELECT peak_multiple FROM user_calls
+      WHERE user_id = ? AND peak_multiple IS NOT NULL
+      ORDER BY peak_multiple ASC
+    `).all(userId).map(r => r.peak_multiple);
+    if (peaks.length) {
+      const m = Math.floor(peaks.length / 2);
+      median = peaks.length % 2 === 0 ? (peaks[m-1] + peaks[m]) / 2 : peaks[m];
+    }
+  } catch {}
+
+  const resolved = (stats.wins ?? 0) + (stats.losses ?? 0);
+  return {
+    user_id: userId,
+    display_name: stats.display_name,
+    calls:        stats.calls,
+    wins:         stats.wins ?? 0,
+    losses:       stats.losses ?? 0,
+    pending:      stats.pending ?? 0,
+    hit_rate:     resolved > 0 ? Math.round(stats.wins * 100 / resolved) : null,
+    avg_multiple: stats.avg_multiple,
+    median:       median != null ? +median.toFixed(2) : null,
+    best_multiple: stats.best_multiple,
+    first_call:   stats.first_call,
+    recent,
+  };
+}
+
 export function getUserCallsCount(db) {
   try { return db.prepare(`SELECT COUNT(*) as n FROM user_calls`).get().n; }
   catch { return 0; }

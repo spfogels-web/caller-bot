@@ -2281,6 +2281,8 @@ function buildHelpMessage() {
     `   <i>Examples: <code>/alert &lt;CA&gt; 100k</code> or <code>/alert &lt;CA&gt; 5x</code></i>\n` +
     `<code>/alerts</code> — Your active alerts\n` +
     `<code>/alert remove [id]</code> — Cancel an alert\n` +
+    `<code>/profile [@user]</code> — Win history (no arg = your own)\n` +
+    `<code>/myprofile</code> — Shortcut to your profile\n` +
     `<code>/track [wallet]</code> — Add a Solana wallet to Pulse's DB\n` +
     `<code>/mywallets</code> — Wallets you've tracked\n` +
     `<code>/untrack [wallet]</code> — Remove a tracked wallet\n\n` +
@@ -3214,7 +3216,12 @@ async function renderGroupLeaderboardMessage(timeframe) {
     msg += `<blockquote>`;
     calls.forEach((c, i) => {
       const isPulse = c.user_id === PULSE_USER_ID;
-      const caller  = isPulse ? '⚡<b>Pulse</b>' : escapeHtml(c.display_name || 'anon').slice(0, 18);
+      const nameText = escapeHtml(c.display_name || 'anon').slice(0, 18);
+      // Wrap human users in tg://user?id=ID link → tap opens their profile.
+      // Pulse stays plain (no Telegram user behind it).
+      const caller  = isPulse
+        ? '⚡<b>Pulse</b>'
+        : (/^\d+$/.test(c.user_id) ? `<a href="tg://user?id=${c.user_id}">${nameText}</a>` : nameText);
       const token   = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
       const mult    = c.peak_multiple != null ? ` <b>[${c.peak_multiple.toFixed(2)}x]</b>` : '';
       msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${token}</b> » ${caller}${mult}\n`;
@@ -3222,6 +3229,74 @@ async function renderGroupLeaderboardMessage(timeframe) {
     msg += `</blockquote>`;
   }
   return msg;
+}
+
+// /profile [@user | user_id] — shows that user's win history.
+// No args → caller's own profile. Pulse can be looked up via "pulse" or
+// "@pulsecaller". Tappable from leaderboard rows (clickable usernames).
+async function handleProfileCommand(chatId, args, fromUserId, fromUsername) {
+  const { getUserProfileData, PULSE_USER_ID } = await import('./user-leaderboard.js');
+  let target = (args || '').trim();
+  // Normalize special cases
+  if (target.toLowerCase() === 'pulse' || target.toLowerCase() === '@pulsecaller' || target === '⚡pulse') {
+    target = PULSE_USER_ID;
+  }
+  if (!target) target = String(fromUserId);
+
+  const profile = getUserProfileData(dbInstance, target);
+  if (!profile) {
+    await sendTelegramMessage(chatId,
+      target === String(fromUserId)
+        ? `<i>You haven't dropped any CAs yet, @${escapeHtml(fromUsername || 'anon')}. Drop one in the group to start your profile.</i>`
+        : `<i>No profile found for "${escapeHtml(target)}". User must have dropped at least one CA in this group.</i>`
+    );
+    return;
+  }
+
+  const isPulse = profile.user_id === PULSE_USER_ID;
+  const headerName = isPulse
+    ? '⚡ <b>Pulse Caller</b>'
+    : `<b>${escapeHtml(profile.display_name).slice(0, 24)}</b>`;
+
+  const emojiFor = (mult) => {
+    if (mult == null)    return '🤔';
+    if (mult >= 5)       return '🚀';
+    if (mult >= 3)       return '🤩';
+    if (mult >= 1.5)     return '😎';
+    if (mult >= 1)       return '🙂';
+    return '😞';
+  };
+  const fmtAgo = (ts) => {
+    if (!ts) return '?';
+    const ms = Date.now() - new Date(ts.includes('Z') ? ts : ts + 'Z').getTime();
+    if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
+    if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
+    if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + 'h ago';
+    return Math.floor(ms / 86_400_000) + 'd ago';
+  };
+
+  let msg = `👤 <b>PROFILE</b> — ${headerName}\n\n` +
+            `📊 <b>All-Time Stats</b>\n` +
+            `┃ Calls       <b>${profile.calls}</b>\n` +
+            `┃ 🏆 Wins     <b>${profile.wins}</b>\n` +
+            `┃ 💀 Losses   <b>${profile.losses}</b>\n` +
+            `┃ ⏳ Pending  <b>${profile.pending}</b>\n` +
+            `┃ Hit Rate    <b>${profile.hit_rate != null ? profile.hit_rate + '%' : '—'}</b>\n` +
+            `┃ Median      <b>${profile.median != null ? profile.median.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┃ Best        <b>${profile.best_multiple != null ? profile.best_multiple.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Avg         <b>${profile.avg_multiple != null ? profile.avg_multiple.toFixed(2) + 'x' : '—'}</b>\n\n`;
+
+  if (profile.recent.length > 0) {
+    msg += `🏆 <b>Recent Calls</b>\n<blockquote>`;
+    profile.recent.forEach(c => {
+      const tok = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
+      const mult = c.peak_multiple != null ? `<b>[${c.peak_multiple.toFixed(2)}x]</b>` : '<i>pending</i>';
+      msg += `${emojiFor(c.peak_multiple)} 🪙 <b>${tok}</b>  ${mult}  <i>${fmtAgo(c.called_at)}</i>\n`;
+    });
+    msg += `</blockquote>`;
+  }
+
+  await sendTelegramMessage(chatId, msg);
 }
 
 // /lb — Phanes-style group leaderboard with clickable timeframe buttons.
@@ -12072,6 +12147,8 @@ app.post('/webhook', async (req, res) => {
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
       // ── User-facing personal features ──
       case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/profile':     await handleProfileCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/myprofile':   await handleProfileCommand(chatId, '', fromId, message.from?.username || message.from?.first_name); break;
       case '/track':       await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/untrack':     await handleUntrackWalletCommand(chatId, args, fromId); break;
       case '/mywallets':   await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
