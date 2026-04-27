@@ -1274,6 +1274,39 @@ try {
     const { ensureUserLeaderboardSchema } = await import('./user-leaderboard.js');
     ensureUserLeaderboardSchema(dbInstance);
   } catch (err) { console.warn('[user-lb] schema init:', err.message); }
+
+  // ── One-time backfill: synthesize reasons for any pre-existing NULL/empty
+  // audit rows so the AI Tuning Audit panel never displays "No reason
+  // recorded for this change." Idempotent — only runs once per kv_store flag.
+  try {
+    const flag = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='audit_reason_backfill_v1'`).get();
+    if (!flag) {
+      const rows = dbInstance.prepare(`
+        SELECT id, category, source, knob_key, old_value, new_value
+        FROM config_changes WHERE reason IS NULL OR reason = ''
+      `).all();
+      const upd = dbInstance.prepare(`UPDATE config_changes SET reason = ? WHERE id = ?`);
+      let n = 0;
+      for (const r of rows) {
+        const oldV = r.old_value ?? '∅';
+        const newV = r.new_value ?? '∅';
+        const direction = (() => {
+          const oN = Number(JSON.parse(r.old_value || 'null')), nN = Number(JSON.parse(r.new_value || 'null'));
+          if (Number.isFinite(oN) && Number.isFinite(nN)) { if (nN > oN) return 'raised'; if (nN < oN) return 'lowered'; }
+          return 'changed';
+        })();
+        const src = (r.source || 'operator');
+        const tag = src === 'claude' || src === 'auto_optimize' ? 'Auto-tuner'
+                  : src === 'operator' ? 'Manual operator'
+                  : `Source=${src}`;
+        const reason = `${tag} ${direction} ${r.knob_key} ${oldV} → ${newV} (legacy entry — pre-audit-reason migration)`;
+        upd.run(reason, r.id);
+        n++;
+      }
+      dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES ('audit_reason_backfill_v1', 'done', datetime('now'))`).run();
+      if (n > 0) console.log(`[boot] audit-reason-backfill: filled ${n} legacy rows`);
+    }
+  } catch (err) { console.warn('[boot] audit-reason-backfill failed:', err.message); }
   const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='ai_config_overrides'`).get();
   if (row?.value) {
     AI_CONFIG_OVERRIDES = JSON.parse(row.value);
@@ -1536,6 +1569,35 @@ function persistExtendedConfig(category) {
 // value type (number, string, boolean, array) round-trips cleanly.
 function logConfigChange(category, knobKey, oldValue, newValue, source = 'operator', reason = null) {
   try {
+    // Ensure every audit row has a meaningful reason. If the caller didn't
+    // provide one, synthesize a sensible default per source so the audit UI
+    // never shows "No reason recorded for this change." again.
+    const finalReason = reason && String(reason).trim()
+      ? reason
+      : (() => {
+          const oldStr = oldValue == null ? '∅' : JSON.stringify(oldValue);
+          const newStr = newValue == null ? '∅' : JSON.stringify(newValue);
+          const direction = (() => {
+            const oN = Number(oldValue), nN = Number(newValue);
+            if (Number.isFinite(oN) && Number.isFinite(nN)) {
+              if (nN > oN) return 'raised';
+              if (nN < oN) return 'lowered';
+            }
+            return 'changed';
+          })();
+          switch (source) {
+            case 'claude':
+            case 'auto_optimize':
+              return `Auto-tuner ${direction} ${knobKey} ${oldStr} → ${newStr} (no reasoning captured — Claude prompt should be re-checked)`;
+            case 'bot_a':
+            case 'bot_b':
+              return `Multi-bot agent ${direction} ${knobKey} ${oldStr} → ${newStr}`;
+            case 'operator':
+              return `Manual operator ${direction} ${knobKey} via dashboard from ${oldStr} to ${newStr}`;
+            default:
+              return `Source=${source} ${direction} ${knobKey} ${oldStr} → ${newStr}`;
+          }
+        })();
     dbInstance.prepare(`
       INSERT INTO config_changes (category, source, knob_key, old_value, new_value, reason)
       VALUES (?,?,?,?,?,?)
@@ -1545,7 +1607,7 @@ function logConfigChange(category, knobKey, oldValue, newValue, source = 'operat
       knobKey,
       oldValue == null ? null : JSON.stringify(oldValue),
       newValue == null ? null : JSON.stringify(newValue),
-      reason ?? null
+      finalReason
     );
   } catch (err) {
     console.warn(`[config-audit] log failed: ${err.message}`);
