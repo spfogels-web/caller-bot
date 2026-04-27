@@ -2280,7 +2280,10 @@ function buildHelpMessage() {
     `<code>/alert [CA] [target]</code> — DM alert when target hit\n` +
     `   <i>Examples: <code>/alert &lt;CA&gt; 100k</code> or <code>/alert &lt;CA&gt; 5x</code></i>\n` +
     `<code>/alerts</code> — Your active alerts\n` +
-    `<code>/alert remove [id]</code> — Cancel an alert\n\n` +
+    `<code>/alert remove [id]</code> — Cancel an alert\n` +
+    `<code>/track [wallet]</code> — Add a Solana wallet to Pulse's DB\n` +
+    `<code>/mywallets</code> — Wallets you've tracked\n` +
+    `<code>/untrack [wallet]</code> — Remove a tracked wallet\n\n` +
     `<b>⚙️ ADMIN</b>\n` +
     `<code>/config [key] [value]</code> — Live tuning\n\n` +
     `<i>AI OS active. Hunting $15K-$120K micro-caps with 53% win rate.</i>`
@@ -2855,6 +2858,150 @@ async function handleWatchlistCommand(chatId) { await sendTelegramMessage(chatId
 async function handleRegimeCommand(chatId)    { await sendTelegramMessage(chatId, buildRegimeMessage()); }
 
 // ─── /portfolio — user's personal coin watchlist ─────────────────────────────
+// /track <wallet> — user-curated wallet additions. Validates the address,
+// fetches SOL balance via Helius, applies SOL-tier categorization (same
+// rules the harvesters use), and inserts into tracked_wallets with
+// source='user_track'. Wallet immediately feeds Pulse's scoring.
+async function handleTrackWalletCommand(chatId, args, fromUserId, username) {
+  const input = (args || '').trim();
+  // /track list (or /track) — show wallets this user has added
+  if (!input || input.toLowerCase() === 'list') {
+    const rows = dbInstance.prepare(`
+      SELECT address, category, sol_balance, last_seen
+      FROM tracked_wallets
+      WHERE source = 'user_track' AND added_by = ?
+      ORDER BY last_seen DESC
+      LIMIT 30
+    `).all(String(fromUserId));
+    if (rows.length === 0) {
+      await sendTelegramMessage(chatId,
+        `<b>📒 Your tracked wallets</b>\n\n` +
+        `<i>You haven't added any yet.</i>\n\n` +
+        `<b>Usage:</b> <code>/track &lt;wallet&gt;</code>\n` +
+        `Wallets ≥ 100 SOL → 🐋 WHALE · 8-99 → 💎 SMART · 1-7 → 🚀 MOMENTUM`
+      );
+      return;
+    }
+    let msg = `<b>📒 Your tracked wallets (${rows.length})</b>\n\n`;
+    rows.forEach((r, i) => {
+      const tier = r.category === 'WINNER' ? '🐋' : r.category === 'SMART_MONEY' ? '💎' : r.category === 'MOMENTUM' ? '🚀' : '·';
+      const sol  = r.sol_balance != null ? r.sol_balance.toFixed(2) + ' SOL' : '?';
+      msg += `${tier} <code>${escapeHtml(r.address.slice(0, 8))}…${escapeHtml(r.address.slice(-4))}</code> — ${sol}\n`;
+    });
+    msg += `\n<i>/untrack &lt;wallet&gt; to remove · /track &lt;wallet&gt; to add</i>`;
+    await sendTelegramMessage(chatId, msg);
+    return;
+  }
+  // /track <wallet> — add
+  const addr = input.split(/\s+/)[0].trim();
+  // Validate base58 + length (Solana wallets are 32-44 chars)
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) {
+    await sendTelegramMessage(chatId, `⚠️ That doesn't look like a Solana wallet address.\n\n<b>Usage:</b> <code>/track &lt;wallet_address&gt;</code>`);
+    return;
+  }
+  if (!process.env.HELIUS_API_KEY) {
+    await sendTelegramMessage(chatId, `⚠️ Wallet tracking requires HELIUS_API_KEY (server config).`);
+    return;
+  }
+  // Fetch SOL balance
+  let sol = null;
+  try {
+    const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'bal', method: 'getBalance', params: [addr] }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const lamports = j?.result?.value ?? 0;
+      sol = lamports / 1e9;
+    }
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Couldn't fetch SOL balance: ${escapeHtml(err.message)}`);
+    return;
+  }
+  if (sol == null) {
+    await sendTelegramMessage(chatId, `⚠️ Couldn't reach Helius. Try again in a minute.`);
+    return;
+  }
+  // SOL-tier category (same rules the harvesters use)
+  let category = 'NEUTRAL';
+  let tierIcon = '·';
+  if      (sol >= 100) { category = 'WINNER';      tierIcon = '🐋'; }
+  else if (sol >= 8)   { category = 'SMART_MONEY'; tierIcon = '💎'; }
+  else if (sol >= 1)   { category = 'MOMENTUM';    tierIcon = '🚀'; }
+  else                 { category = 'HARVESTED_TRADER'; tierIcon = '🔻'; }
+
+  // Insert / upsert. Don't overwrite a curated WINNER/KOL/RUG row.
+  try {
+    const existing = dbInstance.prepare(
+      `SELECT id, category, source FROM tracked_wallets WHERE address = ?`
+    ).get(addr);
+    if (existing) {
+      // Just refresh sol_balance + tag this user as a co-tracker. Don't
+      // demote stronger categories.
+      dbInstance.prepare(`
+        UPDATE tracked_wallets
+        SET sol_balance = ?,
+            updated_at  = datetime('now'),
+            last_seen   = datetime('now'),
+            notes       = COALESCE(notes, '') || ' | also-tracked-by @' || ?
+        WHERE id = ?
+      `).run(sol, username || fromUserId, existing.id);
+      await sendTelegramMessage(chatId,
+        `✓ <code>${escapeHtml(addr.slice(0,8))}…</code> already in DB as <b>${escapeHtml(existing.category)}</b>.\n` +
+        `${tierIcon} SOL balance refreshed: <b>${sol.toFixed(2)} SOL</b>\n\n` +
+        `<i>This wallet now also credits @${escapeHtml(username || fromUserId)} as a tracker.</i>`
+      );
+      return;
+    }
+    dbInstance.prepare(`
+      INSERT INTO tracked_wallets (address, category, source, sol_balance, added_by, last_seen, updated_at, notes)
+      VALUES (?, ?, 'user_track', ?, ?, datetime('now'), datetime('now'), ?)
+    `).run(addr, category, sol, String(fromUserId), `Added via /track by @${username || fromUserId}`);
+    await sendTelegramMessage(chatId,
+      `✅ <b>Wallet added to Pulse DB</b>\n\n` +
+      `<code>${escapeHtml(addr)}</code>\n\n` +
+      `${tierIcon} <b>${escapeHtml(category)}</b> · ${sol.toFixed(2)} SOL\n\n` +
+      `<i>This wallet now feeds Pulse's scoring. Future coins it holds get a bump in Wallet Quality.</i>\n` +
+      `<i>View yours: /track list · Remove: /untrack ${addr.slice(0,8)}…</i>`
+    );
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Insert failed: ${escapeHtml(err.message)}`);
+  }
+}
+
+async function handleUntrackWalletCommand(chatId, args, fromUserId) {
+  const addrPrefix = (args || '').trim().split(/\s+/)[0];
+  if (!addrPrefix) {
+    await sendTelegramMessage(chatId, `<b>Usage:</b> <code>/untrack &lt;wallet&gt;</code>\n<i>Removes a wallet you added via /track. Won't touch wallets added by other sources.</i>`);
+    return;
+  }
+  // Match by exact address OR by 8-char prefix (matches what /track list shows)
+  let row;
+  try {
+    row = dbInstance.prepare(`
+      SELECT id, address, category FROM tracked_wallets
+      WHERE source = 'user_track' AND added_by = ? AND (address = ? OR address LIKE ?)
+      LIMIT 1
+    `).get(String(fromUserId), addrPrefix, addrPrefix + '%');
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Lookup failed: ${escapeHtml(err.message)}`);
+    return;
+  }
+  if (!row) {
+    await sendTelegramMessage(chatId, `<i>No wallet matching <code>${escapeHtml(addrPrefix)}</code> found in your tracked list. (You can only remove wallets you personally added.)</i>`);
+    return;
+  }
+  try {
+    dbInstance.prepare(`DELETE FROM tracked_wallets WHERE id = ? AND source = 'user_track' AND added_by = ?`)
+      .run(row.id, String(fromUserId));
+    await sendTelegramMessage(chatId, `✓ Removed <code>${escapeHtml(row.address.slice(0,8))}…</code> from Pulse DB.`);
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Delete failed: ${escapeHtml(err.message)}`);
+  }
+}
+
 async function handlePortfolioCommand(chatId, args, fromUserId, username) {
   const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
   const parts = (args || '').trim().split(/\s+/);
@@ -11834,6 +11981,9 @@ app.post('/webhook', async (req, res) => {
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
       // ── User-facing personal features ──
       case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/track':       await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/untrack':     await handleUntrackWalletCommand(chatId, args, fromId); break;
+      case '/mywallets':   await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
       case '/alert':       await handleAlertCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/alerts':      await handleAlertCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
       // Primary group leaderboard — /lb (alias /grouplb kept for back-compat)
