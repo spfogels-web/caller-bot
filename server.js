@@ -165,6 +165,13 @@ const BANNER_IMAGE_URL = process.env.BANNER_IMAGE_URL
 // PulseCaller branding — set BANNER_IMAGE_URL in Railway to your banner URL
 // Recommended: upload banner.png to your GitHub repo root and it auto-uses it
 
+// SEPARATE banner used ONLY for /lb and /pulselb so the leaderboard art
+// stays decoupled from the regular call-alert banner.
+//   A) Save image as LEADERBOARD_BANNER_URL.png in GitHub repo root, OR
+//   B) Set LEADERBOARD_BANNER_URL in Railway env to any public URL
+const LEADERBOARD_BANNER_URL = process.env.LEADERBOARD_BANNER_URL
+  ?? 'https://raw.githubusercontent.com/spfogles-web/caller-bot/main/LEADERBOARD_BANNER_URL.png';
+
 // ─── v8.0 Multi-Agent Config ──────────────────────────────────────────────────
 
 const HELIUS_API_KEY  = process.env.HELIUS_API_KEY ?? null;
@@ -1988,6 +1995,7 @@ async function sendAdminAlert(text) {
 }
 
 let _bannerFileId = null;
+let _leaderboardBannerFileId = null;
 
 async function uploadBannerToTelegram() {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
@@ -3303,7 +3311,7 @@ async function handleProfileCommand(chatId, args, fromUserId, fromUsername) {
 // plain sendMessage if Telegram rejects the image. Caption capped at 1024.
 async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
   if (!TELEGRAM_BOT_TOKEN) return;
-  const photoSrc = _bannerFileId || BANNER_IMAGE_URL;
+  const photoSrc = _leaderboardBannerFileId || LEADERBOARD_BANNER_URL;
   // Telegram caption limit = 1024 chars. Trim defensively.
   const safeCaption = caption.length > 1020 ? caption.slice(0, 1017) + '…' : caption;
   if (photoSrc) {
@@ -3324,19 +3332,19 @@ async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
         try {
           const j = await res.json();
           const photos = j?.result?.photo;
-          if (photos?.length && !_bannerFileId) {
-            _bannerFileId = photos[photos.length - 1].file_id;
+          if (photos?.length && !_leaderboardBannerFileId) {
+            _leaderboardBannerFileId = photos[photos.length - 1].file_id;
           }
         } catch {}
         return;
       }
       // If file_id was stale (e.g. server restart) clear it and retry once with URL
-      if (_bannerFileId) {
-        _bannerFileId = null;
+      if (_leaderboardBannerFileId) {
+        _leaderboardBannerFileId = null;
         const retry = await fetch(`${TELEGRAM_API}/sendPhoto`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            chat_id: chatId, photo: BANNER_IMAGE_URL, caption: safeCaption,
+            chat_id: chatId, photo: LEADERBOARD_BANNER_URL, caption: safeCaption,
             parse_mode: 'HTML', reply_markup: replyMarkup,
           }),
           signal: AbortSignal.timeout(10_000),
