@@ -13306,6 +13306,21 @@ app.listen(PORT, async () => {
     processSmartMoneyRetries().catch(err => console.warn('[sm-retry] tick err:', err.message));
   }, 30_000);
 
+  // ── AUTONOMOUS SELF-IMPROVEMENT LOOP ──────────────────────────────────
+  // Runs the agent + Control Station auto-optimize every 6 hours. Claude
+  // analyzes recent wins/losses + missed winners, applies bounded knob
+  // changes, persists them through logConfigChange so they show up in
+  // /api/config/audit. First run fires 10min after boot so the DB has
+  // settled and at least one normal scan cycle has completed.
+  // Wired here because it was previously defined but never scheduled —
+  // that's why /api/config/audit had zero claude/auto_optimize entries.
+  setTimeout(() => {
+    runSelfImproveLoop().catch(err => console.warn('[self-improve] boot tick err:', err.message));
+  }, 10 * 60_000);
+  setInterval(() => {
+    runSelfImproveLoop().catch(err => console.warn('[self-improve] tick err:', err.message));
+  }, 6 * 3_600_000);
+
   setInterval(() => {
     try { updateRegime(getCandidates({ limit: 50 }).rows); } catch {}
   }, 15 * 60 * 1000);
