@@ -515,7 +515,28 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   const buys1h      = pair.txns?.h1?.buys  ?? 0;
   const sells1h     = pair.txns?.h1?.sells ?? 0;
   const vol24h      = pair.volume?.h24;
-  const imageUrl    = pair.info?.imageUrl || heliusMeta?.content?.links?.image || null;
+  // Image URL: prefer DexScreener's pair.info.imageUrl, then Helius DAS
+  // metadata, then pump.fun's API (catches fresh pump.fun coins that
+  // DexScreener hasn't crawled yet — by far the most common miss).
+  let imageUrl = pair.info?.imageUrl || heliusMeta?.content?.links?.image || null;
+  if (!imageUrl) {
+    try {
+      const pf = await fetch(`https://frontend-api.pump.fun/coins/${ca}`, {
+        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (pf.ok) {
+        const pj = await pf.json();
+        const u = pj?.image_uri || pj?.image || null;
+        if (u && /^https?:/.test(u)) imageUrl = u;
+      }
+    } catch { /* skip */ }
+  }
+  // Fourth fallback — DexScreener serves a generic token-icon CDN that often
+  // works even when pair.info.imageUrl is null. Last-ditch before going text-only.
+  if (!imageUrl) {
+    imageUrl = `https://dd.dexscreener.com/ds-data/tokens/solana/${ca}.png`;
+  }
   const websites    = pair.info?.websites || [];
   const socials     = pair.info?.socials  || [];
 
