@@ -3411,14 +3411,34 @@ body::before {
           <button onclick="loadCallsTab()" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:5px;padding:6px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">↻ REFRESH</button>
         </div>
 
-        <!-- Summary tiles -->
-        <div class="g5" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)">
+        <!-- Summary tiles — lifetime row -->
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
           <div class="tile"><div class="tile-label">TOTAL CALLS</div><div class="tile-val" id="callsTotal">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="callsWins">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="callsLosses">—</div></div>
           <div class="tile"><div class="tile-label" style="color:#18ffff">➖ NEUTRAL</div><div class="tile-val" style="color:#18ffff" id="callsNeutral">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="callsWinRate">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="callsAvgPeak">—</div></div>
+        </div>
+
+        <!-- Rolling-window: last 20 calls -->
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(255,215,64,0.25);background:rgba(255,215,64,0.04)"><div class="tile-label" style="color:var(--gold)">LAST 20 CALLS</div><div class="tile-val" style="color:var(--gold)" id="calls20Total">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls20Wins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls20Losses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls20WinDiff">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls20WinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls20AvgPeak">—</div></div>
+        </div>
+
+        <!-- Rolling-window: last 50 calls -->
+        <div class="g5" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(24,255,255,0.25);background:rgba(24,255,255,0.04)"><div class="tile-label" style="color:#18ffff">LAST 50 CALLS</div><div class="tile-val" style="color:#18ffff" id="calls50Total">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls50Wins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls50Losses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls50WinDiff">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls50WinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls50AvgPeak">—</div></div>
         </div>
 
         <!-- ═══ 🔥 PROMOTED (scanner's top picks — awaiting full decision) ═══ -->
@@ -13395,6 +13415,34 @@ async function loadCallsTab(){
   setText('callsWinRate', winRate + (pending > 0 ? ' <span style="font-size:10px;color:var(--text3);font-weight:400">(' + pending + ' pending)</span>' : ''));
   setText('callsAvgPeak', avgPeak);
   setText('tb-calls-badge', _callsAll.length);
+
+  // Rolling-window stats — last 20 / last 50 calls (most recent first by called_at)
+  const sortedByTime = [..._callsAll].sort((a, b) => {
+    const ta = new Date(a.called_at || a.posted_at || 0).getTime();
+    const tb = new Date(b.called_at || b.posted_at || 0).getTime();
+    return tb - ta;
+  });
+  const renderWindow = (slice, prefix) => {
+    const w  = slice.filter(isWin).length;
+    const l  = slice.filter(isLoss).length;
+    const r  = w + l;
+    const wr = r > 0 ? Math.round(w / r * 100) + '%' : '—';
+    const peaksW = slice.filter(c => c.peak_multiple != null && c.peak_multiple > 0).map(c => c.peak_multiple);
+    const ap = peaksW.length > 0 ? (peaksW.reduce((a,b)=>a+b,0) / peaksW.length).toFixed(2) + 'x' : '—';
+    const diff = w - l;
+    const diffStr = diff > 0 ? '+' + diff : String(diff);
+    const diffCol = diff > 0 ? 'var(--green)' : diff < 0 ? 'var(--red)' : 'var(--text2)';
+    setText(prefix + 'Total', slice.length);
+    setText(prefix + 'Wins', w);
+    setText(prefix + 'Losses', l);
+    const diffEl = document.getElementById(prefix + 'WinDiff');
+    if (diffEl) { diffEl.textContent = diffStr; diffEl.style.color = diffCol; }
+    setText(prefix + 'WinRate', wr);
+    setText(prefix + 'AvgPeak', ap);
+  };
+  renderWindow(sortedByTime.slice(0, 20), 'calls20');
+  renderWindow(sortedByTime.slice(0, 50), 'calls50');
+
   renderCallsFeed();
 }
 
