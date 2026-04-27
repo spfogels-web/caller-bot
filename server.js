@@ -3299,15 +3299,66 @@ async function handleProfileCommand(chatId, args, fromUserId, fromUsername) {
   await sendTelegramMessage(chatId, msg);
 }
 
-// /lb — Phanes-style group leaderboard with clickable timeframe buttons.
+// Send a leaderboard as a photo (Pulse banner) + caption — falls back to
+// plain sendMessage if Telegram rejects the image. Caption capped at 1024.
+async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
+  if (!TELEGRAM_BOT_TOKEN) return;
+  const photoSrc = _bannerFileId || BANNER_IMAGE_URL;
+  // Telegram caption limit = 1024 chars. Trim defensively.
+  const safeCaption = caption.length > 1020 ? caption.slice(0, 1017) + '…' : caption;
+  if (photoSrc) {
+    try {
+      const res = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id:    chatId,
+          photo:      photoSrc,
+          caption:    safeCaption,
+          parse_mode: 'HTML',
+          reply_markup: replyMarkup,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) {
+        // Cache file_id from the uploaded image so future sends are faster
+        try {
+          const j = await res.json();
+          const photos = j?.result?.photo;
+          if (photos?.length && !_bannerFileId) {
+            _bannerFileId = photos[photos.length - 1].file_id;
+          }
+        } catch {}
+        return;
+      }
+      // If file_id was stale (e.g. server restart) clear it and retry once with URL
+      if (_bannerFileId) {
+        _bannerFileId = null;
+        const retry = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId, photo: BANNER_IMAGE_URL, caption: safeCaption,
+            parse_mode: 'HTML', reply_markup: replyMarkup,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (retry.ok) return;
+      }
+      console.warn(`[TG-leaderboard] photo send failed: ${(await res.text()).slice(0, 200)}`);
+    } catch (err) {
+      console.warn(`[TG-leaderboard] photo error: ${err.message}`);
+    }
+  }
+  // Fallback: plain text leaderboard
+  await sendTelegramMessage(chatId, caption, { reply_markup: replyMarkup });
+}
+
+// /lb — Phanes-style group leaderboard with banner image + clickable timeframe buttons.
 async function handleGroupLeaderboardCommand(chatId, args) {
   const tf = (args || '').trim().toLowerCase() || '1d';
   const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', '2w': '7d', 'all': 'all' };
   const timeframe = aliasMap[tf] || '24h';
   const msg = await renderGroupLeaderboardMessage(timeframe);
-  await sendTelegramMessage(chatId, msg, {
-    reply_markup: buildLeaderboardKeyboard('lb', timeframe),
-  });
+  await sendLeaderboardWithBanner(chatId, msg, buildLeaderboardKeyboard('lb', timeframe));
 }
 
 // Render Pulse's own call leaderboard body (shared between command + callback).
@@ -3352,9 +3403,7 @@ async function handleLeaderboardCommand(chatId, args) {
   const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', 'all': 'all' };
   const timeframe = aliasMap[tf] || '7d';
   const msg = renderPulseLeaderboardMessage(timeframe);
-  await sendTelegramMessage(chatId, msg, {
-    reply_markup: buildLeaderboardKeyboard('pulselb', timeframe),
-  });
+  await sendLeaderboardWithBanner(chatId, msg, buildLeaderboardKeyboard('pulselb', timeframe));
 }
 
 // ─── Telegram AI OS command dispatcher ───────────────────────────────────────
@@ -12020,16 +12069,27 @@ app.post('/webhook', async (req, res) => {
       } else {
         return;
       }
-      await fetch(`${TELEGRAM_API}/editMessageText`, {
+      // Leaderboards are photo+caption messages — use editMessageCaption.
+      // Falls back to editMessageText if the original was text-only (e.g.
+      // banner failed to load on the initial send).
+      const isPhotoMsg = !!msgRef.photo;
+      const endpoint = isPhotoMsg ? 'editMessageCaption' : 'editMessageText';
+      const payload = {
+        chat_id:    msgRef.chat.id,
+        message_id: msgRef.message_id,
+        parse_mode: 'HTML',
+        reply_markup: newMarkup,
+      };
+      if (isPhotoMsg) {
+        // Telegram caption limit = 1024 chars
+        payload.caption = newText.length > 1020 ? newText.slice(0, 1017) + '…' : newText;
+      } else {
+        payload.text = newText;
+        payload.disable_web_page_preview = true;
+      }
+      await fetch(`${TELEGRAM_API}/${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id:    msgRef.chat.id,
-          message_id: msgRef.message_id,
-          text:       newText,
-          parse_mode: 'HTML',
-          disable_web_page_preview: true,
-          reply_markup: newMarkup,
-        }),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(8_000),
       });
     } catch (err) { console.warn('[tg-callback] err:', err.message); }
