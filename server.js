@@ -3160,19 +3160,36 @@ async function handleAlertCommand(chatId, args, fromUserId, username) {
 }
 
 // ─── /leaderboard — top calls (Hall of Fame) ─────────────────────────────────
-// /lb — Phanes-style group leaderboard. Per-call ranking (token » caller
-// [multiple]) with group stats header. Includes Pulse alongside humans.
-async function handleGroupLeaderboardCommand(chatId, args) {
-  const tf = (args || '').trim().toLowerCase() || '1d';
-  const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', '2w': '7d', 'all': 'all' };
-  const timeframe = aliasMap[tf] || '24h';
-  const tfLabel = { '24h': '1d', '7d': '7d', '30d': '30d', 'all': 'all' }[timeframe];
+// Build inline-keyboard buttons for timeframe selection.
+// prefix is 'lb' for /lb or 'pulselb' for /pulselb. activeTf gets a checkmark.
+function buildLeaderboardKeyboard(prefix, activeTf) {
+  const tfs = [
+    { tf: '24h', label: '12H' },   // alias — both 12H/1D map to 24h cutoff
+    { tf: '24h', label: '1D' },
+    { tf: '7d',  label: '7D' },
+    { tf: '30d', label: '30D' },
+    { tf: 'all', label: 'ALL' },
+  ];
+  // De-dupe so 12H/1D don't both show as '✓ ...' simultaneously
+  const seen = new Set();
+  const buttons = tfs.filter(t => {
+    if (seen.has(t.label)) return false;
+    seen.add(t.label);
+    return true;
+  }).map(t => ({
+    text: (activeTf === t.tf ? '✓ ' : '') + t.label,
+    callback_data: `${prefix}:${t.tf}`,
+  }));
+  return { inline_keyboard: [buttons] };
+}
 
+// Render the /lb message body (used by both initial command and callback edits).
+async function renderGroupLeaderboardMessage(timeframe) {
   const { getTopCalls, getRichGroupStats, PULSE_USER_ID } = await import('./user-leaderboard.js');
   const stats = getRichGroupStats(dbInstance, timeframe);
-  const calls = getTopCalls(dbInstance, timeframe, 10);
+  const calls = getTopCalls(dbInstance, timeframe, 15);
+  const tfLabel = { '24h': '1d', '7d': '7d', '30d': '30d', 'all': 'all' }[timeframe] || timeframe;
 
-  // Emoji rank by multiple
   const emojiFor = (mult) => {
     if (mult == null)    return '🤔';
     if (mult >= 5)       return '🚀';
@@ -3182,59 +3199,87 @@ async function handleGroupLeaderboardCommand(chatId, args) {
     return '😞';
   };
 
-  let msg = `🏆 <b>Leaderboard</b>\n\n` +
+  let msg = `🏆 <b>LEADERBOARD</b>\n\n` +
             `📊 <b>Group Stats</b>\n` +
-            `┃ Period   <b>${tfLabel}</b>\n` +
-            `┃ Calls    <b>${stats.calls || 0}</b>\n` +
-            `┃ Hit Rate <b>${stats.hit_rate != null ? stats.hit_rate + '%' : '—'}</b>\n` +
-            `┃ Median   <b>${stats.median != null ? stats.median.toFixed(2) + 'x' : '—'}</b>\n` +
-            `┗ Return   <b>${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '—'}</b> <i>(Avg: ${stats.avg_multiple != null ? stats.avg_multiple.toFixed(2) + 'x' : '—'})</i>\n\n`;
+            `┃ Period    <b>${tfLabel}</b>\n` +
+            `┃ Calls     <b>${stats.calls || 0}</b>\n` +
+            `┃ Active    <b>${stats.users || 0}</b> users\n` +
+            `┃ Hit Rate  <b>${stats.hit_rate != null ? stats.hit_rate + '%' : '—'}</b>\n` +
+            `┃ Median    <b>${stats.median != null ? stats.median.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Best      <b>${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '—'}</b> <i>(Avg: ${stats.avg_multiple != null ? stats.avg_multiple.toFixed(2) + 'x' : '—'})</i>\n\n`;
 
   if (calls.length === 0) {
-    msg += `<i>No calls ranked yet for this window. Drop a CA in the group and wait for it to peak.</i>\n\n`;
-    msg += `<i>Note: bot needs Privacy Mode OFF in @BotFather to see non-command messages.</i>`;
+    msg += `<blockquote><i>No calls ranked yet for this window. Drop a CA in the group and wait for it to peak.\n\nNote: bot needs Privacy Mode OFF in @BotFather to see non-command messages.</i></blockquote>`;
   } else {
+    msg += `<blockquote>`;
     calls.forEach((c, i) => {
       const isPulse = c.user_id === PULSE_USER_ID;
       const caller  = isPulse ? '⚡<b>Pulse</b>' : escapeHtml(c.display_name || 'anon').slice(0, 18);
       const token   = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
-      const mult    = c.peak_multiple != null ? `[${c.peak_multiple.toFixed(2)}x]` : '';
-      msg += `${emojiFor(c.peak_multiple)} ${i+1}. <b>${token}</b> » ${caller} ${mult}\n`;
+      const mult    = c.peak_multiple != null ? ` <b>[${c.peak_multiple.toFixed(2)}x]</b>` : '';
+      msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${token}</b> » ${caller}${mult}\n`;
     });
+    msg += `</blockquote>`;
   }
-  msg += `\n<i>/lb 24h | 7d | 30d | all</i>`;
-  await sendTelegramMessage(chatId, msg);
+  return msg;
 }
 
-async function handleLeaderboardCommand(chatId, args) {
-  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
-  const tf = (args || '').trim().toLowerCase() || '7d';
-  const valid = ['24h', '7d', '30d', 'all'];
-  const timeframe = valid.includes(tf) ? tf : '7d';
-  const tfLabel = { '24h': 'LAST 24H', '7d': 'LAST 7 DAYS', '30d': 'LAST 30 DAYS', 'all': 'ALL TIME' }[timeframe];
+// /lb — Phanes-style group leaderboard with clickable timeframe buttons.
+async function handleGroupLeaderboardCommand(chatId, args) {
+  const tf = (args || '').trim().toLowerCase() || '1d';
+  const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', '2w': '7d', 'all': 'all' };
+  const timeframe = aliasMap[tf] || '24h';
+  const msg = await renderGroupLeaderboardMessage(timeframe);
+  await sendTelegramMessage(chatId, msg, {
+    reply_markup: buildLeaderboardKeyboard('lb', timeframe),
+  });
+}
 
+// Render Pulse's own call leaderboard body (shared between command + callback).
+function renderPulseLeaderboardMessage(timeframe) {
+  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
+  const tfLabel = { '24h': '1D', '7d': '7D', '30d': '30D', 'all': 'ALL' }[timeframe] || timeframe;
   const { top, stats } = getCallsLeaderboard(timeframe);
   const winRate = (stats.wins + stats.losses) > 0 ? Math.round(stats.wins * 100 / (stats.wins + stats.losses)) : 0;
 
-  let msg = `🏆 <b>HALL OF FAME — ${tfLabel}</b>\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `<b>Total Calls:</b> ${stats.total_calls || 0}\n` +
-            `<b>Wins:</b> ${stats.wins || 0}  <b>Losses:</b> ${stats.losses || 0}\n` +
-            `<b>Win Rate:</b> ${winRate}%\n` +
-            `<b>Avg Win:</b> ${stats.avg_win_multiple != null ? stats.avg_win_multiple.toFixed(2) + 'x' : '?'}\n` +
-            `<b>Best:</b> ${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '?'}\n\n`;
+  const emojiFor = (mult) => {
+    if (mult == null)    return '🤔';
+    if (mult >= 5)       return '🚀';
+    if (mult >= 3)       return '🤩';
+    if (mult >= 1.5)     return '😎';
+    if (mult >= 1)       return '🙂';
+    return '😞';
+  };
+
+  let msg = `⚡ <b>PULSE CALLER · LEADERBOARD</b>\n\n` +
+            `📊 <b>Group Stats</b>\n` +
+            `┃ Period    <b>${tfLabel}</b>\n` +
+            `┃ Calls     <b>${stats.total_calls || 0}</b>\n` +
+            `┃ Hit Rate  <b>${winRate}%</b>\n` +
+            `┃ Avg Win   <b>${stats.avg_win_multiple != null ? stats.avg_win_multiple.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Best      <b>${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '—'}</b>\n\n`;
+
   if (top.length === 0) {
-    msg += `<i>No wins recorded for this timeframe yet.</i>`;
+    msg += `<blockquote><i>No wins recorded for this timeframe yet.</i></blockquote>`;
   } else {
-    msg += `<b>TOP ${top.length} WINNERS</b>\n`;
-    top.forEach((c, i) => {
-      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}.`;
-      msg += `${medal} <b>$${escapeHtml(c.token || '?')}</b>  ${c.peak_multiple.toFixed(2)}x\n`;
-      msg += `   ${fmtMc(c.market_cap_at_call)} → ${fmtMc(c.peak_mcap)}\n`;
+    msg += `<blockquote>`;
+    top.slice(0, 15).forEach((c, i) => {
+      const tok = escapeHtml(c.token || '?').slice(0, 14);
+      msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${tok}</b>  ${c.peak_multiple.toFixed(2)}x  <i>(${fmtMc(c.market_cap_at_call)} → ${fmtMc(c.peak_mcap)})</i>\n`;
     });
+    msg += `</blockquote>`;
   }
-  msg += `\n<i>Try: /leaderboard 24h | 7d | 30d | all</i>`;
-  await sendTelegramMessage(chatId, msg);
+  return msg;
+}
+
+async function handleLeaderboardCommand(chatId, args) {
+  const tf = (args || '').trim().toLowerCase() || '7d';
+  const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', 'all': 'all' };
+  const timeframe = aliasMap[tf] || '7d';
+  const msg = renderPulseLeaderboardMessage(timeframe);
+  await sendTelegramMessage(chatId, msg, {
+    reply_markup: buildLeaderboardKeyboard('pulselb', timeframe),
+  });
 }
 
 // ─── Telegram AI OS command dispatcher ───────────────────────────────────────
@@ -11870,6 +11915,52 @@ app.get('/api/health', async (req, res) => {
 
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
+
+  // ── Inline-keyboard callback (e.g. timeframe buttons on /lb, /pulselb) ──
+  // callback_data format: "<prefix>:<timeframe>" — e.g. "lb:7d", "pulselb:30d".
+  // Edits the original message in place with the new timeframe content.
+  const cbq = req.body?.callback_query;
+  if (cbq) {
+    const cbId   = cbq.id;
+    const cbData = cbq.data || '';
+    const msgRef = cbq.message;
+    try {
+      // Always answer the callback first so the button stops spinning
+      try {
+        await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cbId }),
+          signal: AbortSignal.timeout(5_000),
+        });
+      } catch {}
+      const [prefix, tf] = cbData.split(':');
+      if (!prefix || !tf || !msgRef?.chat?.id || !msgRef?.message_id) return;
+      let newText, newMarkup;
+      if (prefix === 'lb') {
+        newText   = await renderGroupLeaderboardMessage(tf);
+        newMarkup = buildLeaderboardKeyboard('lb', tf);
+      } else if (prefix === 'pulselb') {
+        newText   = renderPulseLeaderboardMessage(tf);
+        newMarkup = buildLeaderboardKeyboard('pulselb', tf);
+      } else {
+        return;
+      }
+      await fetch(`${TELEGRAM_API}/editMessageText`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id:    msgRef.chat.id,
+          message_id: msgRef.message_id,
+          text:       newText,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: newMarkup,
+        }),
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch (err) { console.warn('[tg-callback] err:', err.message); }
+    return;
+  }
+
   const message = req.body?.message;
   if (!message?.text) return;
   const chatId    = message.chat?.id;
