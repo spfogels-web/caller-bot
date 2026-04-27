@@ -7196,6 +7196,43 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
       WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 500
     `).all();
     const recentAudit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 20`).all();
+
+    // ═══ MOONSHOT REFERENCE SET ═══
+    // Every coin that hit 10x+ — both calls we made AND missed winners we
+    // didn't call. Claude uses these as the "must not block these patterns"
+    // anchor when proposing filter changes. Tightening a knob that would
+    // have rejected these moonshots is forbidden without explicit evidence.
+    const calledMoonshots = (() => {
+      try {
+        return dbInstance.prepare(`
+          SELECT c.token, c.score_at_call, c.market_cap_at_call, c.peak_multiple,
+                 c.setup_type_at_call, c.risk_at_call,
+                 ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct,
+                 ca.top10_holder_pct, ca.holders, ca.sniper_wallet_count,
+                 ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h,
+                 ca.launch_unique_buyer_ratio, ca.buy_velocity
+          FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+          WHERE c.peak_multiple >= 10
+          ORDER BY c.peak_multiple DESC LIMIT 60
+        `).all();
+      } catch { return []; }
+    })();
+    const missedMoonshots = (() => {
+      try {
+        return dbInstance.prepare(`
+          SELECT token, missed_winner_peak_multiple AS peak_multiple,
+                 composite_score, market_cap, final_decision, setup_type,
+                 buy_sell_ratio_1h, volume_velocity, dev_wallet_pct,
+                 top10_holder_pct, holders, sniper_wallet_count, bundle_risk,
+                 pair_age_hours, price_change_1h, launch_unique_buyer_ratio,
+                 buy_velocity, claude_verdict
+          FROM candidates
+          WHERE missed_winner_flag = 1 AND missed_winner_peak_multiple >= 10
+          ORDER BY missed_winner_peak_multiple DESC LIMIT 60
+        `).all();
+      } catch { return []; }
+    })();
+
     // Aggregate summary stats so Claude can spot patterns without parsing all 500 rows
     const summary = (() => {
       const safe = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
@@ -7229,28 +7266,40 @@ This is the ONLY knob you cannot change. Tune everything else so the bot
 catches more coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x peaks. Any coin that hits at least
 winPeakMultiple (${SCORING_CONFIG.winPeakMultiple ?? 2.5}x) still counts as a WIN.
 
-═══ OPERATING MODE: TRUST THE DATA ═══
-You have full authority to make whatever changes the data clearly
-supports — small tweaks OR major rebalances. Don't artificially
-constrain yourself. But every change must be grounded in a pattern
-you can articulate from the win/loss data below, not a guess.
+═══ OPERATING MODE: TRUST THE DATA, BUT EVERY CHANGE NEEDS AN AUDITABLE WHY ═══
+You have full authority to make whatever changes the data supports —
+small tweaks OR major rebalances. Don't artificially constrain
+yourself. The user wants the bot improving, not protected from itself.
 
-  - If the data clearly says a knob needs to move 30%+, move it.
-  - If it doesn't, leave it.
-  - Don't change a knob just to "do something" — every change costs
-    bot credibility if it backfires. Confidence and reasoning matter.
+REQUIRED for every proposed change:
+  - reason: a clear, evidence-grounded sentence pointing at specific
+    data (e.g. "losses had avg dev_wallet_pct=8.4 vs wins=2.1 — raising
+    devWalletPctBlock from 5 to 7"). NOT vague ("seems too loose").
+  - confidence: 0-100. Anything below 60 → don't propose the change.
+  - risk: what's the worst case if this change is wrong?
 
-═══ TUNING PRIORITIES (rug + momentum loss are ranked highest) ═══
+═══ TUNING PRIORITIES ═══
 1. RUG REDUCTION — losses where peak_multiple < 0.7 or dev_wallet_pct
    was high. What signal did losses share that wins didn't? Tighten
    filters or raise penalties on that signal.
 2. MOMENTUM-LOSS REDUCTION — coins that hit 1.0-1.3x then died.
-   Buy_velocity, volume_velocity, sniper_count, holder distribution
+   buy_velocity, volume_velocity, sniper_count, holder distribution
    patterns. Look for the difference between "fizzle" and "real run".
 3. WIN-RATE IMPROVEMENT generally.
 
-You have authority to change any knob below EXCEPT targetMultiplier.
-Make the changes that the lifetime win/loss data justifies.
+═══ HARD CONSTRAINT: DON'T BOTTLENECK MOONSHOTS ═══
+Below is the MOONSHOT REFERENCE SET — every coin that hit 10x+, both
+ones we called AND ones we missed. BEFORE proposing any filter
+tightening:
+  - Sanity-check it against this set
+  - If your proposed change would have BLOCKED any of these moonshots,
+    DO NOT propose it. The user explicitly does not want filters
+    tightened in ways that bottleneck future moonshots.
+  - Loosening filters to recover MISSED moonshots is encouraged. The
+    "missed_winner" rows below are coins our system rejected/watchlisted
+    that went on to do 10x+ — those are mistakes worth fixing.
+
+You have authority to change any knob EXCEPT targetMultiplier.
 
 SAFETY BOUNDS (you MUST stay within these):
 - minScoreToPost: 35-60 (NEVER below 35 — too much spam)
@@ -7284,6 +7333,14 @@ ${JSON.stringify(summary, null, 2)}
 
 (Use the aggregates first to spot patterns. Drill into individual rows
 below only if you need to verify a specific signal hypothesis.)
+
+═══ MOONSHOT REFERENCE SET — DO NOT BOTTLENECK THESE PATTERNS ═══
+
+CALLED 10x+ MOONSHOTS (${calledMoonshots.length} coins Pulse correctly called):
+${JSON.stringify(calledMoonshots.slice(0, 30), null, 1)}
+
+MISSED 10x+ MOONSHOTS (${missedMoonshots.length} coins our filters wrongly rejected — mistakes to fix):
+${JSON.stringify(missedMoonshots.slice(0, 30), null, 1)}
 
 WIN DATA (showing 30 of ${wins.length} resolved wins):
 ${JSON.stringify(wins.slice(0, 30), null, 1)}
