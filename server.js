@@ -7840,7 +7840,10 @@ app.get('/api/agent/comms', (req, res) => {
 // runSelfImproveLoop directly (which itself respects bot-active /
 // already-running / has-claude-key guards). Returns immediately with
 // "started" — track results via /api/config/audit?limit=20.
-app.post('/api/self-improve/run-now', async (req, res) => {
+// Accept both POST (proper) and GET (so the user can paste the URL into a
+// browser bar to trigger). Read-only behavior aside, this is a manual
+// admin trigger we want easy to fire.
+const _selfImproveRunNowHandler = async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured' });
   if (_selfImproveRunning) return res.status(409).json({ ok: false, error: 'Self-improvement loop already running — try again in a minute' });
@@ -7852,7 +7855,9 @@ app.post('/api/self-improve/run-now', async (req, res) => {
   setImmediate(() => {
     runSelfImproveLoop().catch(err => console.warn('[self-improve] manual trigger err:', err.message));
   });
-});
+};
+app.post('/api/self-improve/run-now', _selfImproveRunNowHandler);
+app.get('/api/self-improve/run-now',  _selfImproveRunNowHandler);
 
 // Run daily self-improvement loop (operator triggers or scheduled)
 app.post('/api/agent/daily-review', async (req, res) => {
