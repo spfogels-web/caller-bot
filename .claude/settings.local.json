@@ -4,7 +4,9 @@
       "Bash(git fetch *)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(\\\\\\\\\\\\$\\\\{TELEGRAM_API\\\\}\\\\/sendPhoto)",
+      "Bash(node -e ' *)"
     ]
   }
 }
