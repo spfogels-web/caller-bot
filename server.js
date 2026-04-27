@@ -11736,12 +11736,12 @@ app.post('/webhook', async (req, res) => {
       if (cas.length > 0) {
         for (const ca of cas) {
           if (ca.length < 32 || ca.length > 44) continue;
-          // Build the card (which also fetches DexScreener data — reuses
-          // it as our source of truth for mcap snapshot).
-          const card = await buildCACard(dbInstance, ca, process.env.HELIUS_API_KEY, escapeHtml);
-          if (!card) continue;  // unpriceable or invalid → skip
-          // Pull mcap+token back out of the same DexScreener fetch by
-          // re-querying (tiny cost; could be optimized to one fetch later)
+          // Build the Phanes-style card (also fetches DexScreener data
+          // we'll reuse as the source of truth for the mcap snapshot).
+          const built = await buildCACard(dbInstance, ca, process.env.HELIUS_API_KEY, escapeHtml);
+          if (!built) continue;
+          const { caption, imageUrl } = built;
+          // Re-pull mcap+token for the user_calls record (small extra hit)
           let mcap = null, token = null;
           try {
             const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
@@ -11762,21 +11762,45 @@ app.post('/webhook', async (req, res) => {
             chatId:    String(chatId),
             messageId: message.message_id,
           });
-          // Auto-reply with the card (deduped per chat+CA per 5min)
+          // Auto-reply (deduped per chat+CA per 5min). Prefer photo+caption
+          // when the token has an image — falls back to text-only otherwise.
           if (shouldReplyCard(String(chatId), ca)) {
             try {
-              await fetch(`${TELEGRAM_API}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: chatId,
-                  text: card,
-                  parse_mode: 'HTML',
-                  disable_web_page_preview: true,
-                  reply_to_message_id: message.message_id,
-                }),
-                signal: AbortSignal.timeout(8_000),
-              });
+              if (imageUrl) {
+                const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    photo: imageUrl,
+                    caption: caption.slice(0, 1020),  // Telegram caption cap
+                    parse_mode: 'HTML',
+                    reply_to_message_id: message.message_id,
+                  }),
+                  signal: AbortSignal.timeout(10_000),
+                });
+                if (!photoRes.ok) {
+                  // Photo URL was rejected — fall back to plain message
+                  await fetch(`${TELEGRAM_API}/sendMessage`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      chat_id: chatId, text: caption,
+                      parse_mode: 'HTML', disable_web_page_preview: true,
+                      reply_to_message_id: message.message_id,
+                    }),
+                    signal: AbortSignal.timeout(8_000),
+                  });
+                }
+              } else {
+                await fetch(`${TELEGRAM_API}/sendMessage`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId, text: caption,
+                    parse_mode: 'HTML', disable_web_page_preview: true,
+                    reply_to_message_id: message.message_id,
+                  }),
+                  signal: AbortSignal.timeout(8_000),
+                });
+              }
             } catch (err) { console.warn('[ca-card] reply send failed:', err.message); }
           }
         }

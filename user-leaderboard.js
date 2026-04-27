@@ -229,9 +229,36 @@ function fmtAge(ms) {
   return Math.floor(hr / 24) + 'd';
 }
 
+function fmtSupply(n) {
+  if (n == null || !Number.isFinite(Number(n))) return '?';
+  const v = Number(n);
+  if (v >= 1_000_000_000) return (v / 1_000_000_000).toFixed(0) + 'B';
+  if (v >= 1_000_000)     return (v / 1_000_000).toFixed(0) + 'M';
+  if (v >= 1_000)         return (v / 1_000).toFixed(0) + 'K';
+  return v.toFixed(0);
+}
+
+// Format a small price using subscript zeros: $0.0₂2388 instead of $0.000002388
+function fmtPriceSub(price) {
+  if (price == null || !Number.isFinite(Number(price))) return '?';
+  const v = Number(price);
+  if (v >= 1)      return '$' + v.toFixed(4);
+  if (v >= 0.01)   return '$' + v.toFixed(4);
+  // Count leading zeros after decimal
+  const str = v.toFixed(20);
+  const m = str.match(/^0\.(0+)(\d{1,4})/);
+  if (!m) return '$' + v.toPrecision(4);
+  const zeros = m[1].length;
+  const digits = m[2];
+  const subs = ['₀','₁','₂','₃','₄','₅','₆','₇','₈','₉'];
+  const subStr = String(zeros).split('').map(d => subs[+d]).join('');
+  return `$0.0${subStr}${digits}`;
+}
+
 /**
- * Build a Phanes-style HTML card for a CA. Returns null if essential data
- * can't be fetched. Caller is responsible for sending the reply.
+ * Build a Phanes-style HTML card for a CA. Returns
+ *   { caption, imageUrl } where imageUrl may be null.
+ *   Caller decides whether to sendPhoto or sendMessage.
  *
  *   db          — better-sqlite3 instance (for Pulse-score lookup in candidates table)
  *   ca          — the contract address
@@ -253,9 +280,9 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml) {
       pair = (j.pairs || []).find(p => p.chainId === 'solana');
     }
   } catch { /* skip */ }
-  if (!pair) return null;  // can't even price it → not a useful card
+  if (!pair) return null;
 
-  // 2. Helius — mint authority, freeze authority, supply
+  // 2. Helius getAsset — mint/freeze authority + supply + metadata
   let heliusMeta = null;
   if (heliusKey) {
     try {
@@ -271,7 +298,42 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml) {
     } catch { /* skip */ }
   }
 
-  // 3. Pulse's own analysis if we have one in the candidates table
+  // 3. Helius getTokenLargestAccounts — top 10 holder concentration
+  let top10Pct = null;
+  let totalSupply = null;
+  if (heliusKey) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 'top', method: 'getTokenLargestAccounts',
+          params: [ca, { commitment: 'confirmed' }],
+        }),
+        signal: AbortSignal.timeout(6_000),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const accounts = j?.result?.value || [];
+        const top10 = accounts.slice(0, 10).reduce((sum, a) => sum + Number(a.uiAmount || 0), 0);
+        // Pull supply from getTokenSupply for percentage math
+        const sr = await fetch(`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'sup', method: 'getTokenSupply',
+            params: [ca, { commitment: 'confirmed' }],
+          }),
+          signal: AbortSignal.timeout(6_000),
+        });
+        if (sr.ok) {
+          const sj = await sr.json();
+          totalSupply = Number(sj?.result?.value?.uiAmount || 0);
+          if (totalSupply > 0) top10Pct = (top10 / totalSupply) * 100;
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  // 4. Pulse's own analysis if we have one in the candidates table
   let pulseAnalysis = null;
   try {
     pulseAnalysis = db.prepare(`
@@ -282,40 +344,64 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml) {
     `).get(ca);
   } catch { /* skip */ }
 
-  // ── Compose the card ──
-  const token   = pair.baseToken?.symbol  || '?';
-  const name    = pair.baseToken?.name    || '';
-  const ageMs   = pair.pairCreatedAt ? Date.now() - pair.pairCreatedAt : null;
-  const mcap    = pair.marketCap || pair.fdv;
-  const liq     = pair.liquidity?.usd;
-  const price   = pair.priceUsd;
-  const change1h = pair.priceChange?.h1;
-  const change24h = pair.priceChange?.h24;
-  const buys1h  = pair.txns?.h1?.buys  ?? 0;
-  const sells1h = pair.txns?.h1?.sells ?? 0;
-  const vol24h  = pair.volume?.h24;
+  // ── Pull fields ──
+  const token       = pair.baseToken?.symbol  || '?';
+  const name        = pair.baseToken?.name    || '';
+  const ageMs       = pair.pairCreatedAt ? Date.now() - pair.pairCreatedAt : null;
+  const mcap        = pair.marketCap || pair.fdv;
+  const liq         = pair.liquidity?.usd;
+  const price       = Number(pair.priceUsd);
+  const change1h    = pair.priceChange?.h1;
+  const change24h   = pair.priceChange?.h24;
+  const buys1h      = pair.txns?.h1?.buys  ?? 0;
+  const sells1h     = pair.txns?.h1?.sells ?? 0;
+  const vol24h      = pair.volume?.h24;
+  const imageUrl    = pair.info?.imageUrl || heliusMeta?.content?.links?.image || null;
+  const websites    = pair.info?.websites || [];
+  const socials     = pair.info?.socials  || [];
 
-  // Security flags from Helius getAsset
-  const auth         = heliusMeta?.authorities ?? [];
-  const mintRevoked  = !auth.some(a => (a.scopes || []).includes('full'));
-  const ownership    = heliusMeta?.ownership || {};
-  const isFrozen     = ownership.frozen === true;
+  // Security
+  const auth        = heliusMeta?.authorities ?? [];
+  const mintRevoked = !auth.some(a => (a.scopes || []).includes('full'));
+  const isFrozen    = heliusMeta?.ownership?.frozen === true;
 
-  let lines = [];
-  lines.push(`🪙 <b>$${safe(token)}</b>${name ? ' <i>(' + safe(name).slice(0, 24) + ')</i>' : ''}`);
+  // ── Compose caption (Phanes-style with tree borders) ──
+  const lines = [];
+  lines.push(`🪙 <b>${safe(token)}</b>${name ? ' <i>(' + safe(name).slice(0, 28) + ')</i>' : ''}`);
   lines.push(`<code>${safe(ca)}</code>`);
   lines.push(`#SOL · 🌱 ${fmtAge(ageMs)}`);
   lines.push('');
   lines.push(`📊 <b>Stats</b>`);
-  if (price != null)   lines.push(`├ Price  $${Number(price).toPrecision(4)} <i>${fmtPct(change24h)} 24h</i>`);
-  if (mcap  != null)   lines.push(`├ MCap   <b>${fmtMcap(mcap)}</b>`);
-  if (vol24h != null)  lines.push(`├ Vol    ${fmtMcap(vol24h)} <i>24h</i>`);
-  if (liq   != null)   lines.push(`├ LP     ${fmtMcap(liq)}`);
-  if (buys1h || sells1h) lines.push(`└ 1H     ${fmtPct(change1h)} · 🟢 ${buys1h} 🔴 ${sells1h}`);
+  if (price)        lines.push(`┃ USD   ${fmtPriceSub(price)} <i>(${fmtPct(change24h)})</i>`);
+  if (mcap != null) lines.push(`┃ MC    <b>${fmtMcap(mcap)}</b>`);
+  if (vol24h != null) lines.push(`┃ Vol   ${fmtMcap(vol24h)}`);
+  if (liq  != null) lines.push(`┃ LP    ${fmtMcap(liq)}`);
+  if (totalSupply)  lines.push(`┃ Sup   ${fmtSupply(totalSupply)}`);
+  if (buys1h || sells1h) lines.push(`┃ 1H    ${fmtPct(change1h)}  🟢 ${buys1h}  🔴 ${sells1h}`);
+  // ATH guesstimate from 24h high inferred via change % (best-effort)
+  if (mcap != null && change24h != null && change24h < 0) {
+    const ath = mcap / (1 + change24h / 100);
+    lines.push(`┗ ATH   ${fmtMcap(ath)} <i>(${fmtPct(change24h)} from peak)</i>`);
+  }
+
+  if (websites.length || socials.length) {
+    lines.push('');
+    lines.push(`🔗 <b>Socials</b>`);
+    const links = [];
+    for (const s of socials) {
+      if (s.url) links.push(`<a href="${s.url}">${safe(s.type || 'Link')}</a>`);
+    }
+    for (const w of websites.slice(0, 2)) {
+      if (w.url) links.push(`<a href="${w.url}">Web</a>`);
+    }
+    if (links.length) lines.push(`┗ ${links.join(' · ')}`);
+  }
+
   lines.push('');
   lines.push(`🔒 <b>Security</b>`);
-  lines.push(`├ Mint    ${mintRevoked ? '✓ revoked' : '⚠️ active'}`);
-  lines.push(`└ Freeze  ${isFrozen ? '⚠️ frozen!' : '✓ none'}`);
+  if (top10Pct != null) lines.push(`┃ Top 10  ${top10Pct.toFixed(1)}%`);
+  lines.push(`┃ Mint    ${mintRevoked ? '✓ revoked' : '⚠️ active'}`);
+  lines.push(`┗ Freeze  ${isFrozen ? '⚠️ frozen!' : '✓ none'}`);
 
   if (pulseAnalysis?.composite_score != null) {
     lines.push('');
@@ -325,15 +411,15 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml) {
     lines.push(`🧠 <b>Pulse: ${s}/100</b> · ${safe(dec)}${setup}`);
   }
 
-  // Quick links
-  lines.push('');
-  const dexLink   = pair.url || `https://dexscreener.com/solana/${ca}`;
-  const pumpLink  = `https://pump.fun/coin/${ca}`;
-  const birdLink  = `https://birdeye.so/token/${ca}?chain=solana`;
+  // Quick link bar
+  const dexLink     = pair.url || `https://dexscreener.com/solana/${ca}`;
+  const pumpLink    = `https://pump.fun/coin/${ca}`;
+  const birdLink    = `https://birdeye.so/token/${ca}?chain=solana`;
   const solscanLink = `https://solscan.io/token/${ca}`;
-  lines.push(`<a href="${dexLink}">DEX</a> · <a href="${pumpLink}">PUMP</a> · <a href="${birdLink}">BIRD</a> · <a href="${solscanLink}">SCAN</a>`);
+  lines.push('');
+  lines.push(`<a href="${dexLink}">DEX</a> · <a href="${birdLink}">BIRD</a> · <a href="${pumpLink}">PUMP</a> · <a href="${solscanLink}">SCAN</a>`);
 
-  return lines.join('\n');
+  return { caption: lines.join('\n'), imageUrl };
 }
 
 /**
