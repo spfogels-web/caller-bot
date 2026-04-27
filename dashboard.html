@@ -3452,6 +3452,18 @@ body::before {
           </div>
         </div>
 
+        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
+        <div id="perfChartSection" class="calls-section" style="display:none;margin-top:4px">
+          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
+            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="calls-section-sub">latest calls left-to-right</span>
+              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
+            </div>
+          </div>
+          <div id="perfChart" class="perf-chart"></div>
+        </div>
+
         <!-- ═══ 📞 CALLED (actual AUTO_POSTs with outcome) ═══ -->
         <div class="calls-section" style="margin-top:4px">
           <div class="calls-section-hdr" style="--hdr-col:#00e676">
@@ -3470,18 +3482,6 @@ body::before {
           <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
             <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
           </div>
-        </div>
-
-        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
-        <div id="perfChartSection" class="calls-section" style="display:none">
-          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
-            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
-            <div style="display:flex;align-items:center;gap:10px">
-              <span class="calls-section-sub">latest calls left-to-right</span>
-              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
-            </div>
-          </div>
-          <div id="perfChart" class="perf-chart"></div>
         </div>
 
         <!-- ═══ 🔬 ANALYZER — YES/NO verdict per promoted coin ═══ -->
