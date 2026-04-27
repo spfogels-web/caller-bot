@@ -1263,6 +1263,11 @@ try {
     const { ensureMetaSignalsSchema } = await import('./meta-signals.js');
     ensureMetaSignalsSchema(dbInstance);
   } catch (err) { console.warn('[meta-signals] schema init:', err.message); }
+  // Ensure user-leaderboard schema (user_calls) — Phanes-style group ranking.
+  try {
+    const { ensureUserLeaderboardSchema } = await import('./user-leaderboard.js');
+    ensureUserLeaderboardSchema(dbInstance);
+  } catch (err) { console.warn('[user-lb] schema init:', err.message); }
   const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='ai_config_overrides'`).get();
   if (row?.value) {
     AI_CONFIG_OVERRIDES = JSON.parse(row.value);
@@ -2261,7 +2266,8 @@ function buildHelpMessage() {
     `<code>/why [CA]</code> — Why was this called/skipped?\n\n` +
     `<b>📈 BOT INTEL</b>\n` +
     `<code>/top</code> — Best recent calls\n` +
-    `<code>/leaderboard [24h|7d|30d|all]</code> — Hall of Fame top wins\n` +
+    `<code>/leaderboard [24h|7d|30d|all]</code> — Pulse's top calls\n` +
+    `<code>/grouplb [24h|7d|30d|all]</code> — Group ranking (everyone who drops CAs, incl. Pulse)\n` +
     `<code>/regime</code> — Current market regime\n` +
     `<code>/stats</code> — Bot performance stats\n` +
     `<code>/calls</code> — Last 5 group calls\n` +
@@ -3007,6 +3013,43 @@ async function handleAlertCommand(chatId, args, fromUserId, username) {
 }
 
 // ─── /leaderboard — top calls (Hall of Fame) ─────────────────────────────────
+// /grouplb — Phanes-style ranking of every user (incl. Pulse) who's
+// dropped a CA in the group, by best multiple + win rate over the window.
+async function handleGroupLeaderboardCommand(chatId, args) {
+  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
+  const tf = (args || '').trim().toLowerCase() || '7d';
+  const valid = ['24h', '7d', '30d', 'all'];
+  const timeframe = valid.includes(tf) ? tf : '7d';
+  const tfLabel = { '24h': 'LAST 24H', '7d': 'LAST 7 DAYS', '30d': 'LAST 30 DAYS', 'all': 'ALL TIME' }[timeframe];
+
+  const { getGroupLeaderboard, getGroupStats, PULSE_USER_ID } = await import('./user-leaderboard.js');
+  const rows  = getGroupLeaderboard(dbInstance, timeframe);
+  const stats = getGroupStats(dbInstance, timeframe);
+
+  let msg = `🏅 <b>GROUP LEADERBOARD — ${tfLabel}</b>\n` +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `<b>Active users:</b> ${stats.users || 0}  ·  <b>Calls:</b> ${stats.calls || 0}\n` +
+            `<b>Wins:</b> ${stats.wins || 0}  ·  <b>Losses:</b> ${stats.losses || 0}\n` +
+            `<b>Best:</b> ${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '?'}  ·  <b>Avg:</b> ${stats.avg_multiple != null ? stats.avg_multiple.toFixed(2) + 'x' : '?'}\n\n`;
+
+  if (rows.length === 0) {
+    msg += `<i>No CA drops recorded yet for this window. Drop a CA in the group and wait for it to peak.</i>\n\n`;
+    msg += `<i>Note: bot needs Privacy Mode OFF in @BotFather to see non-command messages.</i>`;
+  } else {
+    msg += `<b>TOP ${rows.length}</b>\n`;
+    rows.forEach((r, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}.`;
+      const isPulse = r.user_id === PULSE_USER_ID;
+      const name = isPulse ? '⚡ <b>Pulse</b>' : escapeHtml(r.display_name || 'anon').slice(0, 24);
+      const best = r.best_multiple != null ? r.best_multiple.toFixed(2) + 'x' : '—';
+      const hr   = r.hit_rate_pct != null ? r.hit_rate_pct + '%' : '—';
+      msg += `${medal} ${name}  —  best <b>${best}</b>  ·  hit ${hr}  ·  ${r.total_calls} call${r.total_calls === 1 ? '' : 's'}\n`;
+    });
+  }
+  msg += `\n<i>Try: /grouplb 24h | 7d | 30d | all</i>`;
+  await sendTelegramMessage(chatId, msg);
+}
+
 async function handleLeaderboardCommand(chatId, args) {
   const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
   const tf = (args || '').trim().toLowerCase() || '7d';
@@ -4846,6 +4889,20 @@ async function processCandidate(candidate, isRescan = false) {
         } catch (err) {
           console.warn(`[TG-CA] beacon failed: ${err.message}`);
         }
+        // Self-record: Pulse appears on /grouplb alongside human users.
+        // Ranked by the same peak_multiple math everyone else gets.
+        try {
+          const { recordUserCall, PULSE_USER_ID, PULSE_USERNAME } = await import('./user-leaderboard.js');
+          recordUserCall(dbInstance, {
+            userId:     PULSE_USER_ID,
+            username:   PULSE_USERNAME,
+            firstName:  'Pulse',
+            contractAddress: caBeacon,
+            token:      enrichedCandidate.token || null,
+            mcap:       enrichedCandidate.marketCap || null,
+            chatId:     String(TELEGRAM_GROUP_CHAT_ID),
+          });
+        } catch (err) { console.warn(`[user-lb] pulse self-record err: ${err.message}`); }
         await sleep(1500); // give leaderboard bots a moment to pick up the CA
       }
 
@@ -11662,6 +11719,51 @@ app.post('/webhook', async (req, res) => {
   const chatId    = message.chat?.id;
   const fromId    = message.from?.id;
   if (!chatId) return;
+
+  // ── Group-leaderboard CA listener ──────────────────────────────────────
+  // Every text message gets scanned for Solana CAs. If a user (or even
+  // Pulse posting via webhook reflection) drops one, record (user, CA,
+  // mcap-now) so /grouplb can rank them. Privacy-mode-OFF on the bot is
+  // required for this to see non-command messages — set via @BotFather:
+  // /setprivacy → Disable. Otherwise this only catches CA-laden messages
+  // that start with a slash or mention the bot.
+  try {
+    if (message.text && message.from?.id) {
+      const { extractCAsFromText, recordUserCall } = await import('./user-leaderboard.js');
+      const cas = extractCAsFromText(message.text);
+      if (cas.length > 0) {
+        // Best-effort current MCap fetch — non-blocking, token name optional.
+        const fetchMcapNow = async (ca) => {
+          try {
+            const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+              signal: AbortSignal.timeout(5_000),
+            });
+            if (!r.ok) return null;
+            const j = await r.json();
+            const pair = (j.pairs || []).find(p => p.chainId === 'solana');
+            if (!pair) return null;
+            return { mcap: pair.marketCap || pair.fdv || null, token: pair.baseToken?.symbol || null };
+          } catch { return null; }
+        };
+        for (const ca of cas) {
+          if (ca.length < 32 || ca.length > 44) continue;
+          const data = await fetchMcapNow(ca);
+          if (!data?.mcap) continue;  // skip if can't price (probably not a token)
+          recordUserCall(dbInstance, {
+            userId:    String(message.from.id),
+            username:  message.from.username || null,
+            firstName: message.from.first_name || null,
+            contractAddress: ca,
+            token:     data.token,
+            mcap:      data.mcap,
+            chatId:    String(chatId),
+            messageId: message.message_id,
+          });
+        }
+      }
+    }
+  } catch (err) { console.warn('[user-lb] listener err:', err.message); }
+
   const { command, args } = parseCommand(message.text);
   try {
     switch (command) {
@@ -11682,6 +11784,7 @@ app.post('/webhook', async (req, res) => {
       case '/alert':       await handleAlertCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/alerts':      await handleAlertCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
       case '/leaderboard': await handleLeaderboardCommand(chatId, args); break;
+      case '/grouplb':     await handleGroupLeaderboardCommand(chatId, args); break;
       default:
         if (!message.text || message.text.startsWith('/')) break;
         const lower = message.text.trim().toLowerCase();
@@ -13323,6 +13426,28 @@ app.listen(PORT, async () => {
   setInterval(() => {
     processSmartMoneyRetries().catch(err => console.warn('[sm-retry] tick err:', err.message));
   }, 30_000);
+
+  // Group-leaderboard peak refresher — every 5min, walks ~60 oldest
+  // user_calls rows and updates peak_mcap / peak_multiple via DexScreener.
+  setInterval(async () => {
+    try {
+      const { refreshPeaks } = await import('./user-leaderboard.js');
+      const fetchMcap = async (ca) => {
+        try {
+          const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+            signal: AbortSignal.timeout(6_000),
+          });
+          if (!r.ok) return null;
+          const j = await r.json();
+          const pair = (j.pairs || []).find(p => p.chainId === 'solana');
+          if (!pair) return null;
+          return { marketCap: pair.marketCap || pair.fdv || null };
+        } catch { return null; }
+      };
+      const result = await refreshPeaks(dbInstance, fetchMcap, 60);
+      if (result.checked > 0) console.log(`[user-lb] refreshed ${result.updated}/${result.checked} peaks`);
+    } catch (err) { console.warn('[user-lb] refresh err:', err.message); }
+  }, 5 * 60_000);
 
   // ── AUTONOMOUS SELF-IMPROVEMENT LOOP ──────────────────────────────────
   // Runs the agent + Control Station auto-optimize once every 24 hours
