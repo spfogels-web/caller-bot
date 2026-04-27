@@ -7340,6 +7340,24 @@ app.get('/api/agent/comms', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Manual one-shot trigger for the autonomous tuning loop. Fires
+// runSelfImproveLoop directly (which itself respects bot-active /
+// already-running / has-claude-key guards). Returns immediately with
+// "started" — track results via /api/config/audit?limit=20.
+app.post('/api/self-improve/run-now', async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured' });
+  if (_selfImproveRunning) return res.status(409).json({ ok: false, error: 'Self-improvement loop already running — try again in a minute' });
+  res.json({
+    ok: true,
+    started: true,
+    message: 'AI tuning cycle triggered. Watch /api/config/audit?limit=20 for source=claude rows in the next 30-60s.',
+  });
+  setImmediate(() => {
+    runSelfImproveLoop().catch(err => console.warn('[self-improve] manual trigger err:', err.message));
+  });
+});
+
 // Run daily self-improvement loop (operator triggers or scheduled)
 app.post('/api/agent/daily-review', async (req, res) => {
   setCors(res);
@@ -13310,13 +13328,14 @@ app.listen(PORT, async () => {
   // Runs the agent + Control Station auto-optimize every 6 hours. Claude
   // analyzes recent wins/losses + missed winners, applies bounded knob
   // changes, persists them through logConfigChange so they show up in
-  // /api/config/audit. First run fires 10min after boot so the DB has
-  // settled and at least one normal scan cycle has completed.
-  // Wired here because it was previously defined but never scheduled —
-  // that's why /api/config/audit had zero claude/auto_optimize entries.
+  // /api/config/audit. First run fires 2min after boot — fast enough that
+  // the user sees AI activity within minutes of a deploy. Wired here
+  // because it was previously defined but never scheduled (which is why
+  // /api/config/audit had zero claude/auto_optimize entries before today).
   setTimeout(() => {
+    console.log('[self-improve] 🤖 boot+2min — kicking off first autonomous tuning cycle');
     runSelfImproveLoop().catch(err => console.warn('[self-improve] boot tick err:', err.message));
-  }, 10 * 60_000);
+  }, 2 * 60_000);
   setInterval(() => {
     runSelfImproveLoop().catch(err => console.warn('[self-improve] tick err:', err.message));
   }, 6 * 3_600_000);
