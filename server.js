@@ -32,6 +32,9 @@ import {
   getStats, getRecentCalls, logEvent,
   recordFingerprint, backfillFingerprintOutcome, getFingerprintStats,
   creditWalletsForWin, getSelfTrainedWalletStats,
+  addToUserPortfolio, getUserPortfolio, removeFromUserPortfolio, clearUserPortfolio,
+  createUserAlert, getUserAlerts, getPendingAlerts, fireAlert as fireUserAlert, cancelUserAlert,
+  getCallsLeaderboard,
   getCandidates, getCandidateById, getAllCalls,
   getSystemLog, getScoreDistribution, getDecisionBreakdown,
   getTopIgnoredFull, getPendingCalls,
@@ -2252,25 +2255,29 @@ function buildStartMessage() {
 function buildHelpMessage() {
   return (
     `<b>🐺 ALPHA LENNIX — AI OPERATING SYSTEM</b>\n\n` +
-    `<code>/analyze [CA or ticker]</code>\n` +
-    `→ Full AI analysis — sub-scores, wallet intel, gem thesis\n\n` +
-    `<code>/scan [CA]</code>\n` +
-    `→ Quick onchain scan — raw data only\n\n` +
-    `<code>/why [CA or $TICKER]</code>\n` +
-    `→ Ask the AI why a specific token was called or skipped\n\n` +
-    `<code>/top</code>\n` +
-    `→ Best performing calls — top wins, patterns the AI found\n\n` +
-    `<code>/regime</code>\n` +
-    `→ Current market regime and how it affects gem hunting\n\n` +
-    `<code>/stats</code>\n` +
-    `→ AI stats — total evaluations, win rate, gem patterns found\n\n` +
-    `<code>/calls</code>\n` +
-    `→ Last 5 calls posted to the group\n\n` +
-    `<code>/watchlist</code>\n` +
-    `→ Current watchlist and retest queue\n\n` +
-    `<code>/config [key] [value]</code> (admin only)\n` +
-    `→ Adjust AI parameters live. Example: /config sweetSpotMax 30000\n\n` +
-    `<i>AI OS active: evaluates every token scanned. Hunting $10K-$25K micro-caps.</i>`
+    `<b>📊 ANALYSIS COMMANDS</b>\n` +
+    `<code>/analyze [CA]</code> — Full AI analysis on any token\n` +
+    `<code>/scan [CA]</code> — Quick onchain scan\n` +
+    `<code>/why [CA]</code> — Why was this called/skipped?\n\n` +
+    `<b>📈 BOT INTEL</b>\n` +
+    `<code>/top</code> — Best recent calls\n` +
+    `<code>/leaderboard [24h|7d|30d|all]</code> — Hall of Fame top wins\n` +
+    `<code>/regime</code> — Current market regime\n` +
+    `<code>/stats</code> — Bot performance stats\n` +
+    `<code>/calls</code> — Last 5 group calls\n` +
+    `<code>/watchlist</code> — Current watchlist\n\n` +
+    `<b>👤 YOUR PERSONAL TOOLS</b>\n` +
+    `<code>/portfolio add [CA]</code> — Add coin to your watchlist\n` +
+    `<code>/portfolio</code> — View your portfolio with live P&amp;L\n` +
+    `<code>/portfolio remove [CA]</code> — Drop a coin\n` +
+    `<code>/portfolio clear</code> — Clear all\n` +
+    `<code>/alert [CA] [target]</code> — DM alert when target hit\n` +
+    `   <i>Examples: <code>/alert &lt;CA&gt; 100k</code> or <code>/alert &lt;CA&gt; 5x</code></i>\n` +
+    `<code>/alerts</code> — Your active alerts\n` +
+    `<code>/alert remove [id]</code> — Cancel an alert\n\n` +
+    `<b>⚙️ ADMIN</b>\n` +
+    `<code>/config [key] [value]</code> — Live tuning\n\n` +
+    `<i>AI OS active. Hunting $15K-$120K micro-caps with 53% win rate.</i>`
   );
 }
 
@@ -2840,6 +2847,196 @@ async function handleStatsCommand(chatId)     { await sendTelegramMessage(chatId
 async function handleCallsCommand(chatId)     { await sendTelegramMessage(chatId, buildRecentCallsMessage()); }
 async function handleWatchlistCommand(chatId) { await sendTelegramMessage(chatId, buildWatchlistMessage()); }
 async function handleRegimeCommand(chatId)    { await sendTelegramMessage(chatId, buildRegimeMessage()); }
+
+// ─── /portfolio — user's personal coin watchlist ─────────────────────────────
+async function handlePortfolioCommand(chatId, args, fromUserId, username) {
+  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
+  const parts = (args || '').trim().split(/\s+/);
+  const subcmd = parts[0]?.toLowerCase() || 'list';
+
+  // /portfolio add <CA>
+  if (subcmd === 'add' && parts[1]) {
+    const ca = parts[1].trim();
+    try {
+      // Pull live data so we have token name + entry mcap
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { signal: AbortSignal.timeout(8_000) });
+      const dexData = await dexRes.json();
+      const pair = (dexData?.pairs || []).sort((a,b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+      if (!pair) { await sendTelegramMessage(chatId, '❌ Could not find that token. Check the CA.'); return; }
+      const token = pair.baseToken?.symbol || ca.slice(0,4);
+      const mcap = pair.marketCap || pair.fdv || 0;
+      const price = parseFloat(pair.priceUsd || 0);
+      const ok = addToUserPortfolio(fromUserId, username, ca, token, mcap, price);
+      if (ok) await sendTelegramMessage(chatId, `✅ Added <b>$${escapeHtml(token)}</b> to your portfolio at ${fmtMc(mcap)} mcap.\n\nUse <code>/portfolio</code> to view, <code>/portfolio remove ${ca.slice(0,8)}...</code> to drop.`);
+      else    await sendTelegramMessage(chatId, '⚠️ Already in your portfolio (or DB error).');
+    } catch (err) { await sendTelegramMessage(chatId, `❌ Error: ${escapeHtml(err.message.slice(0,150))}`); }
+    return;
+  }
+
+  // /portfolio remove <CA>
+  if (subcmd === 'remove' && parts[1]) {
+    const removed = removeFromUserPortfolio(fromUserId, parts[1].trim());
+    await sendTelegramMessage(chatId, removed ? '✅ Removed from your portfolio.' : '⚠️ Not found in your portfolio.');
+    return;
+  }
+
+  // /portfolio clear
+  if (subcmd === 'clear') {
+    const n = clearUserPortfolio(fromUserId);
+    await sendTelegramMessage(chatId, `🧹 Cleared <b>${n}</b> coins from your portfolio.`);
+    return;
+  }
+
+  // /portfolio (list — default)
+  const items = getUserPortfolio(fromUserId);
+  if (items.length === 0) {
+    await sendTelegramMessage(chatId,
+      `📋 <b>Your portfolio is empty.</b>\n\n` +
+      `Add coins with: <code>/portfolio add &lt;CA&gt;</code>\n` +
+      `View live: <code>/portfolio</code>\n` +
+      `Remove: <code>/portfolio remove &lt;CA&gt;</code>`);
+    return;
+  }
+
+  // Pull live mcap for each (limit to 10 to keep latency reasonable)
+  const showItems = items.slice(0, 10);
+  const lines = [];
+  for (const item of showItems) {
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${item.contract_address}`, { signal: AbortSignal.timeout(5_000) });
+      const dexData = await dexRes.json();
+      const pair = (dexData?.pairs || []).sort((a,b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+      const currentMcap = pair?.marketCap || pair?.fdv || 0;
+      const mult = item.entry_mcap > 0 ? currentMcap / item.entry_mcap : null;
+      const multStr = mult != null ? `${mult >= 1 ? '🟢' : '🔴'} ${mult.toFixed(2)}x` : '?';
+      lines.push(`<b>$${escapeHtml(item.token || '?')}</b>  ${multStr}\n  Entry: ${fmtMc(item.entry_mcap)} → Now: ${fmtMc(currentMcap)}\n  <code>${item.contract_address.slice(0,8)}...${item.contract_address.slice(-6)}</code>`);
+    } catch {
+      lines.push(`<b>$${escapeHtml(item.token || '?')}</b>  ?\n  Entry: ${fmtMc(item.entry_mcap)}\n  <code>${item.contract_address.slice(0,8)}...${item.contract_address.slice(-6)}</code>`);
+    }
+  }
+  const more = items.length > 10 ? `\n<i>(+${items.length - 10} more not shown)</i>` : '';
+  await sendTelegramMessage(chatId,
+    `📋 <b>YOUR PORTFOLIO</b> (${items.length} coin${items.length===1?'':'s'})\n\n` +
+    lines.join('\n\n') + more);
+}
+
+// ─── /alert — set price/multiple alerts ──────────────────────────────────────
+async function handleAlertCommand(chatId, args, fromUserId, username) {
+  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
+  const parts = (args || '').trim().split(/\s+/);
+  const subcmd = parts[0]?.toLowerCase();
+
+  // /alert list — show user's pending alerts
+  if (subcmd === 'list' || (!parts[0] && !parts[1])) {
+    const alerts = getUserAlerts(fromUserId, true);
+    if (alerts.length === 0) {
+      await sendTelegramMessage(chatId,
+        `🔔 <b>No alerts set.</b>\n\n` +
+        `Set one with:\n` +
+        `<code>/alert &lt;CA&gt; &lt;target&gt;</code>\n\n` +
+        `Examples:\n` +
+        `<code>/alert &lt;CA&gt; 100k</code>  → fires at $100K mcap\n` +
+        `<code>/alert &lt;CA&gt; 5x</code>    → fires at 5x entry\n` +
+        `<code>/alert remove &lt;id&gt;</code>  → cancel an alert`);
+      return;
+    }
+    const lines = alerts.map(a => {
+      const status = a.fired_at ? '✅ FIRED at ' + fmtMc(a.fired_mcap) : a.cancelled ? '🚫 cancelled' : '⏳ pending';
+      const target = a.target_type === 'mcap' ? fmtMc(a.target_value) : a.target_value.toFixed(1) + 'x';
+      return `#${a.id} <b>$${escapeHtml(a.token||'?')}</b> @ ${target} · ${status}\n  <code>${a.contract_address.slice(0,8)}...${a.contract_address.slice(-6)}</code>`;
+    });
+    await sendTelegramMessage(chatId, `🔔 <b>YOUR ALERTS</b> (${alerts.length})\n\n` + lines.join('\n\n'));
+    return;
+  }
+
+  // /alert remove <id>
+  if (subcmd === 'remove' && parts[1]) {
+    const id = parseInt(parts[1]);
+    if (!Number.isFinite(id)) { await sendTelegramMessage(chatId, '❌ Provide a numeric alert ID. Use /alert list to see IDs.'); return; }
+    const ok = cancelUserAlert(fromUserId, id);
+    await sendTelegramMessage(chatId, ok ? `✅ Alert #${id} cancelled.` : `⚠️ Alert #${id} not found or not yours.`);
+    return;
+  }
+
+  // /alert <CA> <target>
+  if (parts[0] && parts[1]) {
+    const ca = parts[0].trim();
+    const targetStr = parts[1].toLowerCase().trim();
+    let targetType, targetValue;
+
+    // Parse target — "5x" = multiple, "100k" / "1m" = mcap
+    if (/^\d+(\.\d+)?x$/.test(targetStr)) {
+      targetType = 'multiple';
+      targetValue = parseFloat(targetStr);
+    } else if (/^\d+(\.\d+)?[km]?$/.test(targetStr)) {
+      targetType = 'mcap';
+      const num = parseFloat(targetStr);
+      if (targetStr.endsWith('m'))      targetValue = num * 1_000_000;
+      else if (targetStr.endsWith('k')) targetValue = num * 1_000;
+      else                              targetValue = num;
+    } else {
+      await sendTelegramMessage(chatId, '❌ Target format invalid.\n\nUse:\n• <code>5x</code> for a multiple\n• <code>100k</code> or <code>1m</code> for mcap');
+      return;
+    }
+
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { signal: AbortSignal.timeout(8_000) });
+      const dexData = await dexRes.json();
+      const pair = (dexData?.pairs || []).sort((a,b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+      if (!pair) { await sendTelegramMessage(chatId, '❌ Could not find that token. Check the CA.'); return; }
+      const token = pair.baseToken?.symbol || ca.slice(0,4);
+      const mcap = pair.marketCap || pair.fdv || 0;
+      const ok = createUserAlert(fromUserId, username, ca, token, targetType, targetValue, mcap);
+      if (ok) {
+        const targetDesc = targetType === 'mcap' ? fmtMc(targetValue) : targetValue.toFixed(1) + 'x (entry: ' + fmtMc(mcap) + ')';
+        await sendTelegramMessage(chatId, `🔔 <b>Alert set</b> for <b>$${escapeHtml(token)}</b> @ ${targetDesc}\n\nI'll DM you when it hits.`);
+      } else {
+        await sendTelegramMessage(chatId, '❌ Could not create alert.');
+      }
+    } catch (err) { await sendTelegramMessage(chatId, `❌ Error: ${escapeHtml(err.message.slice(0,150))}`); }
+    return;
+  }
+
+  // No args — show usage
+  await sendTelegramMessage(chatId,
+    `🔔 <b>Alert Commands</b>\n\n` +
+    `<code>/alert &lt;CA&gt; 100k</code>  → fires at $100K mcap\n` +
+    `<code>/alert &lt;CA&gt; 5x</code>    → fires at 5x entry\n` +
+    `<code>/alert list</code>        → show all your alerts\n` +
+    `<code>/alert remove &lt;id&gt;</code>  → cancel an alert`);
+}
+
+// ─── /leaderboard — top calls (Hall of Fame) ─────────────────────────────────
+async function handleLeaderboardCommand(chatId, args) {
+  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
+  const tf = (args || '').trim().toLowerCase() || '7d';
+  const valid = ['24h', '7d', '30d', 'all'];
+  const timeframe = valid.includes(tf) ? tf : '7d';
+  const tfLabel = { '24h': 'LAST 24H', '7d': 'LAST 7 DAYS', '30d': 'LAST 30 DAYS', 'all': 'ALL TIME' }[timeframe];
+
+  const { top, stats } = getCallsLeaderboard(timeframe);
+  const winRate = (stats.wins + stats.losses) > 0 ? Math.round(stats.wins * 100 / (stats.wins + stats.losses)) : 0;
+
+  let msg = `🏆 <b>HALL OF FAME — ${tfLabel}</b>\n` +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `<b>Total Calls:</b> ${stats.total_calls || 0}\n` +
+            `<b>Wins:</b> ${stats.wins || 0}  <b>Losses:</b> ${stats.losses || 0}\n` +
+            `<b>Win Rate:</b> ${winRate}%\n` +
+            `<b>Avg Win:</b> ${stats.avg_win_multiple != null ? stats.avg_win_multiple.toFixed(2) + 'x' : '?'}\n` +
+            `<b>Best:</b> ${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '?'}\n\n`;
+  if (top.length === 0) {
+    msg += `<i>No wins recorded for this timeframe yet.</i>`;
+  } else {
+    msg += `<b>TOP ${top.length} WINNERS</b>\n`;
+    top.forEach((c, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}.`;
+      msg += `${medal} <b>$${escapeHtml(c.token || '?')}</b>  ${c.peak_multiple.toFixed(2)}x\n`;
+      msg += `   ${fmtMc(c.market_cap_at_call)} → ${fmtMc(c.peak_mcap)}\n`;
+    });
+  }
+  msg += `\n<i>Try: /leaderboard 24h | 7d | 30d | all</i>`;
+  await sendTelegramMessage(chatId, msg);
+}
 
 // ─── Telegram AI OS command dispatcher ───────────────────────────────────────
 async function dispatchAICommand(chatId, command, args, fromUserId) {
@@ -7749,6 +7946,83 @@ async function runExitMonitorTick() {
 }
 setInterval(runExitMonitorTick, 60_000);
 setTimeout(runExitMonitorTick, 90_000); // first run 90s after boot
+
+// User-alert ticker — checks all pending /alert subscriptions every 60s.
+// When a coin's current mcap crosses the target (or current/entry >= multiple),
+// fires a DM to the user and marks fired_at. De-dupes via fired_at.
+async function runUserAlertsTick() {
+  if (!_botActive) return;
+  if (!TELEGRAM_BOT_TOKEN) return;
+  let alerts;
+  try { alerts = getPendingAlerts(); } catch { return; }
+  if (!alerts.length) return;
+
+  // Group alerts by CA so we make at most 1 DexScreener call per token
+  const byCA = new Map();
+  for (const a of alerts) {
+    if (!byCA.has(a.contract_address)) byCA.set(a.contract_address, []);
+    byCA.get(a.contract_address).push(a);
+  }
+
+  let fired = 0;
+  for (const [ca, group] of byCA) {
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { signal: AbortSignal.timeout(8_000) });
+      if (!dexRes.ok) continue;
+      const dexData = await dexRes.json();
+      const pair = (dexData?.pairs || []).sort((a,b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+      if (!pair) continue;
+      const currentMcap = pair.marketCap || pair.fdv || 0;
+      if (!currentMcap) continue;
+
+      for (const a of group) {
+        let triggered = false;
+        if (a.target_type === 'mcap') {
+          triggered = currentMcap >= a.target_value;
+        } else if (a.target_type === 'multiple' && a.entry_mcap > 0) {
+          triggered = (currentMcap / a.entry_mcap) >= a.target_value;
+        }
+        if (!triggered) continue;
+
+        // Fire DM
+        const fmtMc = (n) => n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K';
+        const targetDesc = a.target_type === 'mcap' ? fmtMc(a.target_value) : a.target_value.toFixed(1) + 'x';
+        const mult = a.entry_mcap > 0 ? (currentMcap / a.entry_mcap) : null;
+        const msg =
+          `🔔 <b>ALERT TRIGGERED</b>\n\n` +
+          `<b>$${escapeHtml(a.token || '?')}</b>\n` +
+          `<code>${ca}</code>\n\n` +
+          `Target: <b>${targetDesc}</b>  ✅ HIT\n` +
+          `Entry: ${fmtMc(a.entry_mcap)} → Now: <b>${fmtMc(currentMcap)}</b>` +
+          (mult != null ? `  (${mult.toFixed(2)}x)` : '') + `\n\n` +
+          `<a href="https://dexscreener.com/solana/${ca}">DEX</a> · <a href="https://pump.fun/${ca}">PF</a>`;
+
+        try {
+          await fetch(`${TELEGRAM_API}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: a.user_id,
+              text: msg,
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          fireUserAlert(a.id, currentMcap);
+          fired++;
+        } catch (err) {
+          console.warn(`[user-alert] DM failed for user ${a.user_id}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[user-alert] check failed for ${ca}: ${err.message}`);
+    }
+  }
+  if (fired > 0) console.log(`[user-alert] cycle done — fired ${fired} alerts across ${byCA.size} unique tokens`);
+}
+setInterval(runUserAlertsTick, 60_000);
+setTimeout(runUserAlertsTick, 120_000); // first run 2 min after boot
 setTimeout(runMissedWinnerDeepAnalysis, 10 * 60_000); // first run 10min after boot
 console.log('[missed-analysis] Missed winner analysis scheduled: every 12h');
 
@@ -11371,6 +11645,11 @@ app.post('/webhook', async (req, res) => {
       case '/why':       await handleWhyCommand(chatId, args);          break;
       case '/top':       await handleTopCommand(chatId);                break;
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
+      // ── User-facing personal features ──
+      case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/alert':       await handleAlertCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/alerts':      await handleAlertCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
+      case '/leaderboard': await handleLeaderboardCommand(chatId, args); break;
       default:
         if (!message.text || message.text.startsWith('/')) break;
         const lower = message.text.trim().toLowerCase();

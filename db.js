@@ -720,6 +720,36 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_exit_call    ON exit_alerts(call_id, trigger_type)`,
     `CREATE INDEX IF NOT EXISTS idx_exit_fired   ON exit_alerts(fired_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_exit_ca      ON exit_alerts(contract_address, trigger_type)`,
+    // v14: User-facing Telegram features — personal portfolios + price alerts
+    `CREATE TABLE IF NOT EXISTS user_portfolio (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id          TEXT NOT NULL,           -- Telegram user_id
+      username         TEXT,                     -- @handle for display
+      contract_address TEXT NOT NULL,
+      token            TEXT,
+      added_at         TEXT DEFAULT (datetime('now')),
+      entry_mcap       REAL,                     -- mcap when added (for tracking gain)
+      entry_price      REAL,
+      notes            TEXT,
+      UNIQUE(user_id, contract_address)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_portfolio_user ON user_portfolio(user_id, added_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS user_alerts (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id          TEXT NOT NULL,
+      username         TEXT,
+      contract_address TEXT NOT NULL,
+      token            TEXT,
+      target_type      TEXT NOT NULL,           -- 'mcap' | 'multiple'
+      target_value     REAL NOT NULL,           -- e.g. 100000 (mcap) or 5.0 (multiple)
+      entry_mcap       REAL,                     -- baseline at alert creation
+      created_at       TEXT DEFAULT (datetime('now')),
+      fired_at         TEXT,
+      fired_mcap       REAL,
+      cancelled        INTEGER DEFAULT 0
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_alerts_user    ON user_alerts(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_alerts_pending ON user_alerts(fired_at, cancelled) WHERE fired_at IS NULL AND cancelled = 0`,
     // Track last exit check on each call so we know when to next poll
     `ALTER TABLE calls ADD COLUMN exit_monitor_last_check_at TEXT`,
     `ALTER TABLE calls ADD COLUMN exit_monitor_last_liquidity REAL`,
@@ -1175,6 +1205,96 @@ export function creditWalletsForWin(contractAddress, peakMultiple, earlyHolders 
     console.log(`[wallet-credit] $${contractAddress.slice(0,8)}... ${peakMultiple.toFixed(2)}x → credited ${credited} holders${promoted ? ' · 🏆 promoted ' + promoted + ' to WINNER' : ''}`);
   }
   return { credited, promoted };
+}
+
+// ─── User Portfolio (Telegram personal watchlist) ──────────────────────────
+export function addToUserPortfolio(userId, username, ca, token, entryMcap, entryPrice, notes = null) {
+  try {
+    db.prepare(`
+      INSERT OR IGNORE INTO user_portfolio (user_id, username, contract_address, token, entry_mcap, entry_price, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(String(userId), username || null, ca, token || null, entryMcap || null, entryPrice || null, notes);
+    return true;
+  } catch (err) { console.warn('[portfolio] add failed:', err.message); return false; }
+}
+export function getUserPortfolio(userId) {
+  try {
+    return db.prepare(`SELECT * FROM user_portfolio WHERE user_id = ? ORDER BY added_at DESC`).all(String(userId));
+  } catch { return []; }
+}
+export function removeFromUserPortfolio(userId, ca) {
+  try {
+    const r = db.prepare(`DELETE FROM user_portfolio WHERE user_id = ? AND contract_address = ?`).run(String(userId), ca);
+    return r.changes > 0;
+  } catch { return false; }
+}
+export function clearUserPortfolio(userId) {
+  try { return db.prepare(`DELETE FROM user_portfolio WHERE user_id = ?`).run(String(userId)).changes; }
+  catch { return 0; }
+}
+
+// ─── User Alerts (Telegram price triggers) ─────────────────────────────────
+export function createUserAlert(userId, username, ca, token, targetType, targetValue, entryMcap) {
+  try {
+    db.prepare(`
+      INSERT INTO user_alerts (user_id, username, contract_address, token, target_type, target_value, entry_mcap)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(String(userId), username || null, ca, token || null, targetType, targetValue, entryMcap || null);
+    return true;
+  } catch (err) { console.warn('[alert] create failed:', err.message); return false; }
+}
+export function getUserAlerts(userId, includeFired = false) {
+  try {
+    const where = includeFired
+      ? `WHERE user_id = ? AND cancelled = 0 ORDER BY created_at DESC LIMIT 30`
+      : `WHERE user_id = ? AND cancelled = 0 AND fired_at IS NULL ORDER BY created_at DESC LIMIT 30`;
+    return db.prepare(`SELECT * FROM user_alerts ${where}`).all(String(userId));
+  } catch { return []; }
+}
+export function getPendingAlerts() {
+  try {
+    return db.prepare(`SELECT * FROM user_alerts WHERE fired_at IS NULL AND cancelled = 0`).all();
+  } catch { return []; }
+}
+export function fireAlert(alertId, currentMcap) {
+  try {
+    db.prepare(`UPDATE user_alerts SET fired_at = datetime('now'), fired_mcap = ? WHERE id = ?`).run(currentMcap, alertId);
+    return true;
+  } catch { return false; }
+}
+export function cancelUserAlert(userId, alertId) {
+  try {
+    const r = db.prepare(`UPDATE user_alerts SET cancelled = 1 WHERE id = ? AND user_id = ?`).run(alertId, String(userId));
+    return r.changes > 0;
+  } catch { return false; }
+}
+
+// ─── Leaderboard / Hall of Fame for bot's calls ────────────────────────────
+export function getCallsLeaderboard(timeframe = 'all') {
+  // timeframe: 'all' | '24h' | '7d' | '30d'
+  let whereTime = '';
+  if (timeframe === '24h') whereTime = `AND called_at > datetime('now', '-24 hours')`;
+  else if (timeframe === '7d') whereTime = `AND called_at > datetime('now', '-7 days')`;
+  else if (timeframe === '30d') whereTime = `AND called_at > datetime('now', '-30 days')`;
+  try {
+    const top = db.prepare(`
+      SELECT token, contract_address, market_cap_at_call, peak_mcap, peak_multiple, called_at, outcome
+      FROM calls
+      WHERE peak_multiple IS NOT NULL AND outcome = 'WIN' ${whereTime}
+      ORDER BY peak_multiple DESC LIMIT 10
+    `).all();
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) AS total_calls,
+        SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) AS losses,
+        AVG(CASE WHEN outcome='WIN' THEN peak_multiple END) AS avg_win_multiple,
+        MAX(peak_multiple) AS best_multiple
+      FROM calls
+      WHERE 1=1 ${whereTime}
+    `).get();
+    return { top, stats };
+  } catch { return { top: [], stats: {} }; }
 }
 
 // Stats for the new self-trained leaderboard
