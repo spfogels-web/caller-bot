@@ -5036,6 +5036,23 @@ async function processCandidate(candidate, isRescan = false) {
         } catch (err) { console.warn('[archive-nonpost] failed:', err.message); }
       }
 
+      // Ensure top holders captured before insertCall — wallet-signal
+      // triggered calls (score=25 fast-lane) skip enrichment and end up
+      // with no holderAddresses, breaking the self-trained wallet credit
+      // loop. One extra Helius call here = ~\$0.01/day even at 100 posts.
+      let earlyHoldersForCall = enrichedCandidate.holderAddresses
+                             ?? enrichedCandidate.holders_list
+                             ?? null;
+      if ((!earlyHoldersForCall || earlyHoldersForCall.length === 0) && HELIUS_API_KEY) {
+        try {
+          const fetched = await getTopHolders(ca, HELIUS_API_KEY, 100);
+          if (Array.isArray(fetched) && fetched.length > 0) {
+            earlyHoldersForCall = fetched;
+            console.log(`[auto-caller] ✓ Fetched ${fetched.length} top holders for $${enrichedCandidate.token??ca.slice(0,6)} (just-in-time for self-trained credit)`);
+          }
+        } catch (err) { console.warn('[auto-caller] holders fetch failed:', err.message); }
+      }
+
       insertCall({
         candidateId,
         token:           enrichedCandidate.token,
@@ -5050,10 +5067,7 @@ async function processCandidate(candidate, isRescan = false) {
         marketCap:       enrichedCandidate.marketCap,
         liquidity:       enrichedCandidate.liquidity,
         called_at:       new Date().toISOString(),
-        // Capture top holders for self-trained wallet intelligence
-        holderAddresses: enrichedCandidate.holderAddresses
-                      ?? enrichedCandidate.holders_list
-                      ?? null,
+        holderAddresses: earlyHoldersForCall,
       });
 
       logEvent('INFO', 'AUTO_POST', `${enrichedCandidate.token} score=${scoreResult.score}`);
