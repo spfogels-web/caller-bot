@@ -11720,45 +11720,65 @@ app.post('/webhook', async (req, res) => {
   const fromId    = message.from?.id;
   if (!chatId) return;
 
-  // ── Group-leaderboard CA listener ──────────────────────────────────────
-  // Every text message gets scanned for Solana CAs. If a user (or even
-  // Pulse posting via webhook reflection) drops one, record (user, CA,
-  // mcap-now) so /grouplb can rank them. Privacy-mode-OFF on the bot is
-  // required for this to see non-command messages — set via @BotFather:
-  // /setprivacy → Disable. Otherwise this only catches CA-laden messages
-  // that start with a slash or mention the bot.
+  // ── Group-leaderboard CA listener + Phanes-replacement card reply ──────
+  // Every NON-BOT text message gets scanned for Solana CAs. For each CA:
+  //   1. Record (user, CA, mcap-now) for /grouplb ranking
+  //   2. Reply under the message with a Phanes-style info card (price,
+  //      MCap, vol, LP, security flags, Pulse's score if known, links)
+  // Privacy-mode-OFF on the bot is required to see non-command messages —
+  // set via @BotFather → Bot Settings → Group Privacy → Disable.
+  // Skips bots (no infinite reply loops, no Phanes/Sect cross-tracking).
   try {
-    if (message.text && message.from?.id) {
-      const { extractCAsFromText, recordUserCall } = await import('./user-leaderboard.js');
+    if (message.text && message.from?.id && !message.from?.is_bot) {
+      const { extractCAsFromText, recordUserCall, buildCACard, shouldReplyCard } =
+        await import('./user-leaderboard.js');
       const cas = extractCAsFromText(message.text);
       if (cas.length > 0) {
-        // Best-effort current MCap fetch — non-blocking, token name optional.
-        const fetchMcapNow = async (ca) => {
+        for (const ca of cas) {
+          if (ca.length < 32 || ca.length > 44) continue;
+          // Build the card (which also fetches DexScreener data — reuses
+          // it as our source of truth for mcap snapshot).
+          const card = await buildCACard(dbInstance, ca, process.env.HELIUS_API_KEY, escapeHtml);
+          if (!card) continue;  // unpriceable or invalid → skip
+          // Pull mcap+token back out of the same DexScreener fetch by
+          // re-querying (tiny cost; could be optimized to one fetch later)
+          let mcap = null, token = null;
           try {
             const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
               signal: AbortSignal.timeout(5_000),
             });
-            if (!r.ok) return null;
-            const j = await r.json();
-            const pair = (j.pairs || []).find(p => p.chainId === 'solana');
-            if (!pair) return null;
-            return { mcap: pair.marketCap || pair.fdv || null, token: pair.baseToken?.symbol || null };
-          } catch { return null; }
-        };
-        for (const ca of cas) {
-          if (ca.length < 32 || ca.length > 44) continue;
-          const data = await fetchMcapNow(ca);
-          if (!data?.mcap) continue;  // skip if can't price (probably not a token)
+            if (r.ok) {
+              const j = await r.json();
+              const pair = (j.pairs || []).find(p => p.chainId === 'solana');
+              if (pair) { mcap = pair.marketCap || pair.fdv || null; token = pair.baseToken?.symbol || null; }
+            }
+          } catch {}
           recordUserCall(dbInstance, {
             userId:    String(message.from.id),
             username:  message.from.username || null,
             firstName: message.from.first_name || null,
             contractAddress: ca,
-            token:     data.token,
-            mcap:      data.mcap,
+            token, mcap,
             chatId:    String(chatId),
             messageId: message.message_id,
           });
+          // Auto-reply with the card (deduped per chat+CA per 5min)
+          if (shouldReplyCard(String(chatId), ca)) {
+            try {
+              await fetch(`${TELEGRAM_API}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: card,
+                  parse_mode: 'HTML',
+                  disable_web_page_preview: true,
+                  reply_to_message_id: message.message_id,
+                }),
+                signal: AbortSignal.timeout(8_000),
+              });
+            } catch (err) { console.warn('[ca-card] reply send failed:', err.message); }
+          }
         }
       }
     }

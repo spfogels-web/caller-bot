@@ -200,3 +200,155 @@ export function getUserCallsCount(db) {
   try { return db.prepare(`SELECT COUNT(*) as n FROM user_calls`).get().n; }
   catch { return 0; }
 }
+
+// ─── CA-drop auto-reply card (replaces Phanes) ───────────────────────────────
+
+const _cardReplyDedupe = new Map(); // `${chatId}:${ca}` → epoch ms of last reply
+const CARD_DEDUPE_MS = 5 * 60 * 1000;
+
+function fmtMcap(n) {
+  if (n == null || !Number.isFinite(Number(n))) return '?';
+  const v = Number(n);
+  if (v >= 1_000_000) return '$' + (v / 1_000_000).toFixed(2) + 'M';
+  if (v >= 1_000)     return '$' + (v / 1_000).toFixed(1) + 'K';
+  return '$' + v.toFixed(0);
+}
+function fmtPct(n, decimals = 1) {
+  if (n == null || !Number.isFinite(Number(n))) return '?';
+  const v = Number(n);
+  return (v >= 0 ? '+' : '') + v.toFixed(decimals) + '%';
+}
+function fmtAge(ms) {
+  if (!ms || !Number.isFinite(ms)) return '?';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60)        return sec + 's';
+  const min = Math.floor(sec / 60);
+  if (min < 60)        return min + 'm';
+  const hr  = min / 60;
+  if (hr  < 24)        return hr.toFixed(1) + 'h';
+  return Math.floor(hr / 24) + 'd';
+}
+
+/**
+ * Build a Phanes-style HTML card for a CA. Returns null if essential data
+ * can't be fetched. Caller is responsible for sending the reply.
+ *
+ *   db          — better-sqlite3 instance (for Pulse-score lookup in candidates table)
+ *   ca          — the contract address
+ *   heliusKey   — process.env.HELIUS_API_KEY
+ *   escapeHtml  — server.js's escapeHtml fn (passed in to avoid circular import)
+ */
+export async function buildCACard(db, ca, heliusKey, escapeHtml) {
+  if (!ca) return null;
+  const safe = (s) => escapeHtml ? escapeHtml(String(s)) : String(s).replace(/[<>&]/g, '');
+
+  // 1. DexScreener — primary source for MCap, vol, price, security flags
+  let pair = null;
+  try {
+    const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      pair = (j.pairs || []).find(p => p.chainId === 'solana');
+    }
+  } catch { /* skip */ }
+  if (!pair) return null;  // can't even price it → not a useful card
+
+  // 2. Helius — mint authority, freeze authority, supply
+  let heliusMeta = null;
+  if (heliusKey) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 'asset', method: 'getAsset',
+          params: { id: ca },
+        }),
+        signal: AbortSignal.timeout(6_000),
+      });
+      if (r.ok) heliusMeta = (await r.json())?.result;
+    } catch { /* skip */ }
+  }
+
+  // 3. Pulse's own analysis if we have one in the candidates table
+  let pulseAnalysis = null;
+  try {
+    pulseAnalysis = db.prepare(`
+      SELECT composite_score, final_decision, claude_verdict, setup_type
+      FROM candidates
+      WHERE contract_address = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(ca);
+  } catch { /* skip */ }
+
+  // ── Compose the card ──
+  const token   = pair.baseToken?.symbol  || '?';
+  const name    = pair.baseToken?.name    || '';
+  const ageMs   = pair.pairCreatedAt ? Date.now() - pair.pairCreatedAt : null;
+  const mcap    = pair.marketCap || pair.fdv;
+  const liq     = pair.liquidity?.usd;
+  const price   = pair.priceUsd;
+  const change1h = pair.priceChange?.h1;
+  const change24h = pair.priceChange?.h24;
+  const buys1h  = pair.txns?.h1?.buys  ?? 0;
+  const sells1h = pair.txns?.h1?.sells ?? 0;
+  const vol24h  = pair.volume?.h24;
+
+  // Security flags from Helius getAsset
+  const auth         = heliusMeta?.authorities ?? [];
+  const mintRevoked  = !auth.some(a => (a.scopes || []).includes('full'));
+  const ownership    = heliusMeta?.ownership || {};
+  const isFrozen     = ownership.frozen === true;
+
+  let lines = [];
+  lines.push(`🪙 <b>$${safe(token)}</b>${name ? ' <i>(' + safe(name).slice(0, 24) + ')</i>' : ''}`);
+  lines.push(`<code>${safe(ca)}</code>`);
+  lines.push(`#SOL · 🌱 ${fmtAge(ageMs)}`);
+  lines.push('');
+  lines.push(`📊 <b>Stats</b>`);
+  if (price != null)   lines.push(`├ Price  $${Number(price).toPrecision(4)} <i>${fmtPct(change24h)} 24h</i>`);
+  if (mcap  != null)   lines.push(`├ MCap   <b>${fmtMcap(mcap)}</b>`);
+  if (vol24h != null)  lines.push(`├ Vol    ${fmtMcap(vol24h)} <i>24h</i>`);
+  if (liq   != null)   lines.push(`├ LP     ${fmtMcap(liq)}`);
+  if (buys1h || sells1h) lines.push(`└ 1H     ${fmtPct(change1h)} · 🟢 ${buys1h} 🔴 ${sells1h}`);
+  lines.push('');
+  lines.push(`🔒 <b>Security</b>`);
+  lines.push(`├ Mint    ${mintRevoked ? '✓ revoked' : '⚠️ active'}`);
+  lines.push(`└ Freeze  ${isFrozen ? '⚠️ frozen!' : '✓ none'}`);
+
+  if (pulseAnalysis?.composite_score != null) {
+    lines.push('');
+    const s = pulseAnalysis.composite_score;
+    const dec = pulseAnalysis.final_decision || '?';
+    const setup = pulseAnalysis.setup_type ? ` · ${safe(pulseAnalysis.setup_type)}` : '';
+    lines.push(`🧠 <b>Pulse: ${s}/100</b> · ${safe(dec)}${setup}`);
+  }
+
+  // Quick links
+  lines.push('');
+  const dexLink   = pair.url || `https://dexscreener.com/solana/${ca}`;
+  const pumpLink  = `https://pump.fun/coin/${ca}`;
+  const birdLink  = `https://birdeye.so/token/${ca}?chain=solana`;
+  const solscanLink = `https://solscan.io/token/${ca}`;
+  lines.push(`<a href="${dexLink}">DEX</a> · <a href="${pumpLink}">PUMP</a> · <a href="${birdLink}">BIRD</a> · <a href="${solscanLink}">SCAN</a>`);
+
+  return lines.join('\n');
+}
+
+/**
+ * Returns true if we should reply with a card for this (chatId, ca) — false
+ * if we already replied within the dedupe window.
+ */
+export function shouldReplyCard(chatId, ca) {
+  const key = `${chatId}:${ca}`;
+  const last = _cardReplyDedupe.get(key);
+  if (last && Date.now() - last < CARD_DEDUPE_MS) return false;
+  _cardReplyDedupe.set(key, Date.now());
+  // Periodic cleanup: keep map under 1000 entries
+  if (_cardReplyDedupe.size > 1000) {
+    const cutoff = Date.now() - CARD_DEDUPE_MS;
+    for (const [k, t] of _cardReplyDedupe) if (t < cutoff) _cardReplyDedupe.delete(k);
+  }
+  return true;
+}
