@@ -169,8 +169,7 @@ const BANNER_IMAGE_URL = process.env.BANNER_IMAGE_URL
 // stays decoupled from the regular call-alert banner.
 //   A) Save image as LEADERBOARD_BANNER_URL.png in GitHub repo root, OR
 //   B) Set LEADERBOARD_BANNER_URL in Railway env to any public URL
-const LEADERBOARD_BANNER_URL = process.env.LEADERBOARD_BANNER_URL
-  ?? 'https://raw.githubusercontent.com/spfogles-web/caller-bot/main/LEADERBOARD_BANNER_URL.png';
+const LEADERBOARD_BANNER_URL = 'https://raw.githubusercontent.com/spfogels-web/caller-bot/main/LEADERBOARD_BANNER_URL.png';
 
 // ─── v8.0 Multi-Agent Config ──────────────────────────────────────────────────
 
