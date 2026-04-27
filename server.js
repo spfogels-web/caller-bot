@@ -7175,14 +7175,17 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
   setCors(res);
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
   try {
-    // Gather comprehensive performance data
+    // Gather LIFETIME performance data (every resolved call) so the AI sees
+    // full historical patterns, not just last-40 noise. Capped at 500 each
+    // to keep the prompt under Claude's context limit; the bot won't have
+    // 500 wins for a while anyway.
     const wins = dbInstance.prepare(`
       SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
              ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
              ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
              ca.launch_unique_buyer_ratio, ca.buy_velocity
       FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
-      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 40
+      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 500
     `).all();
     const losses = dbInstance.prepare(`
       SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
@@ -7190,23 +7193,64 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
              ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
              ca.launch_unique_buyer_ratio, ca.buy_velocity
       FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
-      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 40
+      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 500
     `).all();
     const recentAudit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 20`).all();
+    // Aggregate summary stats so Claude can spot patterns without parsing all 500 rows
+    const summary = (() => {
+      const safe = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
+      const avg = (arr, key) => {
+        const vals = arr.map(r => safe(r[key])).filter(v => v != null);
+        return vals.length ? +(vals.reduce((a,b)=>a+b,0) / vals.length).toFixed(2) : null;
+      };
+      return {
+        winRate:           wins.length + losses.length > 0
+                            ? Math.round(wins.length * 100 / (wins.length + losses.length)) : null,
+        avgWinPeak:        avg(wins,  'peak_multiple'),
+        avgLossPeak:       avg(losses,'peak_multiple'),
+        avgWinScore:       avg(wins,  'score_at_call'),
+        avgLossScore:      avg(losses,'score_at_call'),
+        avgWinMcap:        avg(wins,  'market_cap_at_call'),
+        avgLossMcap:       avg(losses,'market_cap_at_call'),
+        avgWinDevPct:      avg(wins,  'dev_wallet_pct'),
+        avgLossDevPct:     avg(losses,'dev_wallet_pct'),
+        avgWinTop10:       avg(wins,  'top10_holder_pct'),
+        avgLossTop10:      avg(losses,'top10_holder_pct'),
+        avgWinSnipers:     avg(wins,  'sniper_wallet_count'),
+        avgLossSnipers:    avg(losses,'sniper_wallet_count'),
+      };
+    })();
 
     const prompt = `You are the CONTROL STATION OPTIMIZER for Pulse Caller — a Solana micro-cap token sniper bot.
 
 ═══ USER'S TUNING TARGET ═══
 The user has set targetMultiplier = ${SCORING_CONFIG.targetMultiplier ?? 5}x.
-This is the ONLY knob you cannot change. Your job is to tune EVERY other
-knob so the bot catches more coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x peaks.
-Any coin that hits at least winPeakMultiple (${SCORING_CONFIG.winPeakMultiple ?? 2.5}x) still counts as a WIN —
-so you're looking for high-quality signal that points at big-run coins, not
-ways to filter to only the ones that already pumped.
+This is the ONLY knob you cannot change. Tune everything else so the bot
+catches more coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x peaks. Any coin that hits at least
+winPeakMultiple (${SCORING_CONFIG.winPeakMultiple ?? 2.5}x) still counts as a WIN.
 
-You have FULL AUTHORITY to change ANY parameter below EXCEPT targetMultiplier.
-No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL
-config systems to maximize the rate of coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x+.
+═══ OPERATING MODE: TRUST THE DATA ═══
+You have full authority to make whatever changes the data clearly
+supports — small tweaks OR major rebalances. Don't artificially
+constrain yourself. But every change must be grounded in a pattern
+you can articulate from the win/loss data below, not a guess.
+
+  - If the data clearly says a knob needs to move 30%+, move it.
+  - If it doesn't, leave it.
+  - Don't change a knob just to "do something" — every change costs
+    bot credibility if it backfires. Confidence and reasoning matter.
+
+═══ TUNING PRIORITIES (rug + momentum loss are ranked highest) ═══
+1. RUG REDUCTION — losses where peak_multiple < 0.7 or dev_wallet_pct
+   was high. What signal did losses share that wins didn't? Tighten
+   filters or raise penalties on that signal.
+2. MOMENTUM-LOSS REDUCTION — coins that hit 1.0-1.3x then died.
+   Buy_velocity, volume_velocity, sniper_count, holder distribution
+   patterns. Look for the difference between "fizzle" and "real run".
+3. WIN-RATE IMPROVEMENT generally.
+
+You have authority to change any knob below EXCEPT targetMultiplier.
+Make the changes that the lifetime win/loss data justifies.
 
 SAFETY BOUNDS (you MUST stay within these):
 - minScoreToPost: 35-60 (NEVER below 35 — too much spam)
@@ -7235,11 +7279,17 @@ ${JSON.stringify(TUNING_CONFIG, null, 2)}
 CURRENT AI CONFIG OVERRIDES:
 ${JSON.stringify(AI_CONFIG_OVERRIDES, null, 2)}
 
-WIN DATA (${wins.length} resolved wins):
-${JSON.stringify(wins.slice(0, 20), null, 1)}
+═══ AGGREGATE STATS (across full ${wins.length} wins + ${losses.length} losses) ═══
+${JSON.stringify(summary, null, 2)}
 
-LOSS DATA (${losses.length} resolved losses):
-${JSON.stringify(losses.slice(0, 20), null, 1)}
+(Use the aggregates first to spot patterns. Drill into individual rows
+below only if you need to verify a specific signal hypothesis.)
+
+WIN DATA (showing 30 of ${wins.length} resolved wins):
+${JSON.stringify(wins.slice(0, 30), null, 1)}
+
+LOSS DATA (showing 30 of ${losses.length} resolved losses):
+${JSON.stringify(losses.slice(0, 30), null, 1)}
 
 RECENT CHANGES (last 20 audit entries):
 ${JSON.stringify(recentAudit.slice(0, 10), null, 1)}
