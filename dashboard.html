@@ -3432,13 +3432,23 @@ body::before {
         </div>
 
         <!-- Rolling-window: last 50 calls -->
-        <div class="g5" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)">
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
           <div class="tile" style="border-color:rgba(24,255,255,0.25);background:rgba(24,255,255,0.04)"><div class="tile-label" style="color:#18ffff">LAST 50 CALLS</div><div class="tile-val" style="color:#18ffff" id="calls50Total">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls50Wins">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls50Losses">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls50WinDiff">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls50WinRate">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls50AvgPeak">—</div></div>
+        </div>
+
+        <!-- Bonding-curve stats: how many of our pre-bond calls actually graduated -->
+        <div class="g5" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(255,109,0,0.3);background:rgba(255,109,0,0.04)"><div class="tile-label" style="color:#ff6d00">🎯 BONDING (lifetime)</div><div class="tile-val" style="color:#ff6d00;font-size:11px" id="bondTitle">pre-bond → graduated</div></div>
+          <div class="tile"><div class="tile-label">PRE-BOND CALLS</div><div class="tile-val" id="bondPreBond">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">7D BOND RATE</div><div class="tile-val" style="color:var(--cyan)" id="bondRate7d">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--purple)">POST-MIGRATION</div><div class="tile-val" style="color:var(--purple)" id="bondAlreadyMig">—</div></div>
         </div>
 
         <!-- ═══ 🔥 PROMOTED (scanner's top picks — awaiting full decision) ═══ -->
@@ -13658,6 +13668,18 @@ async function loadCallsTab(){
   };
   renderWindow(sortedByTime.slice(0, 20), 'calls20');
   renderWindow(sortedByTime.slice(0, 50), 'calls50');
+
+  // Bond-rate row (pump.fun graduation tracking)
+  fetch('/api/calls/bond-stats').then(r => r.json()).then(d => {
+    if (!d?.ok) return;
+    const lt = d.stats?.lifetime || {};
+    const w7 = d.stats?.last7d || {};
+    setText('bondPreBond',     (lt.preBondCalls || 0).toLocaleString());
+    setText('bondGraduated',   (lt.bonded || 0).toLocaleString());
+    setText('bondRate',        lt.bondRate != null ? lt.bondRate + '%' : '—');
+    setText('bondRate7d',      w7.bondRate != null ? w7.bondRate + '%' : '—');
+    setText('bondAlreadyMig',  (lt.alreadyMigrated || 0).toLocaleString());
+  }).catch(() => {});
 
   renderCallsFeed();
 }

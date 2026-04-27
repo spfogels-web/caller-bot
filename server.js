@@ -5525,6 +5525,10 @@ async function processCandidate(candidate, isRescan = false) {
         liquidity:       enrichedCandidate.liquidity,
         called_at:       new Date().toISOString(),
         holderAddresses: earlyHoldersForCall,
+        // Bonding-curve snapshot (pump.fun lifecycle) — populated by enricher.
+        // Lets us measure "called pre-bond → did it bond?" rate later.
+        bondingPctAtCall:    enrichedCandidate.pumpFunBondingPct ?? null,
+        pumpFunStageAtCall:  enrichedCandidate.pumpFunStage      ?? null,
       });
 
       logEvent('INFO', 'AUTO_POST', `${enrichedCandidate.token} score=${scoreResult.score}`);
@@ -5820,6 +5824,26 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
       `⚠️ <b>DATA LIMITED</b> — coin is too fresh; Birdeye/DexScreener haven't indexed yet. Numbers may be incomplete. Signal trusted on wallet conviction alone.\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       basePart;
+  }
+
+  // Append a Bonding line right under the caption header when we have
+  // pump.fun lifecycle data. Lets every reader instantly see if this is
+  // a pre-bond entry (early — bigger upside if it graduates) or a
+  // post-migration call (already on Raydium — different risk profile).
+  const pfStage = candidate.pumpFunStage;
+  const pfPct   = candidate.pumpFunBondingPct;
+  if (pfStage === 'PRE_BOND' && pfPct != null) {
+    const bar = (() => {
+      const filled = Math.round((pfPct / 100) * 10);
+      return '🟩'.repeat(Math.max(0, filled)) + '⬜'.repeat(Math.max(0, 10 - filled));
+    })();
+    const bondLine =
+      `🎯 <b>PRE-BOND ENTRY</b> · ${pfPct.toFixed(1)}% to graduation\n` +
+      `${bar}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n`;
+    basePart = bondLine + basePart;
+  } else if (pfStage === 'MIGRATED' || candidate.pumpFunMigrated) {
+    basePart = `🎓 <b>POST-MIGRATION</b> · graduated to Raydium\n━━━━━━━━━━━━━━━━━━━━━\n` + basePart;
   }
 
   // Append OpenAI layer if available
@@ -12524,6 +12548,21 @@ app.get('/api/v8/learning-stats', (req, res) => {
   res.json({ ok: true, ...getLearningStats(dbInstance) });
 });
 
+// Bond rate stat — what % of our pre-bond calls actually graduated to Raydium
+app.get('/api/calls/bond-stats', async (req, res) => {
+  setCors(res);
+  try {
+    const { getBondRateStats, getBondingTrackerStats } = await import('./bonding-tracker.js');
+    res.json({
+      ok: true,
+      stats:   getBondRateStats(dbInstance),
+      tracker: getBondingTrackerStats(),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Manually trigger the learning loop — detects missed winners + asks
 // Claude to write scoring recommendations. Normally runs every 6h, but
 // fresh instances / users hitting the Analytics tab want feedback NOW.
@@ -14096,6 +14135,14 @@ app.listen(PORT, async () => {
   setInterval(() => {
     processSmartMoneyRetries().catch(err => console.warn('[sm-retry] tick err:', err.message));
   }, 30_000);
+
+  // Bonding-curve tracker — every 15min, re-checks any pre-bond calls
+  // and marks them bonded_at / bonded_mcap when pump.fun reports complete.
+  // Powers the Bond Rate stat on the Calls page.
+  try {
+    const { startBondingTracker } = await import('./bonding-tracker.js');
+    startBondingTracker(dbInstance);
+  } catch (err) { console.warn('[bonding-tracker] failed to start:', err.message); }
 
   // Group-leaderboard peak refresher — every 5min, walks ~60 oldest
   // user_calls rows and updates peak_mcap / peak_multiple via DexScreener.

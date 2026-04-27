@@ -462,6 +462,17 @@ function runMigrations() {
     `ALTER TABLE candidates ADD COLUMN scored_at_ms INTEGER`,
     `ALTER TABLE candidates ADD COLUMN posted_at_ms INTEGER`,
     `ALTER TABLE scanner_feed ADD COLUMN detected_at_ms INTEGER`,
+    // ── Pump.fun bonding-curve tracking ──
+    // Snapshot of bonding state at the moment we made the call so we can
+    // measure "called pre-bond → did it bond?" rates over time. Filled in
+    // by processCandidate when the call fires; bonded_at + bonded_mcap get
+    // updated by the background bonding-tracker once graduation completes.
+    `ALTER TABLE calls ADD COLUMN bonding_pct_at_call REAL`,
+    `ALTER TABLE calls ADD COLUMN pump_fun_stage_at_call TEXT`,
+    `ALTER TABLE calls ADD COLUMN bonded_at TEXT`,
+    `ALTER TABLE calls ADD COLUMN bonded_mcap REAL`,
+    `CREATE INDEX IF NOT EXISTS idx_calls_pump_stage ON calls(pump_fun_stage_at_call)`,
+    `CREATE INDEX IF NOT EXISTS idx_calls_bonded ON calls(bonded_at)`,
     // ── Momentum tracker: track rapid price/volume spikes on active candidates ──
     `CREATE TABLE IF NOT EXISTS momentum_snapshots (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1078,14 +1089,16 @@ export function insertCall(data) {
       setup_type_at_call, structure_grade_at_call,
       price_at_call, market_cap_at_call, liquidity_at_call,
       regime_at_call, outcome,
-      bot_source, sltp, called_at, early_holders
+      bot_source, sltp, called_at, early_holders,
+      bonding_pct_at_call, pump_fun_stage_at_call
     ) VALUES (
       @candidate_id, @token, @contract_address, @chain,
       @score_at_call, @sub_scores_at_call, @risk_at_call,
       @setup_type_at_call, @structure_grade_at_call,
       @price_at_call, @market_cap_at_call, @liquidity_at_call,
       @regime_at_call, 'PENDING',
-      @bot_source, @sltp, @called_at, @early_holders
+      @bot_source, @sltp, @called_at, @early_holders,
+      @bonding_pct_at_call, @pump_fun_stage_at_call
     )
   `);
 
@@ -1114,6 +1127,8 @@ export function insertCall(data) {
     sltp:                    sltpStr,
     called_at:               data.called_at                ?? new Date().toISOString(),
     early_holders:           earlyHoldersJson,
+    bonding_pct_at_call:     data.bondingPctAtCall         ?? null,
+    pump_fun_stage_at_call:  data.pumpFunStageAtCall       ?? null,
   });
 
   return result.lastInsertRowid;

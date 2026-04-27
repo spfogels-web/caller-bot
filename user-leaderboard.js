@@ -515,23 +515,26 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   const buys1h      = pair.txns?.h1?.buys  ?? 0;
   const sells1h     = pair.txns?.h1?.sells ?? 0;
   const vol24h      = pair.volume?.h24;
-  // Image URL: prefer DexScreener's pair.info.imageUrl, then Helius DAS
-  // metadata, then pump.fun's API (catches fresh pump.fun coins that
-  // DexScreener hasn't crawled yet — by far the most common miss).
+  // Image URL + bonding metadata: prefer DexScreener's pair.info.imageUrl,
+  // then Helius DAS metadata, then pump.fun's API (catches fresh pump.fun
+  // coins that DexScreener hasn't crawled yet — by far the most common
+  // miss). Same pump.fun call also surfaces bonding curve progress for
+  // the Bonding section below.
   let imageUrl = pair.info?.imageUrl || heliusMeta?.content?.links?.image || null;
-  if (!imageUrl) {
-    try {
-      const pf = await fetch(`https://frontend-api.pump.fun/coins/${ca}`, {
-        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (pf.ok) {
-        const pj = await pf.json();
-        const u = pj?.image_uri || pj?.image || null;
+  let pfData = null;
+  try {
+    const pf = await fetch(`https://frontend-api.pump.fun/coins/${ca}`, {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (pf.ok) {
+      pfData = await pf.json();
+      if (!imageUrl) {
+        const u = pfData?.image_uri || pfData?.image || null;
         if (u && /^https?:/.test(u)) imageUrl = u;
       }
-    } catch { /* skip */ }
-  }
+    }
+  } catch { /* skip — coin may not be on pump.fun */ }
   // Fourth fallback — DexScreener serves a generic token-icon CDN that often
   // works even when pair.info.imageUrl is null. Last-ditch before going text-only.
   if (!imageUrl) {
@@ -593,6 +596,33 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   })();
   if (changeRow) lines.push(`┣ ${changeRow}`);
   if (buys1h || sells1h) lines.push(`┗ 1H Txns: 🟢 ${buys1h} 🔴 ${sells1h}`);
+
+  // Bonding curve (pump.fun lifecycle) — only render when we got pump.fun
+  // data back, since most non-pump.fun launches won't have this. Shows the
+  // % toward graduation for PRE_BOND coins, "MIGRATED" status for graduates,
+  // and the King-of-the-Hill flag if applicable.
+  if (pfData) {
+    const usdMc       = Number(pfData.usd_market_cap ?? 0);
+    const isComplete  = pfData.complete === true;
+    const bondingPct  = !isComplete && usdMc > 0 ? Math.min(100, (usdMc / 69_000) * 100) : (isComplete ? 100 : null);
+    const replyCount  = pfData.reply_count ?? 0;
+    const isKOTH      = !!pfData.king_of_the_hill_timestamp;
+    lines.push('');
+    lines.push(`🎯 <b>Bonding</b>`);
+    if (isComplete) {
+      lines.push(`┣ Status: ✅ <b>MIGRATED</b> to Raydium`);
+      lines.push(`┗ Replies: ${replyCount}${isKOTH ? ' · 👑 KOTH' : ''}`);
+    } else if (bondingPct != null) {
+      const bar = (() => {
+        const filled = Math.round((bondingPct / 100) * 12);
+        return '🟩'.repeat(filled) + '⬜'.repeat(12 - filled);
+      })();
+      lines.push(`┣ Status: 🟠 <b>PRE-BOND</b> (${bondingPct.toFixed(1)}%)`);
+      lines.push(`┣ ${bar}`);
+      lines.push(`┣ Goal: $${(usdMc / 1000).toFixed(1)}K / $69K`);
+      lines.push(`┗ Replies: ${replyCount}${isKOTH ? ' · 👑 KOTH' : ''}`);
+    }
+  }
 
   // Security
   lines.push('');
