@@ -418,12 +418,13 @@ function fmtPriceSub(price) {
  *   { caption, imageUrl } where imageUrl may be null.
  *   Caller decides whether to sendPhoto or sendMessage.
  *
- *   db          — better-sqlite3 instance (for Pulse-score lookup in candidates table)
+ *   db          — better-sqlite3 instance (for Pulse-score + caller-stats lookups)
  *   ca          — the contract address
  *   heliusKey   — process.env.HELIUS_API_KEY
  *   escapeHtml  — server.js's escapeHtml fn (passed in to avoid circular import)
+ *   postedBy    — optional { userId, username, firstName } for the "Called by" footer
  */
-export async function buildCACard(db, ca, heliusKey, escapeHtml) {
+export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null) {
   if (!ca) return null;
   const safe = (s) => escapeHtml ? escapeHtml(String(s)) : String(s).replace(/[<>&]/g, '');
 
@@ -523,59 +524,115 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml) {
   const mintRevoked = !auth.some(a => (a.scopes || []).includes('full'));
   const isFrozen    = heliusMeta?.ownership?.frozen === true;
 
-  // ── Compose caption (Phanes-style with tree borders) ──
+  // Caller stats (the "Called by" footer) — pulled from user_calls aggregate
+  let callerStats = null;
+  if (postedBy?.userId) {
+    try {
+      const row = db.prepare(`
+        SELECT
+          COUNT(*) AS calls,
+          SUM(CASE WHEN peak_multiple >= 2 THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN peak_multiple IS NOT NULL AND peak_multiple < 1 THEN 1 ELSE 0 END) AS losses,
+          ROUND(MAX(peak_multiple), 2) AS best
+        FROM user_calls WHERE user_id = ?
+      `).get(String(postedBy.userId));
+      if (row && row.calls) {
+        const resolved = (row.wins ?? 0) + (row.losses ?? 0);
+        callerStats = {
+          calls:    row.calls,
+          winRate:  resolved > 0 ? Math.round((row.wins / resolved) * 100) : null,
+          best:     row.best,
+        };
+      }
+    } catch {}
+  }
+
+  // ── Compose caption (Phanes-style sectioned layout) ──
   const lines = [];
-  lines.push(`🪙 <b>${safe(token)}</b>${name ? ' <i>(' + safe(name).slice(0, 28) + ')</i>' : ''}`);
-  lines.push(`<code>${safe(ca)}</code>`);
-  lines.push(`#SOL · 🌱 ${fmtAge(ageMs)}`);
+  // Header: ✅ Call for TokenName ($TICKER) | 🟣 SOL
+  lines.push(`✅ <b>Call for</b> <b>${name ? safe(name).slice(0, 28) : safe(token)}</b> ($<b>${safe(token)}</b>)  |  🟣 <b>SOL</b>`);
+  lines.push(`💰 <code>${safe(ca)}</code>`);
   lines.push('');
-  lines.push(`📊 <b>Stats</b>`);
-  if (price)        lines.push(`┃ USD   ${fmtPriceSub(price)} <i>(${fmtPct(change24h)})</i>`);
-  if (mcap != null) lines.push(`┃ MC    <b>${fmtMcap(mcap)}</b>`);
-  if (vol24h != null) lines.push(`┃ Vol   ${fmtMcap(vol24h)}`);
-  if (liq  != null) lines.push(`┃ LP    ${fmtMcap(liq)}`);
-  if (totalSupply)  lines.push(`┃ Sup   ${fmtSupply(totalSupply)}`);
-  if (buys1h || sells1h) lines.push(`┃ 1H    ${fmtPct(change1h)}  🟢 ${buys1h}  🔴 ${sells1h}`);
-  // ATH guesstimate from 24h high inferred via change % (best-effort)
-  if (mcap != null && change24h != null && change24h < 0) {
-    const ath = mcap / (1 + change24h / 100);
-    lines.push(`┗ ATH   ${fmtMcap(ath)} <i>(${fmtPct(change24h)} from peak)</i>`);
-  }
 
-  if (websites.length || socials.length) {
-    lines.push('');
-    lines.push(`🔗 <b>Socials</b>`);
-    const links = [];
-    for (const s of socials) {
-      if (s.url) links.push(`<a href="${s.url}">${safe(s.type || 'Link')}</a>`);
-    }
-    for (const w of websites.slice(0, 2)) {
-      if (w.url) links.push(`<a href="${w.url}">Web</a>`);
-    }
-    if (links.length) lines.push(`┗ ${links.join(' · ')}`);
-  }
+  // Stats — full Phanes-style with all granular fields
+  lines.push(`📈 <b>Stats</b>`);
+  if (price != null && Number.isFinite(price)) lines.push(`┣ Price: ${fmtPriceSub(price)}`);
+  if (mcap   != null) lines.push(`┣ MC: <b>${fmtMcap(mcap)}</b>`);
+  if (liq    != null) lines.push(`┣ LP: ${fmtMcap(liq)}`);
+  if (vol24h != null) lines.push(`┣ Vol: ${fmtMcap(vol24h)} · Age: ${fmtAge(ageMs)}`);
+  // 5m / 1h / 24h price changes with colored circles
+  const changeRow = (() => {
+    const fmt = (lbl, p) => {
+      if (p == null) return null;
+      const dot = p > 0 ? '🟢' : p < 0 ? '🔴' : '⚪';
+      return `${lbl}: ${fmtPct(p, 0)} ${dot}`;
+    };
+    const parts = [fmt('5M', pair.priceChange?.m5), fmt('1H', change1h), fmt('24H', change24h)].filter(Boolean);
+    return parts.join(' | ');
+  })();
+  if (changeRow) lines.push(`┣ ${changeRow}`);
+  if (buys1h || sells1h) lines.push(`┗ 1H Txns: 🟢 ${buys1h} 🔴 ${sells1h}`);
 
+  // Security
   lines.push('');
   lines.push(`🔒 <b>Security</b>`);
-  if (top10Pct != null) lines.push(`┃ Top 10  ${top10Pct.toFixed(1)}%`);
-  lines.push(`┃ Mint    ${mintRevoked ? '✓ revoked' : '⚠️ active'}`);
-  lines.push(`┗ Freeze  ${isFrozen ? '⚠️ frozen!' : '✓ none'}`);
+  lines.push(`┣ Renounced: ${mintRevoked ? '⚪ Mint 🟢 Freeze 🟢' : 'Mint 🔴 Freeze ' + (isFrozen ? '🔴' : '🟢')}`);
+  if (top10Pct != null) lines.push(`┣ Top 10: ${top10Pct.toFixed(1)}%${totalSupply ? ` · Sup: ${fmtSupply(totalSupply)}` : ''}`);
+  lines.push(`┗ DEX Paid: ${pair.boosts?.active > 0 ? '🟢' : '⚪'}`);
 
+  // Links
+  if (websites.length || socials.length) {
+    lines.push('');
+    lines.push(`🔗 <b>Links</b>`);
+    const linkRow = [];
+    for (const w of websites.slice(0, 2)) if (w.url) linkRow.push(`🌐 <a href="${w.url}">Web</a>`);
+    for (const s of socials) {
+      if (s.url) {
+        const t = (s.type || '').toLowerCase();
+        const ic = t.includes('twitter') || t === 'x' ? '🐦' : t.includes('telegram') ? '💬' : '🔗';
+        linkRow.push(`${ic} <a href="${s.url}">${safe(s.type || 'Link')}</a>`);
+      }
+    }
+    if (linkRow.length) lines.push(`┗ ${linkRow.join(' | ')}`);
+  }
+
+  // Charts row — clickable links to popular Solana chart/trade UIs
+  lines.push('');
+  lines.push(`📊 <b>Charts</b>`);
+  lines.push(`┗ <a href="https://dexscreener.com/solana/${ca}">DS</a> | <a href="https://www.dextools.io/app/en/solana/pair-explorer/${ca}">DT</a> | <a href="https://photon-sol.tinyastro.io/en/lp/${ca}">PHO</a> | <a href="https://gmgn.ai/sol/token/${ca}">GMG</a> | <a href="https://birdeye.so/token/${ca}?chain=solana">BIRD</a>`);
+
+  // Pulse score (highlighted — our edge over Phanes)
   if (pulseAnalysis?.composite_score != null) {
     lines.push('');
     const s = pulseAnalysis.composite_score;
     const dec = pulseAnalysis.final_decision || '?';
     const setup = pulseAnalysis.setup_type ? ` · ${safe(pulseAnalysis.setup_type)}` : '';
-    lines.push(`🧠 <b>Pulse: ${s}/100</b> · ${safe(dec)}${setup}`);
+    lines.push(`🧠 <b>Pulse Score: ${s}/100</b> · ${safe(dec)}${setup}`);
   }
 
-  // Quick link bar
-  const dexLink     = pair.url || `https://dexscreener.com/solana/${ca}`;
-  const pumpLink    = `https://pump.fun/coin/${ca}`;
-  const birdLink    = `https://birdeye.so/token/${ca}?chain=solana`;
-  const solscanLink = `https://solscan.io/token/${ca}`;
-  lines.push('');
-  lines.push(`<a href="${dexLink}">DEX</a> · <a href="${birdLink}">BIRD</a> · <a href="${pumpLink}">PUMP</a> · <a href="${solscanLink}">SCAN</a>`);
+  // Called-by footer with caller stats + clickable Profile link
+  if (postedBy?.userId) {
+    const callerName = postedBy.username
+      ? '@' + safe(postedBy.username)
+      : safe(postedBy.firstName || 'anon');
+    const isPulse = String(postedBy.userId) === PULSE_USER_ID;
+    const profileLink = isPulse
+      ? null
+      : (/^\d+$/.test(String(postedBy.userId))
+          ? `<a href="tg://user?id=${postedBy.userId}">Profile</a>`
+          : null);
+    lines.push('');
+    lines.push(`👤 <b>Called by</b> ${isPulse ? '⚡ <b>Pulse</b>' : callerName}`);
+    if (callerStats) {
+      const wr = callerStats.winRate != null ? callerStats.winRate + '%' : '—';
+      const best = callerStats.best != null ? callerStats.best.toFixed(2) + 'x' : '—';
+      lines.push(`┣ 🎯 Win Rate: <b>${wr}</b> · 📈 Best: <b>${best}</b>`);
+      lines.push(`┣ 📞 Calls: <b>${callerStats.calls}</b>`);
+    } else {
+      lines.push(`┣ <i>First call from this user</i>`);
+    }
+    if (profileLink) lines.push(`┗ ${profileLink}`);
+  }
 
   return { caption: lines.join('\n'), imageUrl };
 }

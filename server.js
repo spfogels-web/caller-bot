@@ -3286,14 +3286,17 @@ async function renderGroupLeaderboardMessage(timeframe) {
     calls.forEach((c, i) => {
       const isPulse = c.user_id === PULSE_USER_ID;
       const nameText = escapeHtml(c.display_name || 'anon').slice(0, 18);
-      // Wrap human users in tg://user?id=ID link → tap opens their profile.
-      // Pulse stays plain (no Telegram user behind it).
+      // Tap-the-name → opens Telegram user profile. Tap-the-token →
+      // DexScreener page for the coin. Pulse stays as plain text.
       const caller  = isPulse
         ? '⚡<b>Pulse</b>'
         : (/^\d+$/.test(c.user_id) ? `<a href="tg://user?id=${c.user_id}">${nameText}</a>` : nameText);
-      const token   = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
+      const tokenLabel = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
+      const tokenLink  = c.contract_address
+        ? `<a href="https://dexscreener.com/solana/${c.contract_address}">${tokenLabel}</a>`
+        : tokenLabel;
       const mult    = c.peak_multiple != null ? ` <b>[${c.peak_multiple.toFixed(2)}x]</b>` : '';
-      msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${token}</b> » ${caller}${mult}\n`;
+      msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${tokenLink}</b> » ${caller}${mult}\n`;
     });
     msg += `</blockquote>`;
   }
@@ -3459,7 +3462,10 @@ function renderPulseLeaderboardMessage(timeframe) {
   } else {
     msg += `<blockquote>`;
     top.slice(0, 15).forEach((c, i) => {
-      const tok = escapeHtml(c.token || '?').slice(0, 14);
+      const tokLabel = escapeHtml(c.token || '?').slice(0, 14);
+      const tok = c.contract_address
+        ? `<a href="https://dexscreener.com/solana/${c.contract_address}">${tokLabel}</a>`
+        : tokLabel;
       msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${tok}</b>  ${c.peak_multiple.toFixed(2)}x  <i>(${fmtMc(c.market_cap_at_call)} → ${fmtMc(c.peak_mcap)})</i>\n`;
     });
     msg += `</blockquote>`;
@@ -12318,7 +12324,11 @@ app.post('/webhook', async (req, res) => {
           if (ca.length < 32 || ca.length > 44) continue;
           // Build the Phanes-style card (also fetches DexScreener data
           // we'll reuse as the source of truth for the mcap snapshot).
-          const built = await buildCACard(dbInstance, ca, process.env.HELIUS_API_KEY, escapeHtml);
+          const built = await buildCACard(dbInstance, ca, process.env.HELIUS_API_KEY, escapeHtml, {
+            userId:    String(message.from.id),
+            username:  message.from.username || null,
+            firstName: message.from.first_name || null,
+          });
           if (!built) continue;
           const { caption, imageUrl } = built;
           // Re-pull mcap+token for the user_calls record (small extra hit)
