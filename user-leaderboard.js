@@ -137,6 +137,79 @@ const TIMEFRAME_MAP = {
   'all': "-100 years",
 };
 
+// Top calls (per CA, per caller) ranked by peak multiple — Phanes-style.
+export function getTopCalls(db, timeframe = '1d', limit = 10) {
+  const cutoff = TIMEFRAME_MAP[timeframe] || TIMEFRAME_MAP['7d'];
+  try {
+    return db.prepare(`
+      SELECT
+        user_id,
+        COALESCE(username, first_name, user_id) AS display_name,
+        token,
+        contract_address,
+        peak_multiple,
+        mcap_at_call,
+        peak_mcap,
+        called_at
+      FROM user_calls
+      WHERE called_at > datetime('now', ?)
+        AND peak_multiple IS NOT NULL
+      ORDER BY peak_multiple DESC
+      LIMIT ?
+    `).all(cutoff, limit);
+  } catch (err) {
+    console.warn('[user-lb] top calls query:', err.message);
+    return [];
+  }
+}
+
+// Group stats — calls, hit rate, median return, total/avg return.
+export function getRichGroupStats(db, timeframe = '1d') {
+  const cutoff = TIMEFRAME_MAP[timeframe] || TIMEFRAME_MAP['7d'];
+  try {
+    const head = db.prepare(`
+      SELECT
+        COUNT(*) AS calls,
+        COUNT(DISTINCT user_id) AS users,
+        SUM(CASE WHEN peak_multiple >= 2 THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN peak_multiple IS NOT NULL AND peak_multiple < 1 THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN peak_multiple IS NULL THEN 1 ELSE 0 END) AS pending,
+        ROUND(AVG(peak_multiple), 2) AS avg_multiple,
+        ROUND(MAX(peak_multiple), 2) AS best_multiple,
+        ROUND(SUM(peak_multiple), 2) AS total_x
+      FROM user_calls
+      WHERE called_at > datetime('now', ?)
+    `).get(cutoff);
+
+    // Median across resolved peaks
+    let median = null;
+    try {
+      const resolved = db.prepare(`
+        SELECT peak_multiple FROM user_calls
+        WHERE called_at > datetime('now', ?) AND peak_multiple IS NOT NULL
+        ORDER BY peak_multiple ASC
+      `).all(cutoff).map(r => r.peak_multiple);
+      if (resolved.length) {
+        const mid = Math.floor(resolved.length / 2);
+        median = resolved.length % 2 === 0
+          ? (resolved[mid - 1] + resolved[mid]) / 2
+          : resolved[mid];
+      }
+    } catch {}
+
+    const resolvedCount = (head?.wins ?? 0) + (head?.losses ?? 0);
+    const hit_rate = resolvedCount > 0 ? Math.round((head.wins / resolvedCount) * 100) : null;
+    return {
+      ...head,
+      median:   median != null ? +median.toFixed(2) : null,
+      hit_rate,
+    };
+  } catch (err) {
+    console.warn('[user-lb] rich stats:', err.message);
+    return {};
+  }
+}
+
 export function getGroupLeaderboard(db, timeframe = '7d') {
   const cutoff = TIMEFRAME_MAP[timeframe] || TIMEFRAME_MAP['7d'];
   try {

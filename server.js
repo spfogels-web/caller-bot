@@ -2266,8 +2266,8 @@ function buildHelpMessage() {
     `<code>/why [CA]</code> — Why was this called/skipped?\n\n` +
     `<b>📈 BOT INTEL</b>\n` +
     `<code>/top</code> — Best recent calls\n` +
-    `<code>/leaderboard [24h|7d|30d|all]</code> — Pulse's top calls\n` +
-    `<code>/grouplb [24h|7d|30d|all]</code> — Group ranking (everyone who drops CAs, incl. Pulse)\n` +
+    `<code>/lb [24h|7d|30d|all]</code> — Group leaderboard (everyone, incl. Pulse)\n` +
+    `<code>/pulselb [24h|7d|30d|all]</code> — Pulse's own top calls\n` +
     `<code>/regime</code> — Current market regime\n` +
     `<code>/stats</code> — Bot performance stats\n` +
     `<code>/calls</code> — Last 5 group calls\n` +
@@ -3013,40 +3013,49 @@ async function handleAlertCommand(chatId, args, fromUserId, username) {
 }
 
 // ─── /leaderboard — top calls (Hall of Fame) ─────────────────────────────────
-// /grouplb — Phanes-style ranking of every user (incl. Pulse) who's
-// dropped a CA in the group, by best multiple + win rate over the window.
+// /lb — Phanes-style group leaderboard. Per-call ranking (token » caller
+// [multiple]) with group stats header. Includes Pulse alongside humans.
 async function handleGroupLeaderboardCommand(chatId, args) {
-  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
-  const tf = (args || '').trim().toLowerCase() || '7d';
-  const valid = ['24h', '7d', '30d', 'all'];
-  const timeframe = valid.includes(tf) ? tf : '7d';
-  const tfLabel = { '24h': 'LAST 24H', '7d': 'LAST 7 DAYS', '30d': 'LAST 30 DAYS', 'all': 'ALL TIME' }[timeframe];
+  const tf = (args || '').trim().toLowerCase() || '1d';
+  const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', '2w': '7d', 'all': 'all' };
+  const timeframe = aliasMap[tf] || '24h';
+  const tfLabel = { '24h': '1d', '7d': '7d', '30d': '30d', 'all': 'all' }[timeframe];
 
-  const { getGroupLeaderboard, getGroupStats, PULSE_USER_ID } = await import('./user-leaderboard.js');
-  const rows  = getGroupLeaderboard(dbInstance, timeframe);
-  const stats = getGroupStats(dbInstance, timeframe);
+  const { getTopCalls, getRichGroupStats, PULSE_USER_ID } = await import('./user-leaderboard.js');
+  const stats = getRichGroupStats(dbInstance, timeframe);
+  const calls = getTopCalls(dbInstance, timeframe, 10);
 
-  let msg = `🏅 <b>GROUP LEADERBOARD — ${tfLabel}</b>\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `<b>Active users:</b> ${stats.users || 0}  ·  <b>Calls:</b> ${stats.calls || 0}\n` +
-            `<b>Wins:</b> ${stats.wins || 0}  ·  <b>Losses:</b> ${stats.losses || 0}\n` +
-            `<b>Best:</b> ${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '?'}  ·  <b>Avg:</b> ${stats.avg_multiple != null ? stats.avg_multiple.toFixed(2) + 'x' : '?'}\n\n`;
+  // Emoji rank by multiple
+  const emojiFor = (mult) => {
+    if (mult == null)    return '🤔';
+    if (mult >= 5)       return '🚀';
+    if (mult >= 3)       return '🤩';
+    if (mult >= 1.5)     return '😎';
+    if (mult >= 1)       return '🙂';
+    return '😞';
+  };
 
-  if (rows.length === 0) {
-    msg += `<i>No CA drops recorded yet for this window. Drop a CA in the group and wait for it to peak.</i>\n\n`;
+  let msg = `🏆 <b>Leaderboard</b>\n\n` +
+            `📊 <b>Group Stats</b>\n` +
+            `┃ Period   <b>${tfLabel}</b>\n` +
+            `┃ Calls    <b>${stats.calls || 0}</b>\n` +
+            `┃ Hit Rate <b>${stats.hit_rate != null ? stats.hit_rate + '%' : '—'}</b>\n` +
+            `┃ Median   <b>${stats.median != null ? stats.median.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Return   <b>${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '—'}</b> <i>(Avg: ${stats.avg_multiple != null ? stats.avg_multiple.toFixed(2) + 'x' : '—'})</i>\n\n`;
+
+  if (calls.length === 0) {
+    msg += `<i>No calls ranked yet for this window. Drop a CA in the group and wait for it to peak.</i>\n\n`;
     msg += `<i>Note: bot needs Privacy Mode OFF in @BotFather to see non-command messages.</i>`;
   } else {
-    msg += `<b>TOP ${rows.length}</b>\n`;
-    rows.forEach((r, i) => {
-      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}.`;
-      const isPulse = r.user_id === PULSE_USER_ID;
-      const name = isPulse ? '⚡ <b>Pulse</b>' : escapeHtml(r.display_name || 'anon').slice(0, 24);
-      const best = r.best_multiple != null ? r.best_multiple.toFixed(2) + 'x' : '—';
-      const hr   = r.hit_rate_pct != null ? r.hit_rate_pct + '%' : '—';
-      msg += `${medal} ${name}  —  best <b>${best}</b>  ·  hit ${hr}  ·  ${r.total_calls} call${r.total_calls === 1 ? '' : 's'}\n`;
+    calls.forEach((c, i) => {
+      const isPulse = c.user_id === PULSE_USER_ID;
+      const caller  = isPulse ? '⚡<b>Pulse</b>' : escapeHtml(c.display_name || 'anon').slice(0, 18);
+      const token   = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
+      const mult    = c.peak_multiple != null ? `[${c.peak_multiple.toFixed(2)}x]` : '';
+      msg += `${emojiFor(c.peak_multiple)} ${i+1}. <b>${token}</b> » ${caller} ${mult}\n`;
     });
   }
-  msg += `\n<i>Try: /grouplb 24h | 7d | 30d | all</i>`;
+  msg += `\n<i>/lb 24h | 7d | 30d | all</i>`;
   await sendTelegramMessage(chatId, msg);
 }
 
@@ -11827,8 +11836,12 @@ app.post('/webhook', async (req, res) => {
       case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/alert':       await handleAlertCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/alerts':      await handleAlertCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
-      case '/leaderboard': await handleLeaderboardCommand(chatId, args); break;
+      // Primary group leaderboard — /lb (alias /grouplb kept for back-compat)
+      case '/lb':          await handleGroupLeaderboardCommand(chatId, args); break;
       case '/grouplb':     await handleGroupLeaderboardCommand(chatId, args); break;
+      // Pulse's own call leaderboard — /pulselb (alias /leaderboard kept)
+      case '/pulselb':     await handleLeaderboardCommand(chatId, args); break;
+      case '/leaderboard': await handleLeaderboardCommand(chatId, args); break;
       default:
         if (!message.text || message.text.startsWith('/')) break;
         const lower = message.text.trim().toLowerCase();
