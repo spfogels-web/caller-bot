@@ -12261,15 +12261,39 @@ app.post('/webhook', async (req, res) => {
           signal: AbortSignal.timeout(5_000),
         });
       } catch {}
-      const [prefix, tf] = cbData.split(':');
-      if (!prefix || !tf || !msgRef?.chat?.id || !msgRef?.message_id) return;
+      const [prefix, arg] = cbData.split(':');
+      if (!prefix || !arg || !msgRef?.chat?.id || !msgRef?.message_id) return;
+
+      // pnl:<userId> → P&L card for the caller. Sends as a NEW message
+      // (not edit) so the original CA card stays intact and multiple users
+      // can each tap to see the caller's stats. Returns early.
+      if (prefix === 'pnl') {
+        try {
+          const { getUserProfileData, renderProfileCardHtml } = await import('./user-leaderboard.js');
+          const profile = getUserProfileData(dbInstance, arg);
+          const html = renderProfileCardHtml(profile, escapeHtml);
+          await fetch(`${TELEGRAM_API}/sendMessage`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id:    msgRef.chat.id,
+              text:       html,
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              reply_to_message_id: msgRef.message_id,
+            }),
+            signal: AbortSignal.timeout(8_000),
+          });
+        } catch (err) { console.warn('[pnl-card] err:', err.message); }
+        return;
+      }
+
       let newText, newMarkup;
       if (prefix === 'lb') {
-        newText   = await renderGroupLeaderboardMessage(tf);
-        newMarkup = buildLeaderboardKeyboard('lb', tf);
+        newText   = await renderGroupLeaderboardMessage(arg);
+        newMarkup = buildLeaderboardKeyboard('lb', arg);
       } else if (prefix === 'pulselb') {
-        newText   = renderPulseLeaderboardMessage(tf);
-        newMarkup = buildLeaderboardKeyboard('pulselb', tf);
+        newText   = renderPulseLeaderboardMessage(arg);
+        newMarkup = buildLeaderboardKeyboard('pulselb', arg);
       } else {
         return;
       }
@@ -12330,7 +12354,7 @@ app.post('/webhook', async (req, res) => {
             firstName: message.from.first_name || null,
           });
           if (!built) continue;
-          const { caption, imageUrl } = built;
+          const { caption, imageUrl, replyMarkup } = built;
           // Re-pull mcap+token for the user_calls record (small extra hit)
           let mcap = null, token = null;
           try {
@@ -12365,6 +12389,7 @@ app.post('/webhook', async (req, res) => {
                     caption: caption.slice(0, 1020),  // Telegram caption cap
                     parse_mode: 'HTML',
                     reply_to_message_id: message.message_id,
+                    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
                   }),
                   signal: AbortSignal.timeout(10_000),
                 });
@@ -12376,6 +12401,7 @@ app.post('/webhook', async (req, res) => {
                       chat_id: chatId, text: caption,
                       parse_mode: 'HTML', disable_web_page_preview: true,
                       reply_to_message_id: message.message_id,
+                      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
                     }),
                     signal: AbortSignal.timeout(8_000),
                   });
@@ -12387,6 +12413,7 @@ app.post('/webhook', async (req, res) => {
                     chat_id: chatId, text: caption,
                     parse_mode: 'HTML', disable_web_page_preview: true,
                     reply_to_message_id: message.message_id,
+                    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
                   }),
                   signal: AbortSignal.timeout(8_000),
                 });

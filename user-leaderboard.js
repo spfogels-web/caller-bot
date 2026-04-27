@@ -610,7 +610,9 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
     lines.push(`🧠 <b>Pulse Score: ${s}/100</b> · ${safe(dec)}${setup}`);
   }
 
-  // Called-by footer with caller stats + clickable Profile link
+  // Called-by footer with tier badge, win-rate emoji, stats + Profile link.
+  // Tier rules (call_count, win_rate combo) — easy to scan, encourages
+  // improvement, mirrors how Sect/Phanes badge their callers.
   if (postedBy?.userId) {
     const callerName = postedBy.username
       ? '@' + safe(postedBy.username)
@@ -621,20 +623,122 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
       : (/^\d+$/.test(String(postedBy.userId))
           ? `<a href="tg://user?id=${postedBy.userId}">Profile</a>`
           : null);
+
+    const tierFor = (calls, winRate) => {
+      if (isPulse) return { icon: '⚡', label: 'Bot' };
+      if (calls == null || calls < 4) return { icon: '🌱', label: 'Rookie' };
+      const wr = winRate ?? 0;
+      if (calls >= 50) {
+        if (wr >= 60) return { icon: '👑', label: 'Master' };
+        if (wr >= 40) return { icon: '🏆', label: 'Veteran' };
+        return { icon: '⚠️', label: 'Risky' };
+      }
+      if (calls >= 20) {
+        if (wr >= 40) return { icon: '💎', label: 'Pro' };
+        return { icon: '🎰', label: 'Degen' };
+      }
+      // 4–19 calls
+      if (wr >= 50) return { icon: '🎯', label: 'Sharpshooter' };
+      return { icon: '🎲', label: 'Gamble' };
+    };
+    const wrEmoji = (wr) => {
+      if (wr == null) return '';
+      if (wr >= 70) return ' 🔥';
+      if (wr >= 50) return ' ✨';
+      if (wr >= 30) return ' 💀';
+      return ' 📉';
+    };
+
     lines.push('');
     lines.push(`👤 <b>Called by</b> ${isPulse ? '⚡ <b>Pulse</b>' : callerName}`);
     if (callerStats) {
-      const wr = callerStats.winRate != null ? callerStats.winRate + '%' : '—';
-      const best = callerStats.best != null ? callerStats.best.toFixed(2) + 'x' : '—';
-      lines.push(`┣ 🎯 Win Rate: <b>${wr}</b> · 📈 Best: <b>${best}</b>`);
-      lines.push(`┣ 📞 Calls: <b>${callerStats.calls}</b>`);
+      const tier = tierFor(callerStats.calls, callerStats.winRate);
+      const wrTxt = callerStats.winRate != null
+        ? Number(callerStats.winRate).toFixed(2) + '%'
+        : '—';
+      lines.push(`┣ ${tier.icon} <b>${safe(tier.label)}</b>`);
+      lines.push(`┣ Win Rate: <b>${wrTxt}</b>${wrEmoji(callerStats.winRate)}`);
+      lines.push(`┣ Calls: <b>${callerStats.calls}</b>`);
     } else {
+      const tier = tierFor(0, null);
+      lines.push(`┣ ${tier.icon} <b>${safe(tier.label)}</b>`);
       lines.push(`┣ <i>First call from this user</i>`);
     }
     if (profileLink) lines.push(`┗ ${profileLink}`);
   }
 
-  return { caption: lines.join('\n'), imageUrl };
+  // Inline keyboard: tap "Get P&L Card" → callback fires user's profile.
+  // Only shown when we have a non-Pulse user_id we can route to.
+  let replyMarkup = null;
+  if (postedBy?.userId && String(postedBy.userId) !== PULSE_USER_ID) {
+    replyMarkup = {
+      inline_keyboard: [[
+        { text: '📊 Get P&L Card', callback_data: `pnl:${postedBy.userId}` },
+      ]],
+    };
+  } else if (postedBy?.userId === PULSE_USER_ID || String(postedBy?.userId) === PULSE_USER_ID) {
+    replyMarkup = {
+      inline_keyboard: [[
+        { text: '⚡ Pulse Stats', callback_data: `pnl:${PULSE_USER_ID}` },
+      ]],
+    };
+  }
+
+  return { caption: lines.join('\n'), imageUrl, replyMarkup };
+}
+
+/**
+ * Render a profile P&L card as HTML for inline keyboard callbacks.
+ * Mirrors the /profile command output. Pass `escapeHtml` from server.js.
+ */
+export function renderProfileCardHtml(profile, escapeHtml) {
+  const safe = (s) => escapeHtml ? escapeHtml(String(s)) : String(s).replace(/[<>&]/g, '');
+  if (!profile) {
+    return `<i>No call history yet for this user.</i>`;
+  }
+  const isPulse = profile.user_id === PULSE_USER_ID;
+  const headerName = isPulse
+    ? '⚡ <b>Pulse Caller</b>'
+    : `<b>${safe(profile.display_name || 'anon').slice(0, 24)}</b>`;
+  const emojiFor = (mult) => {
+    if (mult == null)    return '🤔';
+    if (mult >= 5)       return '🚀';
+    if (mult >= 3)       return '🤩';
+    if (mult >= 1.5)     return '😎';
+    if (mult >= 1)       return '🙂';
+    return '😞';
+  };
+  const fmtAgo = (ts) => {
+    if (!ts) return '?';
+    const ms = Date.now() - new Date(ts.includes('Z') ? ts : ts + 'Z').getTime();
+    if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
+    if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
+    if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + 'h ago';
+    return Math.floor(ms / 86_400_000) + 'd ago';
+  };
+  let msg = `📊 <b>P&L CARD</b> — ${headerName}\n\n` +
+            `📈 <b>All-Time Stats</b>\n` +
+            `┣ Calls       <b>${profile.calls}</b>\n` +
+            `┣ 🏆 Wins     <b>${profile.wins}</b>\n` +
+            `┣ 💀 Losses   <b>${profile.losses}</b>\n` +
+            `┣ ⏳ Pending  <b>${profile.pending}</b>\n` +
+            `┣ Win Rate    <b>${profile.hit_rate != null ? profile.hit_rate + '%' : '—'}</b>\n` +
+            `┣ Median      <b>${profile.median != null ? profile.median.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┣ Best        <b>${profile.best_multiple != null ? profile.best_multiple.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Avg         <b>${profile.avg_multiple != null ? profile.avg_multiple.toFixed(2) + 'x' : '—'}</b>\n\n`;
+  if (profile.recent && profile.recent.length > 0) {
+    msg += `🏆 <b>Recent Calls</b>\n<blockquote>`;
+    profile.recent.forEach((c) => {
+      const tokLabel = c.token ? safe(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
+      const tok = c.contract_address
+        ? `<a href="https://dexscreener.com/solana/${c.contract_address}">${tokLabel}</a>`
+        : tokLabel;
+      const mult = c.peak_multiple != null ? `<b>[${c.peak_multiple.toFixed(2)}x]</b>` : '<i>pending</i>';
+      msg += `${emojiFor(c.peak_multiple)} 🪙 <b>${tok}</b>  ${mult}  <i>${fmtAgo(c.called_at)}</i>\n`;
+    });
+    msg += `</blockquote>`;
+  }
+  return msg;
 }
 
 /**
