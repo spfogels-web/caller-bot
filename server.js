@@ -13325,20 +13325,19 @@ app.listen(PORT, async () => {
   }, 30_000);
 
   // ── AUTONOMOUS SELF-IMPROVEMENT LOOP ──────────────────────────────────
-  // Runs the agent + Control Station auto-optimize every 6 hours. Claude
+  // Runs the agent + Control Station auto-optimize once every 24 hours
+  // per user directive ("wait 24 hours before the next change"). Claude
   // analyzes recent wins/losses + missed winners, applies bounded knob
   // changes, persists them through logConfigChange so they show up in
-  // /api/config/audit. First run fires 2min after boot — fast enough that
-  // the user sees AI activity within minutes of a deploy. Wired here
-  // because it was previously defined but never scheduled (which is why
-  // /api/config/audit had zero claude/auto_optimize entries before today).
-  setTimeout(() => {
-    console.log('[self-improve] 🤖 boot+2min — kicking off first autonomous tuning cycle');
-    runSelfImproveLoop().catch(err => console.warn('[self-improve] boot tick err:', err.message));
-  }, 2 * 60_000);
+  // /api/config/audit.
+  //
+  // No boot-time auto-fire — first auto-cycle fires 24h after boot so
+  // the bot has a full day of fresh outcome data before Claude tunes.
+  // Operator can still trigger on-demand any time via
+  // POST /api/self-improve/run-now.
   setInterval(() => {
     runSelfImproveLoop().catch(err => console.warn('[self-improve] tick err:', err.message));
-  }, 6 * 3_600_000);
+  }, 24 * 3_600_000);
 
   setInterval(() => {
     try { updateRegime(getCandidates({ limit: 50 }).rows); } catch {}
