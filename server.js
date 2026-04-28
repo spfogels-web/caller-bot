@@ -165,6 +165,12 @@ const BANNER_IMAGE_URL = process.env.BANNER_IMAGE_URL
 // PulseCaller branding — set BANNER_IMAGE_URL in Railway to your banner URL
 // Recommended: upload banner.png to your GitHub repo root and it auto-uses it
 
+// SEPARATE banner used ONLY for /lb and /pulselb so the leaderboard art
+// stays decoupled from the regular call-alert banner.
+//   A) Save image as LEADERBOARD_BANNER_URL.png in GitHub repo root, OR
+//   B) Set LEADERBOARD_BANNER_URL in Railway env to any public URL
+const LEADERBOARD_BANNER_URL = 'https://raw.githubusercontent.com/spfogels-web/caller-bot/main/LEADERBOARD_BANNER_URL.png';
+
 // ─── v8.0 Multi-Agent Config ──────────────────────────────────────────────────
 
 const HELIUS_API_KEY  = process.env.HELIUS_API_KEY ?? null;
@@ -1263,6 +1269,44 @@ try {
     const { ensureMetaSignalsSchema } = await import('./meta-signals.js');
     ensureMetaSignalsSchema(dbInstance);
   } catch (err) { console.warn('[meta-signals] schema init:', err.message); }
+  // Ensure user-leaderboard schema (user_calls) — Phanes-style group ranking.
+  try {
+    const { ensureUserLeaderboardSchema } = await import('./user-leaderboard.js');
+    ensureUserLeaderboardSchema(dbInstance);
+  } catch (err) { console.warn('[user-lb] schema init:', err.message); }
+
+  // ── One-time backfill: synthesize reasons for any pre-existing NULL/empty
+  // audit rows so the AI Tuning Audit panel never displays "No reason
+  // recorded for this change." Idempotent — only runs once per kv_store flag.
+  try {
+    const flag = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='audit_reason_backfill_v1'`).get();
+    if (!flag) {
+      const rows = dbInstance.prepare(`
+        SELECT id, category, source, knob_key, old_value, new_value
+        FROM config_changes WHERE reason IS NULL OR reason = ''
+      `).all();
+      const upd = dbInstance.prepare(`UPDATE config_changes SET reason = ? WHERE id = ?`);
+      let n = 0;
+      for (const r of rows) {
+        const oldV = r.old_value ?? '∅';
+        const newV = r.new_value ?? '∅';
+        const direction = (() => {
+          const oN = Number(JSON.parse(r.old_value || 'null')), nN = Number(JSON.parse(r.new_value || 'null'));
+          if (Number.isFinite(oN) && Number.isFinite(nN)) { if (nN > oN) return 'raised'; if (nN < oN) return 'lowered'; }
+          return 'changed';
+        })();
+        const src = (r.source || 'operator');
+        const tag = src === 'claude' || src === 'auto_optimize' ? 'Auto-tuner'
+                  : src === 'operator' ? 'Manual operator'
+                  : `Source=${src}`;
+        const reason = `${tag} ${direction} ${r.knob_key} ${oldV} → ${newV} (legacy entry — pre-audit-reason migration)`;
+        upd.run(reason, r.id);
+        n++;
+      }
+      dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES ('audit_reason_backfill_v1', 'done', datetime('now'))`).run();
+      if (n > 0) console.log(`[boot] audit-reason-backfill: filled ${n} legacy rows`);
+    }
+  } catch (err) { console.warn('[boot] audit-reason-backfill failed:', err.message); }
   const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='ai_config_overrides'`).get();
   if (row?.value) {
     AI_CONFIG_OVERRIDES = JSON.parse(row.value);
@@ -1525,6 +1569,35 @@ function persistExtendedConfig(category) {
 // value type (number, string, boolean, array) round-trips cleanly.
 function logConfigChange(category, knobKey, oldValue, newValue, source = 'operator', reason = null) {
   try {
+    // Ensure every audit row has a meaningful reason. If the caller didn't
+    // provide one, synthesize a sensible default per source so the audit UI
+    // never shows "No reason recorded for this change." again.
+    const finalReason = reason && String(reason).trim()
+      ? reason
+      : (() => {
+          const oldStr = oldValue == null ? '∅' : JSON.stringify(oldValue);
+          const newStr = newValue == null ? '∅' : JSON.stringify(newValue);
+          const direction = (() => {
+            const oN = Number(oldValue), nN = Number(newValue);
+            if (Number.isFinite(oN) && Number.isFinite(nN)) {
+              if (nN > oN) return 'raised';
+              if (nN < oN) return 'lowered';
+            }
+            return 'changed';
+          })();
+          switch (source) {
+            case 'claude':
+            case 'auto_optimize':
+              return `Auto-tuner ${direction} ${knobKey} ${oldStr} → ${newStr} (no reasoning captured — Claude prompt should be re-checked)`;
+            case 'bot_a':
+            case 'bot_b':
+              return `Multi-bot agent ${direction} ${knobKey} ${oldStr} → ${newStr}`;
+            case 'operator':
+              return `Manual operator ${direction} ${knobKey} via dashboard from ${oldStr} to ${newStr}`;
+            default:
+              return `Source=${source} ${direction} ${knobKey} ${oldStr} → ${newStr}`;
+          }
+        })();
     dbInstance.prepare(`
       INSERT INTO config_changes (category, source, knob_key, old_value, new_value, reason)
       VALUES (?,?,?,?,?,?)
@@ -1534,7 +1607,7 @@ function logConfigChange(category, knobKey, oldValue, newValue, source = 'operat
       knobKey,
       oldValue == null ? null : JSON.stringify(oldValue),
       newValue == null ? null : JSON.stringify(newValue),
-      reason ?? null
+      finalReason
     );
   } catch (err) {
     console.warn(`[config-audit] log failed: ${err.message}`);
@@ -1983,6 +2056,7 @@ async function sendAdminAlert(text) {
 }
 
 let _bannerFileId = null;
+let _leaderboardBannerFileId = null;
 
 async function uploadBannerToTelegram() {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
@@ -2261,7 +2335,8 @@ function buildHelpMessage() {
     `<code>/why [CA]</code> — Why was this called/skipped?\n\n` +
     `<b>📈 BOT INTEL</b>\n` +
     `<code>/top</code> — Best recent calls\n` +
-    `<code>/leaderboard [24h|7d|30d|all]</code> — Hall of Fame top wins\n` +
+    `<code>/lb [24h|7d|30d|all]</code> — Group leaderboard (everyone, incl. Pulse)\n` +
+    `<code>/pulselb [24h|7d|30d|all]</code> — Pulse's own top calls\n` +
     `<code>/regime</code> — Current market regime\n` +
     `<code>/stats</code> — Bot performance stats\n` +
     `<code>/calls</code> — Last 5 group calls\n` +
@@ -2274,7 +2349,12 @@ function buildHelpMessage() {
     `<code>/alert [CA] [target]</code> — DM alert when target hit\n` +
     `   <i>Examples: <code>/alert &lt;CA&gt; 100k</code> or <code>/alert &lt;CA&gt; 5x</code></i>\n` +
     `<code>/alerts</code> — Your active alerts\n` +
-    `<code>/alert remove [id]</code> — Cancel an alert\n\n` +
+    `<code>/alert remove [id]</code> — Cancel an alert\n` +
+    `<code>/profile [@user]</code> — Win history (no arg = your own)\n` +
+    `<code>/myprofile</code> — Shortcut to your profile\n` +
+    `<code>/track [wallet]</code> — Add a Solana wallet to Pulse's DB\n` +
+    `<code>/mywallets</code> — Wallets you've tracked\n` +
+    `<code>/untrack [wallet]</code> — Remove a tracked wallet\n\n` +
     `<b>⚙️ ADMIN</b>\n` +
     `<code>/config [key] [value]</code> — Live tuning\n\n` +
     `<i>AI OS active. Hunting $15K-$120K micro-caps with 53% win rate.</i>`
@@ -2849,6 +2929,150 @@ async function handleWatchlistCommand(chatId) { await sendTelegramMessage(chatId
 async function handleRegimeCommand(chatId)    { await sendTelegramMessage(chatId, buildRegimeMessage()); }
 
 // ─── /portfolio — user's personal coin watchlist ─────────────────────────────
+// /track <wallet> — user-curated wallet additions. Validates the address,
+// fetches SOL balance via Helius, applies SOL-tier categorization (same
+// rules the harvesters use), and inserts into tracked_wallets with
+// source='user_track'. Wallet immediately feeds Pulse's scoring.
+async function handleTrackWalletCommand(chatId, args, fromUserId, username) {
+  const input = (args || '').trim();
+  // /track list (or /track) — show wallets this user has added
+  if (!input || input.toLowerCase() === 'list') {
+    const rows = dbInstance.prepare(`
+      SELECT address, category, sol_balance, last_seen
+      FROM tracked_wallets
+      WHERE source = 'user_track' AND added_by = ?
+      ORDER BY last_seen DESC
+      LIMIT 30
+    `).all(String(fromUserId));
+    if (rows.length === 0) {
+      await sendTelegramMessage(chatId,
+        `<b>📒 Your tracked wallets</b>\n\n` +
+        `<i>You haven't added any yet.</i>\n\n` +
+        `<b>Usage:</b> <code>/track &lt;wallet&gt;</code>\n` +
+        `Wallets ≥ 100 SOL → 🐋 WHALE · 8-99 → 💎 SMART · 1-7 → 🚀 MOMENTUM`
+      );
+      return;
+    }
+    let msg = `<b>📒 Your tracked wallets (${rows.length})</b>\n\n`;
+    rows.forEach((r, i) => {
+      const tier = r.category === 'WINNER' ? '🐋' : r.category === 'SMART_MONEY' ? '💎' : r.category === 'MOMENTUM' ? '🚀' : '·';
+      const sol  = r.sol_balance != null ? r.sol_balance.toFixed(2) + ' SOL' : '?';
+      msg += `${tier} <code>${escapeHtml(r.address.slice(0, 8))}…${escapeHtml(r.address.slice(-4))}</code> — ${sol}\n`;
+    });
+    msg += `\n<i>/untrack &lt;wallet&gt; to remove · /track &lt;wallet&gt; to add</i>`;
+    await sendTelegramMessage(chatId, msg);
+    return;
+  }
+  // /track <wallet> — add
+  const addr = input.split(/\s+/)[0].trim();
+  // Validate base58 + length (Solana wallets are 32-44 chars)
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) {
+    await sendTelegramMessage(chatId, `⚠️ That doesn't look like a Solana wallet address.\n\n<b>Usage:</b> <code>/track &lt;wallet_address&gt;</code>`);
+    return;
+  }
+  if (!process.env.HELIUS_API_KEY) {
+    await sendTelegramMessage(chatId, `⚠️ Wallet tracking requires HELIUS_API_KEY (server config).`);
+    return;
+  }
+  // Fetch SOL balance
+  let sol = null;
+  try {
+    const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'bal', method: 'getBalance', params: [addr] }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const lamports = j?.result?.value ?? 0;
+      sol = lamports / 1e9;
+    }
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Couldn't fetch SOL balance: ${escapeHtml(err.message)}`);
+    return;
+  }
+  if (sol == null) {
+    await sendTelegramMessage(chatId, `⚠️ Couldn't reach Helius. Try again in a minute.`);
+    return;
+  }
+  // SOL-tier category (same rules the harvesters use)
+  let category = 'NEUTRAL';
+  let tierIcon = '·';
+  if      (sol >= 100) { category = 'WINNER';      tierIcon = '🐋'; }
+  else if (sol >= 8)   { category = 'SMART_MONEY'; tierIcon = '💎'; }
+  else if (sol >= 1)   { category = 'MOMENTUM';    tierIcon = '🚀'; }
+  else                 { category = 'HARVESTED_TRADER'; tierIcon = '🔻'; }
+
+  // Insert / upsert. Don't overwrite a curated WINNER/KOL/RUG row.
+  try {
+    const existing = dbInstance.prepare(
+      `SELECT id, category, source FROM tracked_wallets WHERE address = ?`
+    ).get(addr);
+    if (existing) {
+      // Just refresh sol_balance + tag this user as a co-tracker. Don't
+      // demote stronger categories.
+      dbInstance.prepare(`
+        UPDATE tracked_wallets
+        SET sol_balance = ?,
+            updated_at  = datetime('now'),
+            last_seen   = datetime('now'),
+            notes       = COALESCE(notes, '') || ' | also-tracked-by @' || ?
+        WHERE id = ?
+      `).run(sol, username || fromUserId, existing.id);
+      await sendTelegramMessage(chatId,
+        `✓ <code>${escapeHtml(addr.slice(0,8))}…</code> already in DB as <b>${escapeHtml(existing.category)}</b>.\n` +
+        `${tierIcon} SOL balance refreshed: <b>${sol.toFixed(2)} SOL</b>\n\n` +
+        `<i>This wallet now also credits @${escapeHtml(username || fromUserId)} as a tracker.</i>`
+      );
+      return;
+    }
+    dbInstance.prepare(`
+      INSERT INTO tracked_wallets (address, category, source, sol_balance, added_by, last_seen, updated_at, notes)
+      VALUES (?, ?, 'user_track', ?, ?, datetime('now'), datetime('now'), ?)
+    `).run(addr, category, sol, String(fromUserId), `Added via /track by @${username || fromUserId}`);
+    await sendTelegramMessage(chatId,
+      `✅ <b>Wallet added to Pulse DB</b>\n\n` +
+      `<code>${escapeHtml(addr)}</code>\n\n` +
+      `${tierIcon} <b>${escapeHtml(category)}</b> · ${sol.toFixed(2)} SOL\n\n` +
+      `<i>This wallet now feeds Pulse's scoring. Future coins it holds get a bump in Wallet Quality.</i>\n` +
+      `<i>View yours: /track list · Remove: /untrack ${addr.slice(0,8)}…</i>`
+    );
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Insert failed: ${escapeHtml(err.message)}`);
+  }
+}
+
+async function handleUntrackWalletCommand(chatId, args, fromUserId) {
+  const addrPrefix = (args || '').trim().split(/\s+/)[0];
+  if (!addrPrefix) {
+    await sendTelegramMessage(chatId, `<b>Usage:</b> <code>/untrack &lt;wallet&gt;</code>\n<i>Removes a wallet you added via /track. Won't touch wallets added by other sources.</i>`);
+    return;
+  }
+  // Match by exact address OR by 8-char prefix (matches what /track list shows)
+  let row;
+  try {
+    row = dbInstance.prepare(`
+      SELECT id, address, category FROM tracked_wallets
+      WHERE source = 'user_track' AND added_by = ? AND (address = ? OR address LIKE ?)
+      LIMIT 1
+    `).get(String(fromUserId), addrPrefix, addrPrefix + '%');
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Lookup failed: ${escapeHtml(err.message)}`);
+    return;
+  }
+  if (!row) {
+    await sendTelegramMessage(chatId, `<i>No wallet matching <code>${escapeHtml(addrPrefix)}</code> found in your tracked list. (You can only remove wallets you personally added.)</i>`);
+    return;
+  }
+  try {
+    dbInstance.prepare(`DELETE FROM tracked_wallets WHERE id = ? AND source = 'user_track' AND added_by = ?`)
+      .run(row.id, String(fromUserId));
+    await sendTelegramMessage(chatId, `✓ Removed <code>${escapeHtml(row.address.slice(0,8))}…</code> from Pulse DB.`);
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Delete failed: ${escapeHtml(err.message)}`);
+  }
+}
+
 async function handlePortfolioCommand(chatId, args, fromUserId, username) {
   const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
   const parts = (args || '').trim().split(/\s+/);
@@ -3007,35 +3231,254 @@ async function handleAlertCommand(chatId, args, fromUserId, username) {
 }
 
 // ─── /leaderboard — top calls (Hall of Fame) ─────────────────────────────────
-async function handleLeaderboardCommand(chatId, args) {
-  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
-  const tf = (args || '').trim().toLowerCase() || '7d';
-  const valid = ['24h', '7d', '30d', 'all'];
-  const timeframe = valid.includes(tf) ? tf : '7d';
-  const tfLabel = { '24h': 'LAST 24H', '7d': 'LAST 7 DAYS', '30d': 'LAST 30 DAYS', 'all': 'ALL TIME' }[timeframe];
+// Build inline-keyboard buttons for timeframe selection.
+// prefix is 'lb' for /lb or 'pulselb' for /pulselb. activeTf gets a checkmark.
+function buildLeaderboardKeyboard(prefix, activeTf) {
+  const tfs = [
+    { tf: '24h', label: '12H' },   // alias — both 12H/1D map to 24h cutoff
+    { tf: '24h', label: '1D' },
+    { tf: '7d',  label: '7D' },
+    { tf: '30d', label: '30D' },
+    { tf: 'all', label: 'ALL' },
+  ];
+  // De-dupe so 12H/1D don't both show as '✓ ...' simultaneously
+  const seen = new Set();
+  const buttons = tfs.filter(t => {
+    if (seen.has(t.label)) return false;
+    seen.add(t.label);
+    return true;
+  }).map(t => ({
+    text: (activeTf === t.tf ? '✓ ' : '') + t.label,
+    callback_data: `${prefix}:${t.tf}`,
+  }));
+  return { inline_keyboard: [buttons] };
+}
 
+// Render the /lb message body (used by both initial command and callback edits).
+async function renderGroupLeaderboardMessage(timeframe) {
+  const { getTopCalls, getRichGroupStats, PULSE_USER_ID } = await import('./user-leaderboard.js');
+  const stats = getRichGroupStats(dbInstance, timeframe);
+  const calls = getTopCalls(dbInstance, timeframe, 15);
+  const tfLabel = { '24h': '1d', '7d': '7d', '30d': '30d', 'all': 'all' }[timeframe] || timeframe;
+
+  const emojiFor = (mult) => {
+    if (mult == null)    return '🤔';
+    if (mult >= 5)       return '🚀';
+    if (mult >= 3)       return '🤩';
+    if (mult >= 1.5)     return '😎';
+    if (mult >= 1)       return '🙂';
+    return '😞';
+  };
+
+  let msg = `🏆 <b>LEADERBOARD</b>\n\n` +
+            `📊 <b>Group Stats</b>\n` +
+            `┃ Period    <b>${tfLabel}</b>\n` +
+            `┃ Calls     <b>${stats.calls || 0}</b>\n` +
+            `┃ Active    <b>${stats.users || 0}</b> users\n` +
+            `┃ Hit Rate  <b>${stats.hit_rate != null ? stats.hit_rate + '%' : '—'}</b>\n` +
+            `┃ Median    <b>${stats.median != null ? stats.median.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Best      <b>${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '—'}</b> <i>(Avg: ${stats.avg_multiple != null ? stats.avg_multiple.toFixed(2) + 'x' : '—'})</i>\n\n`;
+
+  if (calls.length === 0) {
+    msg += `<blockquote><i>No calls ranked yet for this window. Drop a CA in the group and wait for it to peak.\n\nNote: bot needs Privacy Mode OFF in @BotFather to see non-command messages.</i></blockquote>`;
+  } else {
+    msg += `<blockquote>`;
+    calls.forEach((c, i) => {
+      const isPulse = c.user_id === PULSE_USER_ID;
+      const nameText = escapeHtml(c.display_name || 'anon').slice(0, 18);
+      // Tap-the-name → opens Telegram user profile. Tap-the-token →
+      // DexScreener page for the coin. Pulse stays as plain text.
+      const caller  = isPulse
+        ? '⚡<b>Pulse</b>'
+        : (/^\d+$/.test(c.user_id) ? `<a href="tg://user?id=${c.user_id}">${nameText}</a>` : nameText);
+      const tokenLabel = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
+      const tokenLink  = c.contract_address
+        ? `<a href="https://dexscreener.com/solana/${c.contract_address}">${tokenLabel}</a>`
+        : tokenLabel;
+      const mult    = c.peak_multiple != null ? ` <b>[${c.peak_multiple.toFixed(2)}x]</b>` : '';
+      msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${tokenLink}</b> » ${caller}${mult}\n`;
+    });
+    msg += `</blockquote>`;
+  }
+  return msg;
+}
+
+// /profile [@user | user_id] — shows that user's win history.
+// No args → caller's own profile. Pulse can be looked up via "pulse" or
+// "@pulsecaller". Tappable from leaderboard rows (clickable usernames).
+async function handleProfileCommand(chatId, args, fromUserId, fromUsername) {
+  const { getUserProfileData, PULSE_USER_ID } = await import('./user-leaderboard.js');
+  let target = (args || '').trim();
+  // Normalize special cases
+  if (target.toLowerCase() === 'pulse' || target.toLowerCase() === '@pulsecaller' || target === '⚡pulse') {
+    target = PULSE_USER_ID;
+  }
+  if (!target) target = String(fromUserId);
+
+  const profile = getUserProfileData(dbInstance, target);
+  if (!profile) {
+    await sendTelegramMessage(chatId,
+      target === String(fromUserId)
+        ? `<i>You haven't dropped any CAs yet, @${escapeHtml(fromUsername || 'anon')}. Drop one in the group to start your profile.</i>`
+        : `<i>No profile found for "${escapeHtml(target)}". User must have dropped at least one CA in this group.</i>`
+    );
+    return;
+  }
+
+  const isPulse = profile.user_id === PULSE_USER_ID;
+  const headerName = isPulse
+    ? '⚡ <b>Pulse Caller</b>'
+    : `<b>${escapeHtml(profile.display_name).slice(0, 24)}</b>`;
+
+  const emojiFor = (mult) => {
+    if (mult == null)    return '🤔';
+    if (mult >= 5)       return '🚀';
+    if (mult >= 3)       return '🤩';
+    if (mult >= 1.5)     return '😎';
+    if (mult >= 1)       return '🙂';
+    return '😞';
+  };
+  const fmtAgo = (ts) => {
+    if (!ts) return '?';
+    const ms = Date.now() - new Date(ts.includes('Z') ? ts : ts + 'Z').getTime();
+    if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
+    if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
+    if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + 'h ago';
+    return Math.floor(ms / 86_400_000) + 'd ago';
+  };
+
+  let msg = `👤 <b>PROFILE</b> — ${headerName}\n\n` +
+            `📊 <b>All-Time Stats</b>\n` +
+            `┃ Calls       <b>${profile.calls}</b>\n` +
+            `┃ 🏆 Wins     <b>${profile.wins}</b>\n` +
+            `┃ 💀 Losses   <b>${profile.losses}</b>\n` +
+            `┃ ⏳ Pending  <b>${profile.pending}</b>\n` +
+            `┃ Hit Rate    <b>${profile.hit_rate != null ? profile.hit_rate + '%' : '—'}</b>\n` +
+            `┃ Median      <b>${profile.median != null ? profile.median.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┃ Best        <b>${profile.best_multiple != null ? profile.best_multiple.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Avg         <b>${profile.avg_multiple != null ? profile.avg_multiple.toFixed(2) + 'x' : '—'}</b>\n\n`;
+
+  if (profile.recent.length > 0) {
+    msg += `🏆 <b>Recent Calls</b>\n<blockquote>`;
+    profile.recent.forEach(c => {
+      const tok = c.token ? escapeHtml(c.token).slice(0, 14) : c.contract_address.slice(0, 6);
+      const mult = c.peak_multiple != null ? `<b>[${c.peak_multiple.toFixed(2)}x]</b>` : '<i>pending</i>';
+      msg += `${emojiFor(c.peak_multiple)} 🪙 <b>${tok}</b>  ${mult}  <i>${fmtAgo(c.called_at)}</i>\n`;
+    });
+    msg += `</blockquote>`;
+  }
+
+  await sendTelegramMessage(chatId, msg);
+}
+
+// Send a leaderboard as a photo (Pulse banner) + caption — falls back to
+// plain sendMessage if Telegram rejects the image. Caption capped at 1024.
+async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
+  if (!TELEGRAM_BOT_TOKEN) return;
+  const photoSrc = _leaderboardBannerFileId || LEADERBOARD_BANNER_URL;
+  // Telegram caption limit = 1024 chars. Trim defensively.
+  const safeCaption = caption.length > 1020 ? caption.slice(0, 1017) + '…' : caption;
+  if (photoSrc) {
+    try {
+      const res = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id:    chatId,
+          photo:      photoSrc,
+          caption:    safeCaption,
+          parse_mode: 'HTML',
+          reply_markup: replyMarkup,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) {
+        // Cache file_id from the uploaded image so future sends are faster
+        try {
+          const j = await res.json();
+          const photos = j?.result?.photo;
+          if (photos?.length && !_leaderboardBannerFileId) {
+            _leaderboardBannerFileId = photos[photos.length - 1].file_id;
+          }
+        } catch {}
+        return;
+      }
+      // If file_id was stale (e.g. server restart) clear it and retry once with URL
+      if (_leaderboardBannerFileId) {
+        _leaderboardBannerFileId = null;
+        const retry = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId, photo: LEADERBOARD_BANNER_URL, caption: safeCaption,
+            parse_mode: 'HTML', reply_markup: replyMarkup,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (retry.ok) return;
+      }
+      console.warn(`[TG-leaderboard] photo send failed: ${(await res.text()).slice(0, 200)}`);
+    } catch (err) {
+      console.warn(`[TG-leaderboard] photo error: ${err.message}`);
+    }
+  }
+  // Fallback: plain text leaderboard
+  await sendTelegramMessage(chatId, caption, { reply_markup: replyMarkup });
+}
+
+// /lb — Phanes-style group leaderboard with banner image + clickable timeframe buttons.
+async function handleGroupLeaderboardCommand(chatId, args) {
+  const tf = (args || '').trim().toLowerCase() || '1d';
+  const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', '2w': '7d', 'all': 'all' };
+  const timeframe = aliasMap[tf] || '24h';
+  const msg = await renderGroupLeaderboardMessage(timeframe);
+  await sendLeaderboardWithBanner(chatId, msg, buildLeaderboardKeyboard('lb', timeframe));
+}
+
+// Render Pulse's own call leaderboard body (shared between command + callback).
+function renderPulseLeaderboardMessage(timeframe) {
+  const fmtMc = (n) => n == null ? '?' : (n >= 1_000_000 ? '$' + (n/1_000_000).toFixed(2) + 'M' : '$' + (n/1_000).toFixed(1) + 'K');
+  const tfLabel = { '24h': '1D', '7d': '7D', '30d': '30D', 'all': 'ALL' }[timeframe] || timeframe;
   const { top, stats } = getCallsLeaderboard(timeframe);
   const winRate = (stats.wins + stats.losses) > 0 ? Math.round(stats.wins * 100 / (stats.wins + stats.losses)) : 0;
 
-  let msg = `🏆 <b>HALL OF FAME — ${tfLabel}</b>\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `<b>Total Calls:</b> ${stats.total_calls || 0}\n` +
-            `<b>Wins:</b> ${stats.wins || 0}  <b>Losses:</b> ${stats.losses || 0}\n` +
-            `<b>Win Rate:</b> ${winRate}%\n` +
-            `<b>Avg Win:</b> ${stats.avg_win_multiple != null ? stats.avg_win_multiple.toFixed(2) + 'x' : '?'}\n` +
-            `<b>Best:</b> ${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '?'}\n\n`;
+  const emojiFor = (mult) => {
+    if (mult == null)    return '🤔';
+    if (mult >= 5)       return '🚀';
+    if (mult >= 3)       return '🤩';
+    if (mult >= 1.5)     return '😎';
+    if (mult >= 1)       return '🙂';
+    return '😞';
+  };
+
+  let msg = `⚡ <b>PULSE CALLER · LEADERBOARD</b>\n\n` +
+            `📊 <b>Group Stats</b>\n` +
+            `┃ Period    <b>${tfLabel}</b>\n` +
+            `┃ Calls     <b>${stats.total_calls || 0}</b>\n` +
+            `┃ Hit Rate  <b>${winRate}%</b>\n` +
+            `┃ Avg Win   <b>${stats.avg_win_multiple != null ? stats.avg_win_multiple.toFixed(2) + 'x' : '—'}</b>\n` +
+            `┗ Best      <b>${stats.best_multiple != null ? stats.best_multiple.toFixed(2) + 'x' : '—'}</b>\n\n`;
+
   if (top.length === 0) {
-    msg += `<i>No wins recorded for this timeframe yet.</i>`;
+    msg += `<blockquote><i>No wins recorded for this timeframe yet.</i></blockquote>`;
   } else {
-    msg += `<b>TOP ${top.length} WINNERS</b>\n`;
-    top.forEach((c, i) => {
-      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}.`;
-      msg += `${medal} <b>$${escapeHtml(c.token || '?')}</b>  ${c.peak_multiple.toFixed(2)}x\n`;
-      msg += `   ${fmtMc(c.market_cap_at_call)} → ${fmtMc(c.peak_mcap)}\n`;
+    msg += `<blockquote>`;
+    top.slice(0, 15).forEach((c, i) => {
+      const tokLabel = escapeHtml(c.token || '?').slice(0, 14);
+      const tok = c.contract_address
+        ? `<a href="https://dexscreener.com/solana/${c.contract_address}">${tokLabel}</a>`
+        : tokLabel;
+      msg += `${emojiFor(c.peak_multiple)} <b>${i+1}.</b> 🪙 <b>${tok}</b>  ${c.peak_multiple.toFixed(2)}x  <i>(${fmtMc(c.market_cap_at_call)} → ${fmtMc(c.peak_mcap)})</i>\n`;
     });
+    msg += `</blockquote>`;
   }
-  msg += `\n<i>Try: /leaderboard 24h | 7d | 30d | all</i>`;
-  await sendTelegramMessage(chatId, msg);
+  return msg;
+}
+
+async function handleLeaderboardCommand(chatId, args) {
+  const tf = (args || '').trim().toLowerCase() || '7d';
+  const aliasMap = { '12h': '24h', '24h': '24h', '1d': '24h', '7d': '7d', '1w': '7d', '30d': '30d', 'all': 'all' };
+  const timeframe = aliasMap[tf] || '7d';
+  const msg = renderPulseLeaderboardMessage(timeframe);
+  await sendLeaderboardWithBanner(chatId, msg, buildLeaderboardKeyboard('pulselb', timeframe));
 }
 
 // ─── Telegram AI OS command dispatcher ───────────────────────────────────────
@@ -4846,6 +5289,20 @@ async function processCandidate(candidate, isRescan = false) {
         } catch (err) {
           console.warn(`[TG-CA] beacon failed: ${err.message}`);
         }
+        // Self-record: Pulse appears on /grouplb alongside human users.
+        // Ranked by the same peak_multiple math everyone else gets.
+        try {
+          const { recordUserCall, PULSE_USER_ID, PULSE_USERNAME } = await import('./user-leaderboard.js');
+          recordUserCall(dbInstance, {
+            userId:     PULSE_USER_ID,
+            username:   PULSE_USERNAME,
+            firstName:  'Pulse',
+            contractAddress: caBeacon,
+            token:      enrichedCandidate.token || null,
+            mcap:       enrichedCandidate.marketCap || null,
+            chatId:     String(TELEGRAM_GROUP_CHAT_ID),
+          });
+        } catch (err) { console.warn(`[user-lb] pulse self-record err: ${err.message}`); }
         await sleep(1500); // give leaderboard bots a moment to pick up the CA
       }
 
@@ -5068,6 +5525,10 @@ async function processCandidate(candidate, isRescan = false) {
         liquidity:       enrichedCandidate.liquidity,
         called_at:       new Date().toISOString(),
         holderAddresses: earlyHoldersForCall,
+        // Bonding-curve snapshot (pump.fun lifecycle) — populated by enricher.
+        // Lets us measure "called pre-bond → did it bond?" rate later.
+        bondingPctAtCall:    enrichedCandidate.pumpFunBondingPct ?? null,
+        pumpFunStageAtCall:  enrichedCandidate.pumpFunStage      ?? null,
       });
 
       logEvent('INFO', 'AUTO_POST', `${enrichedCandidate.token} score=${scoreResult.score}`);
@@ -5363,6 +5824,26 @@ function buildV8Caption(candidate, verdict, scoreResult, openAIDecision) {
       `⚠️ <b>DATA LIMITED</b> — coin is too fresh; Birdeye/DexScreener haven't indexed yet. Numbers may be incomplete. Signal trusted on wallet conviction alone.\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n` +
       basePart;
+  }
+
+  // Append a Bonding line right under the caption header when we have
+  // pump.fun lifecycle data. Lets every reader instantly see if this is
+  // a pre-bond entry (early — bigger upside if it graduates) or a
+  // post-migration call (already on Raydium — different risk profile).
+  const pfStage = candidate.pumpFunStage;
+  const pfPct   = candidate.pumpFunBondingPct;
+  if (pfStage === 'PRE_BOND' && pfPct != null) {
+    const bar = (() => {
+      const filled = Math.round((pfPct / 100) * 10);
+      return '🟩'.repeat(Math.max(0, filled)) + '⬜'.repeat(Math.max(0, 10 - filled));
+    })();
+    const bondLine =
+      `🎯 <b>PRE-BOND ENTRY</b> · ${pfPct.toFixed(1)}% to graduation\n` +
+      `${bar}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n`;
+    basePart = bondLine + basePart;
+  } else if (pfStage === 'MIGRATED' || candidate.pumpFunMigrated) {
+    basePart = `🎓 <b>POST-MIGRATION</b> · graduated to Raydium\n━━━━━━━━━━━━━━━━━━━━━\n` + basePart;
   }
 
   // Append OpenAI layer if available
@@ -6821,14 +7302,17 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
   setCors(res);
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
   try {
-    // Gather comprehensive performance data
+    // Gather LIFETIME performance data (every resolved call) so the AI sees
+    // full historical patterns, not just last-40 noise. Capped at 500 each
+    // to keep the prompt under Claude's context limit; the bot won't have
+    // 500 wins for a while anyway.
     const wins = dbInstance.prepare(`
       SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
              ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct, ca.top10_holder_pct, ca.holders,
              ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
              ca.launch_unique_buyer_ratio, ca.buy_velocity
       FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
-      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 40
+      WHERE c.outcome='WIN' ORDER BY c.called_at DESC LIMIT 500
     `).all();
     const losses = dbInstance.prepare(`
       SELECT c.score_at_call, c.market_cap_at_call, c.risk_at_call, c.setup_type_at_call, c.peak_multiple,
@@ -6836,23 +7320,130 @@ app.post('/api/control-station/auto-optimize', express.json(), async (req, res) 
              ca.sniper_wallet_count, ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h, ca.price_change_24h,
              ca.launch_unique_buyer_ratio, ca.buy_velocity
       FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
-      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 40
+      WHERE c.outcome='LOSS' ORDER BY c.called_at DESC LIMIT 500
     `).all();
     const recentAudit = dbInstance.prepare(`SELECT * FROM tuning_audit ORDER BY created_at DESC LIMIT 20`).all();
+
+    // ═══ MOONSHOT REFERENCE SET ═══
+    // Every coin that hit 10x+ — both calls we made AND missed winners we
+    // didn't call. Claude uses these as the "must not block these patterns"
+    // anchor when proposing filter changes. Tightening a knob that would
+    // have rejected these moonshots is forbidden without explicit evidence.
+    const calledMoonshots = (() => {
+      try {
+        return dbInstance.prepare(`
+          SELECT c.token, c.score_at_call, c.market_cap_at_call, c.peak_multiple,
+                 c.setup_type_at_call, c.risk_at_call,
+                 ca.buy_sell_ratio_1h, ca.volume_velocity, ca.dev_wallet_pct,
+                 ca.top10_holder_pct, ca.holders, ca.sniper_wallet_count,
+                 ca.bundle_risk, ca.pair_age_hours, ca.price_change_1h,
+                 ca.launch_unique_buyer_ratio, ca.buy_velocity
+          FROM calls c LEFT JOIN candidates ca ON c.candidate_id=ca.id
+          WHERE c.peak_multiple >= 10
+          ORDER BY c.peak_multiple DESC LIMIT 60
+        `).all();
+      } catch { return []; }
+    })();
+    const missedMoonshots = (() => {
+      try {
+        return dbInstance.prepare(`
+          SELECT token, missed_winner_peak_multiple AS peak_multiple,
+                 composite_score, market_cap, final_decision, setup_type,
+                 buy_sell_ratio_1h, volume_velocity, dev_wallet_pct,
+                 top10_holder_pct, holders, sniper_wallet_count, bundle_risk,
+                 pair_age_hours, price_change_1h, launch_unique_buyer_ratio,
+                 buy_velocity, claude_verdict
+          FROM candidates
+          WHERE missed_winner_flag = 1 AND missed_winner_peak_multiple >= 10
+          ORDER BY missed_winner_peak_multiple DESC LIMIT 60
+        `).all();
+      } catch { return []; }
+    })();
+
+    // Aggregate summary stats so Claude can spot patterns without parsing all 500 rows
+    const summary = (() => {
+      const safe = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
+      const avg = (arr, key) => {
+        const vals = arr.map(r => safe(r[key])).filter(v => v != null);
+        return vals.length ? +(vals.reduce((a,b)=>a+b,0) / vals.length).toFixed(2) : null;
+      };
+      return {
+        winRate:           wins.length + losses.length > 0
+                            ? Math.round(wins.length * 100 / (wins.length + losses.length)) : null,
+        avgWinPeak:        avg(wins,  'peak_multiple'),
+        avgLossPeak:       avg(losses,'peak_multiple'),
+        avgWinScore:       avg(wins,  'score_at_call'),
+        avgLossScore:      avg(losses,'score_at_call'),
+        avgWinMcap:        avg(wins,  'market_cap_at_call'),
+        avgLossMcap:       avg(losses,'market_cap_at_call'),
+        avgWinDevPct:      avg(wins,  'dev_wallet_pct'),
+        avgLossDevPct:     avg(losses,'dev_wallet_pct'),
+        avgWinTop10:       avg(wins,  'top10_holder_pct'),
+        avgLossTop10:      avg(losses,'top10_holder_pct'),
+        avgWinSnipers:     avg(wins,  'sniper_wallet_count'),
+        avgLossSnipers:    avg(losses,'sniper_wallet_count'),
+      };
+    })();
 
     const prompt = `You are the CONTROL STATION OPTIMIZER for Pulse Caller — a Solana micro-cap token sniper bot.
 
 ═══ USER'S TUNING TARGET ═══
 The user has set targetMultiplier = ${SCORING_CONFIG.targetMultiplier ?? 5}x.
-This is the ONLY knob you cannot change. Your job is to tune EVERY other
-knob so the bot catches more coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x peaks.
-Any coin that hits at least winPeakMultiple (${SCORING_CONFIG.winPeakMultiple ?? 2.5}x) still counts as a WIN —
-so you're looking for high-quality signal that points at big-run coins, not
-ways to filter to only the ones that already pumped.
+This is the ONLY knob you cannot change. Tune everything else so the bot
+catches more coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x peaks. Any coin that hits at least
+winPeakMultiple (${SCORING_CONFIG.winPeakMultiple ?? 2.5}x) still counts as a WIN.
 
-You have FULL AUTHORITY to change ANY parameter below EXCEPT targetMultiplier.
-No human approval needed. Make AGGRESSIVE, comprehensive changes across ALL
-config systems to maximize the rate of coins that hit ${SCORING_CONFIG.targetMultiplier ?? 5}x+.
+═══ OPERATING MODE: TRUST THE DATA, BUT EVERY CHANGE NEEDS AN AUDITABLE WHY ═══
+You have full authority to make whatever changes the data supports —
+small tweaks OR major rebalances. Don't artificially constrain
+yourself. The user wants the bot improving, not protected from itself.
+
+REQUIRED for every proposed change:
+  - reason: a clear, evidence-grounded sentence pointing at specific
+    data (e.g. "losses had avg dev_wallet_pct=8.4 vs wins=2.1 — raising
+    devWalletPctBlock from 5 to 7"). NOT vague ("seems too loose").
+  - confidence: 0-100. Anything below 60 → don't propose the change.
+  - risk: what's the worst case if this change is wrong?
+
+═══ CORE THESIS: EVERY CALL SHOULD BE A 5x CANDIDATE ═══
+The operator's stated goal: "get 5x on every call and hopefully more.
+By studying the bigger wins maybe we can prevent the losses and
+increase our winning percentage along with our peak for each coin."
+
+That means your job is NOT just "avoid losers". It's:
+  Match the patterns of the 10x+ moonshots → if a coin doesn't look
+  like one of those, it probably isn't worth calling. The bar is
+  "this looks like a 5x+ setup" — not "this isn't a rug".
+
+═══ TUNING PRIORITIES ═══
+1. MOONSHOT PATTERN MATCHING — what signals do the 10x+ called
+   moonshots share that the losses don't? buy_velocity?
+   volume_velocity floor? holder spread? bundle_risk pattern? Tighten
+   filters or raise score weights on those distinguishing signals so
+   future scoring favors moonshot-shaped coins.
+2. RUG REDUCTION — losses where peak < 0.7 or dev_wallet_pct was high.
+   Patterns of failure to penalize.
+3. MOMENTUM-LOSS REDUCTION — 1.0-1.3x fizzles. Distinguish these from
+   real runs in the moonshot data.
+4. RAW WIN-RATE last.
+
+Don't simply lower minScoreToPost to fire more calls. Tighten the
+scoring math so a 5x-shaped coin scores higher and a fizzle-shaped
+coin scores lower — same threshold, smarter signal.
+
+═══ HARD CONSTRAINT: DON'T BOTTLENECK MOONSHOTS ═══
+Below is the MOONSHOT REFERENCE SET — every coin that hit 10x+, both
+ones we called AND ones we missed. BEFORE proposing any filter
+tightening:
+  - Sanity-check it against this set
+  - If your proposed change would have BLOCKED any of these moonshots,
+    DO NOT propose it. The user explicitly does not want filters
+    tightened in ways that bottleneck future moonshots.
+  - Loosening filters to recover MISSED moonshots is encouraged. The
+    "missed_winner" rows below are coins our system rejected/watchlisted
+    that went on to do 10x+ — those are mistakes worth fixing.
+
+You have authority to change any knob EXCEPT targetMultiplier.
 
 SAFETY BOUNDS (you MUST stay within these):
 - minScoreToPost: 35-60 (NEVER below 35 — too much spam)
@@ -6881,11 +7472,25 @@ ${JSON.stringify(TUNING_CONFIG, null, 2)}
 CURRENT AI CONFIG OVERRIDES:
 ${JSON.stringify(AI_CONFIG_OVERRIDES, null, 2)}
 
-WIN DATA (${wins.length} resolved wins):
-${JSON.stringify(wins.slice(0, 20), null, 1)}
+═══ AGGREGATE STATS (across full ${wins.length} wins + ${losses.length} losses) ═══
+${JSON.stringify(summary, null, 2)}
 
-LOSS DATA (${losses.length} resolved losses):
-${JSON.stringify(losses.slice(0, 20), null, 1)}
+(Use the aggregates first to spot patterns. Drill into individual rows
+below only if you need to verify a specific signal hypothesis.)
+
+═══ MOONSHOT REFERENCE SET — DO NOT BOTTLENECK THESE PATTERNS ═══
+
+CALLED 10x+ MOONSHOTS (${calledMoonshots.length} coins Pulse correctly called):
+${JSON.stringify(calledMoonshots.slice(0, 30), null, 1)}
+
+MISSED 10x+ MOONSHOTS (${missedMoonshots.length} coins our filters wrongly rejected — mistakes to fix):
+${JSON.stringify(missedMoonshots.slice(0, 30), null, 1)}
+
+WIN DATA (showing 30 of ${wins.length} resolved wins):
+${JSON.stringify(wins.slice(0, 30), null, 1)}
+
+LOSS DATA (showing 30 of ${losses.length} resolved losses):
+${JSON.stringify(losses.slice(0, 30), null, 1)}
 
 RECENT CHANGES (last 20 audit entries):
 ${JSON.stringify(recentAudit.slice(0, 10), null, 1)}
@@ -7386,6 +7991,29 @@ app.get('/api/agent/comms', (req, res) => {
     res.json({ ok: true, comms });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
+
+// Manual one-shot trigger for the autonomous tuning loop. Fires
+// runSelfImproveLoop directly (which itself respects bot-active /
+// already-running / has-claude-key guards). Returns immediately with
+// "started" — track results via /api/config/audit?limit=20.
+// Accept both POST (proper) and GET (so the user can paste the URL into a
+// browser bar to trigger). Read-only behavior aside, this is a manual
+// admin trigger we want easy to fire.
+const _selfImproveRunNowHandler = async (req, res) => {
+  setCors(res);
+  if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured' });
+  if (_selfImproveRunning) return res.status(409).json({ ok: false, error: 'Self-improvement loop already running — try again in a minute' });
+  res.json({
+    ok: true,
+    started: true,
+    message: 'AI tuning cycle triggered. Watch /api/config/audit?limit=20 for source=claude rows in the next 30-60s.',
+  });
+  setImmediate(() => {
+    runSelfImproveLoop().catch(err => console.warn('[self-improve] manual trigger err:', err.message));
+  });
+};
+app.post('/api/self-improve/run-now', _selfImproveRunNowHandler);
+app.get('/api/self-improve/run-now',  _selfImproveRunNowHandler);
 
 // Run daily self-improvement loop (operator triggers or scheduled)
 app.post('/api/agent/daily-review', async (req, res) => {
@@ -11686,11 +12314,188 @@ app.get('/api/health', async (req, res) => {
 
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
+
+  // ── Inline-keyboard callback (e.g. timeframe buttons on /lb, /pulselb) ──
+  // callback_data format: "<prefix>:<timeframe>" — e.g. "lb:7d", "pulselb:30d".
+  // Edits the original message in place with the new timeframe content.
+  const cbq = req.body?.callback_query;
+  if (cbq) {
+    const cbId   = cbq.id;
+    const cbData = cbq.data || '';
+    const msgRef = cbq.message;
+    try {
+      // Always answer the callback first so the button stops spinning
+      try {
+        await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cbId }),
+          signal: AbortSignal.timeout(5_000),
+        });
+      } catch {}
+      const [prefix, arg] = cbData.split(':');
+      if (!prefix || !arg || !msgRef?.chat?.id || !msgRef?.message_id) return;
+
+      // pnl:<userId> → P&L card for the caller. Sends as a NEW message
+      // (not edit) so the original CA card stays intact and multiple users
+      // can each tap to see the caller's stats. Returns early.
+      if (prefix === 'pnl') {
+        try {
+          const { getUserProfileData, renderProfileCardHtml } = await import('./user-leaderboard.js');
+          const profile = getUserProfileData(dbInstance, arg);
+          const html = renderProfileCardHtml(profile, escapeHtml);
+          await fetch(`${TELEGRAM_API}/sendMessage`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id:    msgRef.chat.id,
+              text:       html,
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              reply_to_message_id: msgRef.message_id,
+            }),
+            signal: AbortSignal.timeout(8_000),
+          });
+        } catch (err) { console.warn('[pnl-card] err:', err.message); }
+        return;
+      }
+
+      let newText, newMarkup;
+      if (prefix === 'lb') {
+        newText   = await renderGroupLeaderboardMessage(arg);
+        newMarkup = buildLeaderboardKeyboard('lb', arg);
+      } else if (prefix === 'pulselb') {
+        newText   = renderPulseLeaderboardMessage(arg);
+        newMarkup = buildLeaderboardKeyboard('pulselb', arg);
+      } else {
+        return;
+      }
+      // Leaderboards are photo+caption messages — use editMessageCaption.
+      // Falls back to editMessageText if the original was text-only (e.g.
+      // banner failed to load on the initial send).
+      const isPhotoMsg = !!msgRef.photo;
+      const endpoint = isPhotoMsg ? 'editMessageCaption' : 'editMessageText';
+      const payload = {
+        chat_id:    msgRef.chat.id,
+        message_id: msgRef.message_id,
+        parse_mode: 'HTML',
+        reply_markup: newMarkup,
+      };
+      if (isPhotoMsg) {
+        // Telegram caption limit = 1024 chars
+        payload.caption = newText.length > 1020 ? newText.slice(0, 1017) + '…' : newText;
+      } else {
+        payload.text = newText;
+        payload.disable_web_page_preview = true;
+      }
+      await fetch(`${TELEGRAM_API}/${endpoint}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch (err) { console.warn('[tg-callback] err:', err.message); }
+    return;
+  }
+
   const message = req.body?.message;
   if (!message?.text) return;
   const chatId    = message.chat?.id;
   const fromId    = message.from?.id;
   if (!chatId) return;
+
+  // ── Group-leaderboard CA listener + Phanes-replacement card reply ──────
+  // Every NON-BOT text message gets scanned for Solana CAs. For each CA:
+  //   1. Record (user, CA, mcap-now) for /grouplb ranking
+  //   2. Reply under the message with a Phanes-style info card (price,
+  //      MCap, vol, LP, security flags, Pulse's score if known, links)
+  // Privacy-mode-OFF on the bot is required to see non-command messages —
+  // set via @BotFather → Bot Settings → Group Privacy → Disable.
+  // Skips bots (no infinite reply loops, no Phanes/Sect cross-tracking).
+  try {
+    if (message.text && message.from?.id && !message.from?.is_bot) {
+      const { extractCAsFromText, recordUserCall, buildCACard, shouldReplyCard } =
+        await import('./user-leaderboard.js');
+      const cas = extractCAsFromText(message.text);
+      if (cas.length > 0) {
+        for (const ca of cas) {
+          if (ca.length < 32 || ca.length > 44) continue;
+          // Build the Phanes-style card (also fetches DexScreener data
+          // we'll reuse as the source of truth for the mcap snapshot).
+          const built = await buildCACard(dbInstance, ca, process.env.HELIUS_API_KEY, escapeHtml, {
+            userId:    String(message.from.id),
+            username:  message.from.username || null,
+            firstName: message.from.first_name || null,
+          });
+          if (!built) continue;
+          const { caption, imageUrl, replyMarkup } = built;
+          // Re-pull mcap+token for the user_calls record (small extra hit)
+          let mcap = null, token = null;
+          try {
+            const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+              signal: AbortSignal.timeout(5_000),
+            });
+            if (r.ok) {
+              const j = await r.json();
+              const pair = (j.pairs || []).find(p => p.chainId === 'solana');
+              if (pair) { mcap = pair.marketCap || pair.fdv || null; token = pair.baseToken?.symbol || null; }
+            }
+          } catch {}
+          recordUserCall(dbInstance, {
+            userId:    String(message.from.id),
+            username:  message.from.username || null,
+            firstName: message.from.first_name || null,
+            contractAddress: ca,
+            token, mcap,
+            chatId:    String(chatId),
+            messageId: message.message_id,
+          });
+          // Auto-reply (deduped per chat+CA per 5min). Prefer photo+caption
+          // when the token has an image — falls back to text-only otherwise.
+          if (shouldReplyCard(String(chatId), ca)) {
+            try {
+              if (imageUrl) {
+                const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    photo: imageUrl,
+                    caption: caption.slice(0, 1020),  // Telegram caption cap
+                    parse_mode: 'HTML',
+                    reply_to_message_id: message.message_id,
+                    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+                  }),
+                  signal: AbortSignal.timeout(10_000),
+                });
+                if (!photoRes.ok) {
+                  // Photo URL was rejected — fall back to plain message
+                  await fetch(`${TELEGRAM_API}/sendMessage`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      chat_id: chatId, text: caption,
+                      parse_mode: 'HTML', disable_web_page_preview: true,
+                      reply_to_message_id: message.message_id,
+                      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+                    }),
+                    signal: AbortSignal.timeout(8_000),
+                  });
+                }
+              } else {
+                await fetch(`${TELEGRAM_API}/sendMessage`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId, text: caption,
+                    parse_mode: 'HTML', disable_web_page_preview: true,
+                    reply_to_message_id: message.message_id,
+                    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+                  }),
+                  signal: AbortSignal.timeout(8_000),
+                });
+              }
+            } catch (err) { console.warn('[ca-card] reply send failed:', err.message); }
+          }
+        }
+      }
+    }
+  } catch (err) { console.warn('[user-lb] listener err:', err.message); }
+
   const { command, args } = parseCommand(message.text);
   try {
     switch (command) {
@@ -11708,8 +12513,18 @@ app.post('/webhook', async (req, res) => {
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
       // ── User-facing personal features ──
       case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/profile':     await handleProfileCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/myprofile':   await handleProfileCommand(chatId, '', fromId, message.from?.username || message.from?.first_name); break;
+      case '/track':       await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
+      case '/untrack':     await handleUntrackWalletCommand(chatId, args, fromId); break;
+      case '/mywallets':   await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
       case '/alert':       await handleAlertCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/alerts':      await handleAlertCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
+      // Primary group leaderboard — /lb (alias /grouplb kept for back-compat)
+      case '/lb':          await handleGroupLeaderboardCommand(chatId, args); break;
+      case '/grouplb':     await handleGroupLeaderboardCommand(chatId, args); break;
+      // Pulse's own call leaderboard — /pulselb (alias /leaderboard kept)
+      case '/pulselb':     await handleLeaderboardCommand(chatId, args); break;
       case '/leaderboard': await handleLeaderboardCommand(chatId, args); break;
       default:
         if (!message.text || message.text.startsWith('/')) break;
@@ -11778,6 +12593,21 @@ app.get('/api/v8/wallet-db-status', (req, res) => {
 app.get('/api/v8/learning-stats', (req, res) => {
   setCors(res);
   res.json({ ok: true, ...getLearningStats(dbInstance) });
+});
+
+// Bond rate stat — what % of our pre-bond calls actually graduated to Raydium
+app.get('/api/calls/bond-stats', async (req, res) => {
+  setCors(res);
+  try {
+    const { getBondRateStats, getBondingTrackerStats } = await import('./bonding-tracker.js');
+    res.json({
+      ok: true,
+      stats:   getBondRateStats(dbInstance),
+      tracker: getBondingTrackerStats(),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Manually trigger the learning loop — detects missed winners + asks
@@ -13352,6 +14182,51 @@ app.listen(PORT, async () => {
   setInterval(() => {
     processSmartMoneyRetries().catch(err => console.warn('[sm-retry] tick err:', err.message));
   }, 30_000);
+
+  // Bonding-curve tracker — every 15min, re-checks any pre-bond calls
+  // and marks them bonded_at / bonded_mcap when pump.fun reports complete.
+  // Powers the Bond Rate stat on the Calls page.
+  try {
+    const { startBondingTracker } = await import('./bonding-tracker.js');
+    startBondingTracker(dbInstance);
+  } catch (err) { console.warn('[bonding-tracker] failed to start:', err.message); }
+
+  // Group-leaderboard peak refresher — every 5min, walks ~60 oldest
+  // user_calls rows and updates peak_mcap / peak_multiple via DexScreener.
+  setInterval(async () => {
+    try {
+      const { refreshPeaks } = await import('./user-leaderboard.js');
+      const fetchMcap = async (ca) => {
+        try {
+          const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, {
+            signal: AbortSignal.timeout(6_000),
+          });
+          if (!r.ok) return null;
+          const j = await r.json();
+          const pair = (j.pairs || []).find(p => p.chainId === 'solana');
+          if (!pair) return null;
+          return { marketCap: pair.marketCap || pair.fdv || null };
+        } catch { return null; }
+      };
+      const result = await refreshPeaks(dbInstance, fetchMcap, 60);
+      if (result.checked > 0) console.log(`[user-lb] refreshed ${result.updated}/${result.checked} peaks`);
+    } catch (err) { console.warn('[user-lb] refresh err:', err.message); }
+  }, 5 * 60_000);
+
+  // ── AUTONOMOUS SELF-IMPROVEMENT LOOP ──────────────────────────────────
+  // Runs the agent + Control Station auto-optimize once every 24 hours
+  // per user directive ("wait 24 hours before the next change"). Claude
+  // analyzes recent wins/losses + missed winners, applies bounded knob
+  // changes, persists them through logConfigChange so they show up in
+  // /api/config/audit.
+  //
+  // No boot-time auto-fire — first auto-cycle fires 24h after boot so
+  // the bot has a full day of fresh outcome data before Claude tunes.
+  // Operator can still trigger on-demand any time via
+  // POST /api/self-improve/run-now.
+  setInterval(() => {
+    runSelfImproveLoop().catch(err => console.warn('[self-improve] tick err:', err.message));
+  }, 24 * 3_600_000);
 
   setInterval(() => {
     try { updateRegime(getCandidates({ limit: 50 }).rows); } catch {}

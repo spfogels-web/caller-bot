@@ -3411,14 +3411,44 @@ body::before {
           <button onclick="loadCallsTab()" style="background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.3);color:var(--green);border-radius:5px;padding:6px 14px;font-family:var(--mono);font-size:9px;cursor:pointer;font-weight:700;letter-spacing:1px">↻ REFRESH</button>
         </div>
 
-        <!-- Summary tiles -->
-        <div class="g5" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)">
+        <!-- Summary tiles — lifetime row -->
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
           <div class="tile"><div class="tile-label">TOTAL CALLS</div><div class="tile-val" id="callsTotal">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="callsWins">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="callsLosses">—</div></div>
           <div class="tile"><div class="tile-label" style="color:#18ffff">➖ NEUTRAL</div><div class="tile-val" style="color:#18ffff" id="callsNeutral">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="callsWinRate">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="callsAvgPeak">—</div></div>
+        </div>
+
+        <!-- Rolling-window: last 20 calls -->
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(255,215,64,0.25);background:rgba(255,215,64,0.04)"><div class="tile-label" style="color:var(--gold)">LAST 20 CALLS</div><div class="tile-val" style="color:var(--gold)" id="calls20Total">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls20Wins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls20Losses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls20WinDiff">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls20WinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls20AvgPeak">—</div></div>
+        </div>
+
+        <!-- Rolling-window: last 50 calls -->
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(24,255,255,0.25);background:rgba(24,255,255,0.04)"><div class="tile-label" style="color:#18ffff">LAST 50 CALLS</div><div class="tile-val" style="color:#18ffff" id="calls50Total">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls50Wins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls50Losses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls50WinDiff">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls50WinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls50AvgPeak">—</div></div>
+        </div>
+
+        <!-- Bonding-curve stats: how many of our pre-bond calls actually graduated -->
+        <div class="g5" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(255,109,0,0.3);background:rgba(255,109,0,0.04)"><div class="tile-label" style="color:#ff6d00">🎯 BONDING (lifetime)</div><div class="tile-val" style="color:#ff6d00;font-size:11px" id="bondTitle">pre-bond → graduated</div></div>
+          <div class="tile"><div class="tile-label">PRE-BOND CALLS</div><div class="tile-val" id="bondPreBond">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">7D BOND RATE</div><div class="tile-val" style="color:var(--cyan)" id="bondRate7d">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--purple)">POST-MIGRATION</div><div class="tile-val" style="color:var(--purple)" id="bondAlreadyMig">—</div></div>
         </div>
 
         <!-- ═══ 🔥 PROMOTED (scanner's top picks — awaiting full decision) ═══ -->
@@ -3430,6 +3460,18 @@ body::before {
           <div id="promotedFeed" class="calls-grid-promoted">
             <div style="grid-column:1/-1;text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading promoted coins...</div>
           </div>
+        </div>
+
+        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
+        <div id="perfChartSection" class="calls-section" style="display:none;margin-top:4px">
+          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
+            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="calls-section-sub">latest calls left-to-right</span>
+              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
+            </div>
+          </div>
+          <div id="perfChart" class="perf-chart"></div>
         </div>
 
         <!-- ═══ 📞 CALLED (actual AUTO_POSTs with outcome) ═══ -->
@@ -3450,18 +3492,6 @@ body::before {
           <div id="callsFeed" style="display:flex;flex-direction:column;gap:8px">
             <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:10px;color:var(--text3)">Loading calls...</div>
           </div>
-        </div>
-
-        <!-- ═══ 📊 CALL PERFORMANCE CHART (peak multiples) ═══ -->
-        <div id="perfChartSection" class="calls-section" style="display:none">
-          <div class="calls-section-hdr" style="--hdr-col:#ffd740">
-            <span>📊 CALL PERFORMANCE · peak multiple per call</span>
-            <div style="display:flex;align-items:center;gap:10px">
-              <span class="calls-section-sub">latest calls left-to-right</span>
-              <button type="button" onclick="refreshAllPeaks(this)" title="Re-query DexScreener for every pending call and roll peak_multiple forward" style="background:rgba(255,215,64,0.12);border:1px solid rgba(255,215,64,0.4);color:var(--gold);border-radius:4px;padding:4px 10px;font-family:var(--mono);font-size:8px;cursor:pointer;font-weight:700;letter-spacing:1px">🔄 REFRESH PEAKS</button>
-            </div>
-          </div>
-          <div id="perfChart" class="perf-chart"></div>
         </div>
 
         <!-- ═══ 🔬 ANALYZER — YES/NO verdict per promoted coin ═══ -->
@@ -3838,6 +3868,90 @@ body::before {
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- ═══ AI TUNING AUDIT — every change Claude has made, with full reasoning ═══ -->
+      <style>
+        .at-card{position:relative;background:linear-gradient(135deg,rgba(255,215,64,0.04),rgba(156,39,176,0.03));border:1px solid rgba(255,215,64,0.25);border-radius:12px;margin-bottom:14px;overflow:hidden}
+        .at-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,215,64,0.7),rgba(156,39,176,0.5),transparent)}
+        .at-hdr{padding:16px 18px;display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,rgba(255,215,64,0.05),rgba(156,39,176,0.03));border-bottom:1px solid rgba(255,215,64,0.15)}
+        .at-title-wrap{display:flex;align-items:center;gap:12px}
+        .at-logo{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,#ffd740,#9c27b0);display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 0 18px rgba(255,215,64,0.25)}
+        .at-title{font-family:var(--mono);font-size:13px;font-weight:700;color:#fff;letter-spacing:2px}
+        .at-subtitle{font-family:var(--mono);font-size:8px;color:var(--text3);letter-spacing:1.5px;margin-top:2px}
+        .at-actions{display:flex;gap:6px;align-items:center}
+        .at-btn{background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text2);border-radius:5px;padding:6px 11px;font-family:var(--mono);font-size:9px;cursor:pointer;letter-spacing:1px}
+        .at-btn:hover{background:rgba(255,255,255,0.09);color:#fff}
+        .at-btn-run{background:linear-gradient(135deg,rgba(255,215,64,0.18),rgba(156,39,176,0.14));border-color:rgba(255,215,64,0.5);color:var(--gold);font-weight:700}
+        .at-btn-run:hover{background:linear-gradient(135deg,rgba(255,215,64,0.28),rgba(156,39,176,0.22))}
+        .at-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:14px 18px;background:rgba(0,0,0,0.18)}
+        .at-stat{background:rgba(0,0,0,0.3);border:1px solid rgba(255,215,64,0.15);border-radius:7px;padding:10px;text-align:center}
+        .at-stat-val{font-family:'Orbitron',var(--mono);font-size:18px;font-weight:900;color:var(--gold);text-shadow:0 0 10px rgba(255,215,64,0.25)}
+        .at-stat-lbl{font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px;margin-top:3px}
+        .at-list{padding:14px 18px;max-height:560px;overflow-y:auto}
+        .at-row{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:7px;margin-bottom:6px;cursor:pointer;transition:border-color 0.15s}
+        .at-row:hover{border-color:rgba(255,215,64,0.35);background:rgba(255,215,64,0.03)}
+        .at-row.expanded{border-color:rgba(255,215,64,0.5);background:rgba(255,215,64,0.04)}
+        .at-row-head{display:grid;grid-template-columns:90px 80px 1fr 110px 24px;gap:10px;padding:10px 12px;align-items:center;font-family:var(--mono);font-size:9px}
+        .at-row-cat{font-weight:700;letter-spacing:1px}
+        .at-row-cat.SCORING  {color:var(--cyan)}
+        .at-row-cat.SCANNER  {color:var(--green)}
+        .at-row-cat.WALLETS  {color:var(--purple)}
+        .at-row-cat.PRELAUNCH{color:var(--orange)}
+        .at-row-cat.OUTCOMES {color:var(--gold)}
+        .at-row-cat.AI       {color:var(--blue)}
+        .at-row-src{font-size:8px;letter-spacing:1px}
+        .at-row-src.claude        {color:var(--gold)}
+        .at-row-src.auto_optimize {color:var(--gold)}
+        .at-row-src.operator      {color:var(--text3)}
+        .at-row-src.bot_a         {color:var(--cyan)}
+        .at-row-src.bot_b         {color:var(--purple)}
+        .at-row-knob{color:#fff;font-weight:700;font-size:10px}
+        .at-row-change{display:flex;gap:6px;align-items:center;font-size:8px}
+        .at-row-change .old{color:var(--red);text-decoration:line-through}
+        .at-row-change .arr{color:var(--text3)}
+        .at-row-change .new{color:var(--green);font-weight:700}
+        .at-row-time{color:var(--text3);font-size:8px;text-align:right}
+        .at-row-caret{color:var(--text3);font-size:11px;transition:transform 0.2s;text-align:center}
+        .at-row.expanded .at-row-caret{transform:rotate(90deg);color:var(--gold)}
+        .at-row-body{display:none;padding:0 14px 14px 14px;font-family:var(--mono);font-size:9px;color:var(--text2);line-height:1.6;border-top:1px dashed rgba(255,255,255,0.05);margin-top:4px;padding-top:10px}
+        .at-row.expanded .at-row-body{display:block}
+        .at-reason{padding:9px 11px;background:rgba(0,0,0,0.25);border-left:3px solid var(--gold);border-radius:3px;margin-bottom:8px}
+        .at-reason-label{color:var(--gold);font-size:7px;letter-spacing:1.5px;margin-bottom:4px}
+        .at-meta-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px}
+        .at-meta-cell{background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.05);border-radius:4px;padding:6px 8px}
+        .at-meta-lbl{color:var(--text3);font-size:7px;letter-spacing:1px}
+        .at-meta-val{color:#fff;font-size:10px;font-weight:700;margin-top:2px}
+        .at-revert{background:rgba(255,109,0,0.08);border:1px solid rgba(255,109,0,0.3);color:var(--orange);padding:5px 12px;border-radius:4px;font-family:var(--mono);font-size:8px;cursor:pointer;letter-spacing:1px}
+        .at-revert:hover{background:rgba(255,109,0,0.2);color:#fff}
+        .at-empty{text-align:center;padding:36px 14px;font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:1px}
+        .at-status{padding:10px 18px;font-family:var(--mono);font-size:8px;letter-spacing:0.5px;border-top:1px solid rgba(255,255,255,0.04);min-height:14px}
+        .at-status.ok{color:var(--green)} .at-status.err{color:var(--red)} .at-status.busy{color:var(--gold)}
+      </style>
+      <div class="at-card" id="aiTuningAuditCard">
+        <div class="at-hdr">
+          <div class="at-title-wrap">
+            <div class="at-logo">📜</div>
+            <div>
+              <div class="at-title">AI TUNING AUDIT</div>
+              <div class="at-subtitle">EVERY UPGRADE · EVERY KNOB CHANGE · FULL REASONING TRAIL</div>
+            </div>
+          </div>
+          <div class="at-actions">
+            <button class="at-btn at-btn-run" onclick="aiTuningRunNow(this)">⚡ RUN NOW</button>
+            <button class="at-btn" onclick="aiTuningRefresh()">↻ REFRESH</button>
+          </div>
+        </div>
+        <div class="at-stats">
+          <div class="at-stat"><div class="at-stat-val" id="atStatTotal">—</div><div class="at-stat-lbl">TOTAL CHANGES</div></div>
+          <div class="at-stat"><div class="at-stat-val" id="atStatClaude" style="color:var(--gold)">—</div><div class="at-stat-lbl">BY AI (CLAUDE)</div></div>
+          <div class="at-stat"><div class="at-stat-val" id="atStatOperator" style="color:var(--cyan)">—</div><div class="at-stat-lbl">BY OPERATOR</div></div>
+          <div class="at-stat"><div class="at-stat-val" id="atStatLast" style="font-size:11px">—</div><div class="at-stat-lbl">LAST CHANGE</div></div>
+        </div>
+        <div class="at-list" id="atList">
+          <div class="at-empty">Loading audit trail…</div>
+        </div>
+        <div class="at-status" id="atStatus"></div>
       </div>
 
       <!-- ═══ CONTROL STATION — every knob that affects gem discovery ═══ -->
@@ -9379,6 +9493,138 @@ syncBotToggle();
 setTimeout(() => { if (typeof loadWalletTiles === 'function') loadWalletTiles(); }, 2000);
 setTimeout(() => { if (typeof loadMidcapStats === 'function') loadMidcapStats(); }, 2500);
 setTimeout(() => { if (typeof loadWhaleFundingEvents === 'function') loadWhaleFundingEvents(); }, 3000);
+setTimeout(() => { if (typeof aiTuningRefresh === 'function') aiTuningRefresh(); }, 3500);
+
+// ── AI TUNING AUDIT (below Brain Intelligence on the AI tab) ──────────
+function _atFmtAgo(ts) {
+  if (!ts) return '?';
+  const ms = Date.now() - new Date(ts.includes('Z') ? ts : ts + 'Z').getTime();
+  if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
+  if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
+  if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + 'h ago';
+  return Math.floor(ms / 86_400_000) + 'd ago';
+}
+function _atFmtVal(v) {
+  if (v == null) return '—';
+  if (typeof v === 'object') {
+    const s = JSON.stringify(v);
+    return s.length > 40 ? s.slice(0, 37) + '…' : s;
+  }
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(2);
+  const s = String(v);
+  return s.length > 30 ? s.slice(0, 27) + '…' : s;
+}
+function _atSafeText(s) {
+  if (s == null) return '';
+  return String(s).replace(/[<>&]/g, c => ({ '<':'&lt;', '>':'&gt;', '&':'&amp;' }[c]));
+}
+
+async function aiTuningRefresh() {
+  const list = document.getElementById('atList');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/config/audit?limit=50');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'audit fetch failed');
+    const rows = data.rows || [];
+    // Update top stats
+    const setT = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    setT('atStatTotal', rows.length);
+    setT('atStatClaude', rows.filter(r => /claude|auto_optimize|bot_/.test(r.source || '')).length);
+    setT('atStatOperator', rows.filter(r => r.source === 'operator').length);
+    setT('atStatLast', rows.length ? _atFmtAgo(rows[0].changed_at) : '—');
+
+    if (rows.length === 0) {
+      list.innerHTML = '<div class="at-empty">No upgrades or changes recorded yet. Click ⚡ RUN NOW to fire the AI tuner — Claude reads lifetime calls + 10x+ moonshots and proposes data-grounded changes.</div>';
+      return;
+    }
+
+    list.innerHTML = rows.map((r, i) => {
+      const oldV = _atFmtVal(r.old_value);
+      const newV = _atFmtVal(r.new_value);
+      const cat = (r.category || '').toUpperCase();
+      const src = (r.source || 'operator').toLowerCase();
+      const isAi = /claude|auto_optimize|bot_/.test(src);
+      const reason = r.reason || '';
+      const knob = r.knob_key || '?';
+      return `
+        <div class="at-row" data-row="${i}" onclick="aiTuningToggleRow(${i})">
+          <div class="at-row-head">
+            <div class="at-row-cat ${cat}">${_atSafeText(cat)}</div>
+            <div class="at-row-src ${src}">${isAi ? '🤖 ' : ''}${_atSafeText(src.toUpperCase())}</div>
+            <div class="at-row-knob">${_atSafeText(knob)}</div>
+            <div class="at-row-change"><span class="old">${_atSafeText(oldV)}</span><span class="arr">→</span><span class="new">${_atSafeText(newV)}</span></div>
+            <div class="at-row-time">${_atFmtAgo(r.changed_at)}</div>
+            <div class="at-row-caret">▶</div>
+          </div>
+          <div class="at-row-body">
+            ${reason ? `
+              <div class="at-reason">
+                <div class="at-reason-label">REASONING</div>
+                <div>${_atSafeText(reason)}</div>
+              </div>` : '<div style="color:var(--text3);font-style:italic;margin-bottom:8px">No reason recorded for this change.</div>'}
+            <div class="at-meta-grid">
+              <div class="at-meta-cell"><div class="at-meta-lbl">CATEGORY</div><div class="at-meta-val">${_atSafeText(cat)}</div></div>
+              <div class="at-meta-cell"><div class="at-meta-lbl">SOURCE</div><div class="at-meta-val">${isAi ? '🤖 ' : '👤 '}${_atSafeText(src)}</div></div>
+              <div class="at-meta-cell"><div class="at-meta-lbl">CHANGE ID</div><div class="at-meta-val">#${r.id}</div></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <span style="color:var(--text3);font-size:8px">${new Date(r.changed_at).toLocaleString()}</span>
+              <button class="at-revert" onclick="event.stopPropagation();aiTuningRevert(${r.id}, this)">↶ REVERT</button>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="at-empty" style="color:var(--red)">✕ ${_atSafeText(err.message)}</div>`;
+  }
+}
+
+function aiTuningToggleRow(i) {
+  const row = document.querySelector(`.at-row[data-row="${i}"]`);
+  if (row) row.classList.toggle('expanded');
+}
+
+async function aiTuningRunNow(btn) {
+  const status = document.getElementById('atStatus');
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ FIRING…'; }
+  if (status) { status.textContent = 'AI tuner triggered. Claude is reviewing lifetime data + 10x+ moonshots…'; status.className = 'at-status busy'; }
+  try {
+    const res = await fetch('/api/self-improve/run-now', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'trigger failed');
+    if (status) { status.textContent = '✓ ' + (data.message || 'Triggered'); status.className = 'at-status ok'; }
+    // Poll the audit log every 15s for 2min to catch new rows
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls++;
+      aiTuningRefresh();
+      if (polls >= 8) clearInterval(timer);
+    }, 15_000);
+    aiTuningRefresh();
+  } catch (err) {
+    if (status) { status.textContent = '✕ ' + err.message; status.className = 'at-status err'; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '⚡ RUN NOW'; }
+  }
+}
+
+async function aiTuningRevert(id, btn) {
+  if (!confirm(`Revert change #${id} to its previous value?`)) return;
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳…'; }
+  try {
+    const res = await fetch(`/api/config/revert/${id}`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'revert failed');
+    aiTuningRefresh();
+  } catch (err) {
+    alert('Revert failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '↶ REVERT'; }
+  }
+}
 
 
 // ── MOBILE NAVIGATION ─────────────────────────────────────
@@ -13395,6 +13641,46 @@ async function loadCallsTab(){
   setText('callsWinRate', winRate + (pending > 0 ? ' <span style="font-size:10px;color:var(--text3);font-weight:400">(' + pending + ' pending)</span>' : ''));
   setText('callsAvgPeak', avgPeak);
   setText('tb-calls-badge', _callsAll.length);
+
+  // Rolling-window stats — last 20 / last 50 calls (most recent first by called_at)
+  const sortedByTime = [..._callsAll].sort((a, b) => {
+    const ta = new Date(a.called_at || a.posted_at || 0).getTime();
+    const tb = new Date(b.called_at || b.posted_at || 0).getTime();
+    return tb - ta;
+  });
+  const renderWindow = (slice, prefix) => {
+    const w  = slice.filter(isWin).length;
+    const l  = slice.filter(isLoss).length;
+    const r  = w + l;
+    const wr = r > 0 ? Math.round(w / r * 100) + '%' : '—';
+    const peaksW = slice.filter(c => c.peak_multiple != null && c.peak_multiple > 0).map(c => c.peak_multiple);
+    const ap = peaksW.length > 0 ? (peaksW.reduce((a,b)=>a+b,0) / peaksW.length).toFixed(2) + 'x' : '—';
+    const diff = w - l;
+    const diffStr = diff > 0 ? '+' + diff : String(diff);
+    const diffCol = diff > 0 ? 'var(--green)' : diff < 0 ? 'var(--red)' : 'var(--text2)';
+    setText(prefix + 'Total', slice.length);
+    setText(prefix + 'Wins', w);
+    setText(prefix + 'Losses', l);
+    const diffEl = document.getElementById(prefix + 'WinDiff');
+    if (diffEl) { diffEl.textContent = diffStr; diffEl.style.color = diffCol; }
+    setText(prefix + 'WinRate', wr);
+    setText(prefix + 'AvgPeak', ap);
+  };
+  renderWindow(sortedByTime.slice(0, 20), 'calls20');
+  renderWindow(sortedByTime.slice(0, 50), 'calls50');
+
+  // Bond-rate row (pump.fun graduation tracking)
+  fetch('/api/calls/bond-stats').then(r => r.json()).then(d => {
+    if (!d?.ok) return;
+    const lt = d.stats?.lifetime || {};
+    const w7 = d.stats?.last7d || {};
+    setText('bondPreBond',     (lt.preBondCalls || 0).toLocaleString());
+    setText('bondGraduated',   (lt.bonded || 0).toLocaleString());
+    setText('bondRate',        lt.bondRate != null ? lt.bondRate + '%' : '—');
+    setText('bondRate7d',      w7.bondRate != null ? w7.bondRate + '%' : '—');
+    setText('bondAlreadyMig',  (lt.alreadyMigrated || 0).toLocaleString());
+  }).catch(() => {});
+
   renderCallsFeed();
 }
 
