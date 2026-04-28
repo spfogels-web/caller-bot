@@ -7319,7 +7319,11 @@ app.get('/api/control-station', (req, res) => {
 });
 
 // POST — Claude auto-optimizes freely, applies changes, logs detailed reasoning
-app.post('/api/control-station/auto-optimize', express.json(), async (req, res) => {
+// Auto-optimize handler — registered for BOTH POST (canonical) and GET
+// (so the operator can paste the URL into a browser bar to fire the
+// optimizer and see Claude's full response inline). The handler doesn't
+// read req.body, so GET works fine.
+const _autoOptimizeHandler = async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
   try {
@@ -7661,7 +7665,9 @@ Respond ONLY with valid JSON:
     console.error('[control-station/auto-optimize]', err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
-});
+};
+app.post('/api/control-station/auto-optimize', express.json(), _autoOptimizeHandler);
+app.get('/api/control-station/auto-optimize', _autoOptimizeHandler);
 
 // ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
 app.get('/api/agent/memory', (req, res) => {
