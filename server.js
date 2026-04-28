@@ -12904,6 +12904,120 @@ app.get('/api/calls/bond-stats', async (req, res) => {
   }
 });
 
+// One-shot backfill of pump_fun_stage_at_call + bonding_pct_at_call for
+// historical calls that predate the bonding columns. For each call where the
+// stage is NULL, hit pump.fun /coins/{mint}: if it's a pump.fun coin, infer
+// the at-call stage from mcap_at_call ($69K = graduation), compute bonding %,
+// and (if currently graduated) approximate bonded_at/bonded_mcap from the
+// current pump.fun snapshot. Non-pump.fun coins are left NULL — they were
+// never on the bonding curve. Idempotent: skips rows already populated.
+//
+// Runs asynchronously since 200+ pump.fun calls × 200ms = ~40s+. Fire once,
+// then poll /api/calls/bonding-backfill/status to watch progress.
+let _bondingBackfillState = { running: false, startedAt: null, total: 0, processed: 0, updated: 0, skipped: 0, errors: 0, lastError: null, finishedAt: null };
+
+async function _runBondingBackfill() {
+  if (_bondingBackfillState.running) return;
+  _bondingBackfillState = { running: true, startedAt: new Date().toISOString(), total: 0, processed: 0, updated: 0, skipped: 0, errors: 0, lastError: null, finishedAt: null };
+
+  try {
+    const { fetchPumpFunCoin } = await import('./helius-listener.js');
+    const calls = dbInstance.prepare(`
+      SELECT id, contract_address, market_cap_at_call, called_at
+      FROM calls
+      WHERE pump_fun_stage_at_call IS NULL
+        AND contract_address IS NOT NULL
+      ORDER BY called_at DESC
+    `).all();
+    _bondingBackfillState.total = calls.length;
+    console.log(`[bonding-backfill] starting — ${calls.length} calls to scan`);
+
+    const update = dbInstance.prepare(`
+      UPDATE calls
+      SET pump_fun_stage_at_call = ?,
+          bonding_pct_at_call    = ?,
+          bonded_at              = COALESCE(bonded_at, ?),
+          bonded_mcap            = COALESCE(bonded_mcap, ?)
+      WHERE id = ?
+    `);
+
+    for (const call of calls) {
+      _bondingBackfillState.processed++;
+      try {
+        const pf = await fetchPumpFunCoin(call.contract_address);
+        if (!pf) { _bondingBackfillState.skipped++; await sleep(180); continue; }
+
+        // pf.bondingCurveComplete is the CURRENT graduation state on pump.fun.
+        // We use mcap_at_call to infer the AT-CALL stage, which is what the
+        // calls.pump_fun_stage_at_call column represents.
+        const mcapAtCall = Number(call.market_cap_at_call) || null;
+        let stageAtCall;
+        let pctAtCall;
+        if (mcapAtCall != null && mcapAtCall < 69_000) {
+          stageAtCall = 'PRE_BOND';
+          pctAtCall   = Math.min((mcapAtCall / 69_000) * 100, 100);
+        } else if (mcapAtCall != null && mcapAtCall >= 69_000) {
+          stageAtCall = 'MIGRATED';
+          pctAtCall   = 100;
+        } else {
+          // No mcap_at_call — fall back to current pump.fun state. Less precise
+          // but better than leaving NULL.
+          stageAtCall = pf.bondingCurveComplete ? 'MIGRATED' : 'PRE_BOND';
+          pctAtCall   = pf.bondingCurvePct ?? null;
+        }
+
+        // If pump.fun shows the coin is currently graduated AND we tagged it
+        // as PRE_BOND at call-time, the call is "bonded" (graduated post-call).
+        // Use the current snapshot's mcap as a best-effort bonded_mcap (real
+        // graduation mcap is ~$69K but pump.fun doesn't expose the exact moment).
+        let bondedAt = null, bondedMcap = null;
+        if (stageAtCall === 'PRE_BOND' && pf.bondingCurveComplete) {
+          bondedAt   = new Date().toISOString();          // approx — actual ts unknown
+          bondedMcap = pf.marketCap ?? 69_000;
+        }
+
+        update.run(stageAtCall, pctAtCall, bondedAt, bondedMcap, call.id);
+        _bondingBackfillState.updated++;
+      } catch (err) {
+        _bondingBackfillState.errors++;
+        _bondingBackfillState.lastError = err.message;
+      }
+      // Pace ~5 req/sec to pump.fun (their public API is generous but be polite)
+      await sleep(180);
+      if (_bondingBackfillState.processed % 25 === 0) {
+        console.log(`[bonding-backfill] progress ${_bondingBackfillState.processed}/${calls.length} — updated:${_bondingBackfillState.updated} skipped:${_bondingBackfillState.skipped} errors:${_bondingBackfillState.errors}`);
+      }
+    }
+
+    _bondingBackfillState.finishedAt = new Date().toISOString();
+    _bondingBackfillState.running = false;
+    console.log(`[bonding-backfill] done — total:${_bondingBackfillState.total} updated:${_bondingBackfillState.updated} skipped:${_bondingBackfillState.skipped} errors:${_bondingBackfillState.errors}`);
+    logEvent('INFO', 'BONDING_BACKFILL_DONE', `${_bondingBackfillState.updated} updated, ${_bondingBackfillState.skipped} skipped, ${_bondingBackfillState.errors} errors`);
+  } catch (err) {
+    _bondingBackfillState.running = false;
+    _bondingBackfillState.lastError = err.message;
+    _bondingBackfillState.finishedAt = new Date().toISOString();
+    console.warn('[bonding-backfill] fatal:', err.message);
+  }
+}
+
+const _bondingBackfillKickoff = (req, res) => {
+  setCors(res);
+  if (_bondingBackfillState.running) {
+    return res.json({ ok: true, action: 'already_running', state: _bondingBackfillState });
+  }
+  // Fire and forget — caller polls /status for progress.
+  _runBondingBackfill().catch(err => console.warn('[bonding-backfill] err:', err.message));
+  res.json({ ok: true, action: 'started', message: 'Bonding backfill kicked off — poll /api/calls/bonding-backfill/status for progress.' });
+};
+const _bondingBackfillStatus = (req, res) => {
+  setCors(res);
+  res.json({ ok: true, ..._bondingBackfillState });
+};
+app.post('/api/calls/bonding-backfill',         _bondingBackfillKickoff);
+app.get('/api/calls/bonding-backfill',          _bondingBackfillKickoff);   // browser-bar trigger
+app.get('/api/calls/bonding-backfill/status',   _bondingBackfillStatus);
+
 // Manually trigger the learning loop — detects missed winners + asks
 // Claude to write scoring recommendations. Normally runs every 6h, but
 // fresh instances / users hitting the Analytics tab want feedback NOW.
