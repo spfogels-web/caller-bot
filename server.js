@@ -13179,6 +13179,84 @@ app.post('/api/calls/fix-stored-peaks', (req, res) => {
 });
 app.get('/api/calls/fix-stored-peaks', (req, res) => { req.method='POST'; return app._router.handle(req, res); });
 
+// MANUAL PEAK OVERRIDE — when the auto-tracker missed the true peak (e.g.
+// coin spiked between checks, then died). Lets admin set the correct peak
+// for any call by CA. Cascades to all 4 outcome tables.
+//
+// Usage:
+//   POST /api/calls/manual-peak  body: { ca, peakMcap }      ← preferred
+//   POST /api/calls/manual-peak  body: { ca, peakMultiple }
+//   GET  /api/calls/manual-peak?ca=...&peakMcap=1800000      ← browser-friendly
+//
+// Only rolls FORWARD (refuses to lower a higher stored peak unless ?force=1).
+function applyManualPeakOverride({ ca, peakMcap, peakMultiple, force = false }) {
+  if (!ca) return { ok: false, error: 'ca required' };
+  const call = dbInstance.prepare(`SELECT * FROM calls WHERE contract_address = ? ORDER BY called_at DESC LIMIT 1`).get(ca);
+  if (!call) return { ok: false, error: 'No call found for that CA' };
+  if (!call.market_cap_at_call) return { ok: false, error: 'Call has no market_cap_at_call — cannot compute multiple' };
+
+  // Resolve to both peakMcap + peakMultiple
+  let mcap = peakMcap != null ? Number(peakMcap) : null;
+  let mult = peakMultiple != null ? Number(peakMultiple) : null;
+  if (!Number.isFinite(mcap) && Number.isFinite(mult)) mcap = mult * call.market_cap_at_call;
+  if (Number.isFinite(mcap) && !Number.isFinite(mult)) mult = mcap / call.market_cap_at_call;
+  if (!Number.isFinite(mcap) || !Number.isFinite(mult)) return { ok: false, error: 'peakMcap or peakMultiple required (numeric)' };
+  if (mult <= 0 || mcap <= 0) return { ok: false, error: 'Values must be positive' };
+
+  // Roll-forward check
+  if (!force && (call.peak_multiple ?? 0) >= mult) {
+    return { ok: false, error: `Stored peak ${call.peak_multiple}x already >= requested ${mult.toFixed(2)}x — pass ?force=1 to override` };
+  }
+
+  // Outcome derived from new multiple
+  const outcome = mult >= 1.5 ? 'WIN' : mult >= 0.9 ? 'NEUTRAL' : mult >= 0.5 ? 'LOSS' : 'RUG';
+
+  try {
+    dbInstance.prepare(`
+      UPDATE calls SET
+        peak_multiple = ?,
+        peak_mcap = ?,
+        outcome = ?,
+        outcome_source = 'MANUAL_OVERRIDE',
+        outcome_set_at = datetime('now'),
+        auto_resolved = 1,
+        auto_resolved_at = COALESCE(auto_resolved_at, datetime('now'))
+      WHERE id = ?
+    `).run(mult, mcap, outcome, call.id);
+    // Cascade
+    try { dbInstance.prepare(`UPDATE audit_archive SET peak_multiple=?, outcome=?, outcome_locked_at=datetime('now') WHERE contract_address=?`).run(mult, outcome, ca); } catch {}
+    try { dbInstance.prepare(`UPDATE calls_archive SET peak_multiple=?, outcome=? WHERE contract_address=?`).run(mult, outcome, ca); } catch {}
+    try { dbInstance.prepare(`UPDATE coin_fingerprints SET peak_multiple=?, peak_mcap=?, outcome=?, resolved_at_ms=COALESCE(resolved_at_ms, ?) WHERE contract_address=?`).run(mult, mcap, outcome, Date.now(), ca); } catch {}
+
+    console.log(`[manual-peak] ✓ $${call.token} updated: peak=${mult.toFixed(2)}x mcap=$${Math.round(mcap/1000)}K outcome=${outcome} (was ${call.peak_multiple}x ${call.outcome})`);
+    logEvent('INFO', 'MANUAL_PEAK_OVERRIDE', `${call.token}: ${call.peak_multiple}x → ${mult.toFixed(2)}x ($${Math.round(mcap/1000)}K)`);
+    return {
+      ok: true,
+      token: call.token,
+      contract_address: ca,
+      previous: { peak_multiple: call.peak_multiple, peak_mcap: call.peak_mcap, outcome: call.outcome },
+      updated: { peak_multiple: +mult.toFixed(3), peak_mcap: mcap, outcome },
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+app.post('/api/calls/manual-peak', express.json(), (req, res) => {
+  setCors(res);
+  const { ca, peakMcap, peakMultiple } = req.body || {};
+  const force = req.query.force === '1' || req.query.force === 'true';
+  res.json(applyManualPeakOverride({ ca, peakMcap, peakMultiple, force }));
+});
+app.get('/api/calls/manual-peak', (req, res) => {
+  setCors(res);
+  const ca = req.query.ca;
+  const peakMcap = req.query.peakMcap;
+  const peakMultiple = req.query.peakMultiple;
+  const force = req.query.force === '1' || req.query.force === 'true';
+  res.json(applyManualPeakOverride({ ca, peakMcap, peakMultiple, force }));
+});
+
 // AUTO-SYNC — runs the same fix every 5 minutes so peak/outcome can't
 // drift. Silent unless something gets upgraded. Logs upgrades to the
 // system event log so they're visible in the audit feed.
