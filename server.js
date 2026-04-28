@@ -66,6 +66,7 @@ import { runExitMonitor, setExitTelegramHook, getExitMonitorStats }             
 import {
   processHeliusWebhookBatch, syncTrackedAddressesToHelius, listHeliusWebhooks,
   setSwarmHook, setEventHook, setIsWalletTrackedFn,
+  getEnhancedApiKey,
 } from './helius-webhook.js';
 import {
   getAllBotStatus, botStartCycle, botEndCycle, botPosted, botError,
@@ -13323,9 +13324,11 @@ app.post('/api/helius/webhook', express.json({ limit: '10mb' }), (req, res) => {
 app.post('/api/helius/webhook/setup', async (req, res) => {
   setCors(res);
   const webhookId = process.env.HELIUS_WEBHOOK_ID || (req.body || {}).webhookId;
-  const apiKey = process.env.HELIUS_API_KEY;
+  // Prefer HELIUS_ENHANCED_API_KEY (specific to Enhanced APIs + webhooks);
+  // falls back to HELIUS_API_KEY for backwards compat
+  const apiKey = getEnhancedApiKey();
   if (!webhookId) return res.status(400).json({ ok: false, error: 'HELIUS_WEBHOOK_ID env var or webhookId in body required' });
-  if (!apiKey)    return res.status(400).json({ ok: false, error: 'HELIUS_API_KEY missing' });
+  if (!apiKey)    return res.status(400).json({ ok: false, error: 'HELIUS_ENHANCED_API_KEY (or HELIUS_API_KEY) missing' });
 
   try {
     // Pull all tracked wallet addresses from DB
@@ -13355,8 +13358,8 @@ app.get('/api/helius/webhook/stats', (req, res) => {
 // List webhooks registered on the Helius account (for setup verification)
 app.get('/api/helius/webhook/list', async (req, res) => {
   setCors(res);
-  const apiKey = process.env.HELIUS_API_KEY;
-  if (!apiKey) return res.status(400).json({ ok: false, error: 'HELIUS_API_KEY missing' });
+  const apiKey = getEnhancedApiKey();
+  if (!apiKey) return res.status(400).json({ ok: false, error: 'HELIUS_ENHANCED_API_KEY (or HELIUS_API_KEY) missing' });
   try {
     const result = await listHeliusWebhooks(apiKey);
     res.json(result);

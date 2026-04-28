@@ -174,6 +174,17 @@ export function processHeliusWebhookBatch(payload, dbHelpers) {
 }
 
 /**
+ * Helper: returns the right API key for Enhanced API calls.
+ * Prefers HELIUS_ENHANCED_API_KEY (specifically scoped for Enhanced APIs +
+ * webhooks) and falls back to HELIUS_API_KEY (the general one used by RPC).
+ * This lets operators use separate keys for separate services if their
+ * Helius account has multiple keys configured.
+ */
+export function getEnhancedApiKey() {
+  return process.env.HELIUS_ENHANCED_API_KEY || process.env.HELIUS_API_KEY || null;
+}
+
+/**
  * Push our 4,806 wallet addresses to a Helius webhook by webhook ID.
  * Replaces the webhook's accountAddresses list with our current tracked set.
  * Idempotent — safe to call multiple times.
