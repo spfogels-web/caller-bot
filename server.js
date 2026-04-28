@@ -13058,6 +13058,54 @@ app.get('/api/diagnose/holders/:ca', async (req, res) => {
   res.json({ ok: true, ca, result });
 });
 
+// Diagnose the current Railway SOLSCAN_API_KEY without exposing it. Hits
+// /v2.0/account/transfer with a known dummy address (wrapped SOL mint) and
+// reports the exact HTTP status + response body. Tells the operator whether
+// the env var is missing, expired (401), forbidden by plan tier (403), or
+// fine but Railway still has a stale value.
+const _solscanDiagHandler = async (req, res) => {
+  setCors(res);
+  const key = process.env.SOLSCAN_API_KEY || '';
+  const out = {
+    keyPresent:    !!key,
+    keyLength:     key.length,
+    keyFirst6:     key ? key.slice(0, 6) : null,    // safe to show — JWT prefix is public
+    keyLast4:      key ? key.slice(-4)  : null,
+    railway_redeployed: 'Check that Railway is on commit 9aa11b0 or later',
+    test:          null,
+  };
+  if (!key) {
+    out.test = { skipped: 'no_key', advice: 'Set SOLSCAN_API_KEY in Railway env and redeploy' };
+    return res.json(out);
+  }
+  try {
+    const url = 'https://pro-api.solscan.io/v2.0/account/transfer'
+              + '?address=So11111111111111111111111111111111111111112&page=1&page_size=10';
+    const r = await fetch(url, {
+      headers: { token: key, accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const text = await r.text();
+    let body = null;
+    try { body = JSON.parse(text); } catch { body = text.slice(0, 300); }
+    out.test = {
+      status: r.status,
+      ok:     r.ok,
+      bodySnippet: typeof body === 'string' ? body : JSON.stringify(body).slice(0, 300),
+    };
+    if (r.status === 401) out.advice = 'Key is invalid or rotated — copy the current key from https://pro.solscan.io/account → API Management and update Railway';
+    else if (r.status === 403) out.advice = 'Plan tier does not allow this endpoint — upgrade Solscan plan or disable enricher';
+    else if (r.ok) out.advice = '✅ Key works. If 401s still appear in logs, Railway has stale env — click Redeploy.';
+    else out.advice = `Unexpected status ${r.status} — see bodySnippet`;
+  } catch (err) {
+    out.test = { error: err.message };
+    out.advice = 'Network error reaching Solscan — try again';
+  }
+  res.json(out);
+};
+app.get('/api/diagnostics/solscan',  _solscanDiagHandler);
+app.post('/api/diagnostics/solscan', _solscanDiagHandler);
+
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
