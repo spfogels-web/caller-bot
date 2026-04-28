@@ -323,6 +323,16 @@ export async function enrichStaleWallets(dbInstance, batchSize = MAX_PER_RUN) {
  * Start the background interval. Call once from server.js startup.
  */
 export function startSolscanEnrichmentLoop(dbInstance, intervalMs = 6 * 60 * 60_000) {
+  // Operator kill-switch: set SOLSCAN_DISABLED=1 in Railway env when the
+  // Solscan free-tier 401s ("Unauthorized: Please upgrade your api key level")
+  // are spammy and you don't want to pay for Pro. Stops the loop entirely.
+  // Self-trained W/L tracking (our_win_count / our_loss_count) keeps working
+  // without Solscan — see creditWalletsForWin / creditWalletsForLoss in db.js.
+  const disabled = String(process.env.SOLSCAN_DISABLED || '').toLowerCase();
+  if (disabled === '1' || disabled === 'true') {
+    console.log('[solscan-enricher] SOLSCAN_DISABLED=1 — enricher loop disabled');
+    return null;
+  }
   if (!SOLSCAN_API_KEY) {
     console.warn('[solscan-enricher] not starting — SOLSCAN_API_KEY not set');
     return null;
