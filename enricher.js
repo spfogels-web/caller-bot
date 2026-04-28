@@ -1010,6 +1010,10 @@ export async function enrichCandidate(candidate) {
       if (pf) {
         enriched.pumpFunStage        = pf.stage;                    // 'PRE_BOND' | 'MIGRATED'
         enriched.pumpFunMigrated     = pf.bondingCurveComplete === true;
+        // Fall-through image: DexScreener doesn't always have a token's
+        // image (especially fresh pump.fun coins) — pump.fun does. Only
+        // overwrite if not already set so DS-supplied images take priority.
+        if (!enriched.imageUrl && pf.imageUrl) enriched.imageUrl = pf.imageUrl;
         enriched.pumpFunBondingPct   = pf.bondingCurvePct ?? null;
         enriched.pumpFunReplyCount   = pf.replyCount ?? 0;
         enriched.pumpFunKOTH         = pf.pumpRank === 'KOTH';

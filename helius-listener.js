@@ -623,6 +623,7 @@ function normalizePumpCoin(raw) {
     replyCount:        raw.reply_count ?? 0,
     livestreamUrl:     raw.video_url ?? null,
     pumpRank:          raw.king_of_the_hill_timestamp ? 'KOTH' : null,
+    imageUrl:          raw.image_uri ?? raw.image ?? null,   // for TG/UI banners
     detectionSource:   'pumpfun_api',
     narrativeTags:     extractNarrativeTags(raw.name, raw.description, raw.symbol),
     notes:             [],

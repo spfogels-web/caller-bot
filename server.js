@@ -3408,8 +3408,14 @@ async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
         } catch {}
         return;
       }
+      // Capture the failure body BEFORE any retry — Telegram describes
+      // exactly why it rejected (file too big, MIME wrong, URL 404, etc).
+      const usedFileId = !!_leaderboardBannerFileId;
+      const errBody    = await res.text().catch(() => '');
+      console.warn(`[TG-leaderboard] photo send failed (used ${usedFileId ? 'file_id' : 'URL'}, status=${res.status}): ${errBody.slice(0, 250)}`);
+
       // If file_id was stale (e.g. server restart) clear it and retry once with URL
-      if (_leaderboardBannerFileId) {
+      if (usedFileId) {
         _leaderboardBannerFileId = null;
         const retry = await fetch(`${TELEGRAM_API}/sendPhoto`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3419,9 +3425,18 @@ async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
           }),
           signal: AbortSignal.timeout(10_000),
         });
-        if (retry.ok) return;
+        if (retry.ok) {
+          // Cache the new file_id from the URL-based send
+          try {
+            const j = await retry.json();
+            const photos = j?.result?.photo;
+            if (photos?.length) _leaderboardBannerFileId = photos[photos.length - 1].file_id;
+          } catch {}
+          return;
+        }
+        const retryBody = await retry.text().catch(() => '');
+        console.warn(`[TG-leaderboard] URL retry also failed (status=${retry.status}): ${retryBody.slice(0, 250)}`);
       }
-      console.warn(`[TG-leaderboard] photo send failed: ${(await res.text()).slice(0, 200)}`);
     } catch (err) {
       console.warn(`[TG-leaderboard] photo error: ${err.message}`);
     }
