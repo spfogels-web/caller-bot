@@ -5229,6 +5229,59 @@ async function processCandidate(candidate, isRescan = false) {
       finalDecision = 'WATCHLIST';
     }
 
+    // ── CONFIRMATION TIER GATE ──────────────────────────────────────────────
+    // Goal: only post coins where strength has been CONFIRMED across ≥2 scans.
+    // First-scan POST gets demoted to WATCHLIST silently; the rescan loop
+    // re-evaluates with delta data and promotes if confirmation criteria met.
+    //
+    // Bypasses (these have their own confirmation built in):
+    //   - Wallet-triggered (smart money / cluster / KOL / fast-lane)
+    //   - REVIVING decision (already a 2nd-leg / multi-scan signal)
+    //   - EXPLOSIVE_LAUNCH (price already up >100% 1h with 100+ holders =
+    //     market itself has confirmed strength via real volume)
+    //
+    // Toggle: CONFIRMATION_GATE_ENABLED env var.
+    //   "false" / "0" / unset → DISABLED (post on first scan as before)
+    //   "true" / "1"          → ENABLED (require rescan confirmation)
+    if (finalDecision === 'AUTO_POST') {
+      const confirmGateOn = String(process.env.CONFIRMATION_GATE_ENABLED || '').toLowerCase();
+      const gateEnabled = confirmGateOn === 'true' || confirmGateOn === '1';
+      if (gateEnabled) {
+        const isFirstScan = !enrichedCandidate._deltas || enrichedCandidate._deltas.minutesAgo == null;
+        const v5 = scoreResult?.parts?._v5 || null;
+        const v5Decision = v5?.decision?.label;
+
+        // Bypass paths that don't need rescan confirmation
+        const hasWalletTrigger = !!(enrichedCandidate._smartMoney || enrichedCandidate._fastLane || enrichedCandidate._swarmSignal);
+        const isReviving = v5Decision === 'REVIVING';
+        // Explosive launch override = market itself has confirmed via price action
+        const isExplosive = v5Decision === 'CALL_NOW'
+                         && (v5?.scores?.momentum ?? 0) >= 65
+                         && (enrichedCandidate.priceChange1h ?? 0) >= 100
+                         && (enrichedCandidate.holders ?? 0) >= 100;
+
+        const shouldHold = isFirstScan && !hasWalletTrigger && !isReviving && !isExplosive;
+        if (shouldHold) {
+          finalDecision = 'WATCHLIST';
+          console.log(`[confirm-gate] 🕒 $${enrichedCandidate.token ?? ca.slice(0,6)} HELD for confirmation — first scan, no wallet/explosive bypass. Awaiting rescan delta data.`);
+          logEvent('INFO', 'CONFIRMATION_HOLD', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} → WATCHLIST until rescan confirms`);
+        } else if (!isFirstScan) {
+          // Rescan path: deltas exist. Require POSITIVE momentum continuation.
+          // If deltas are NEGATIVE (price down, holders fleeing, vol fading) — block.
+          const d = enrichedCandidate._deltas || {};
+          const negativeDelta = (d.mcapDelta != null && d.mcapDelta < -10)
+                             || (d.holderDelta != null && d.holderDelta < -3)
+                             || (d.buyRatioDelta != null && d.buyRatioDelta < -0.10)
+                             || (d.volumeDelta != null && d.volumeDelta < -30);
+          if (negativeDelta && !hasWalletTrigger && !isReviving) {
+            finalDecision = 'WATCHLIST';
+            console.log(`[confirm-gate] 🚫 $${enrichedCandidate.token ?? ca.slice(0,6)} HELD — rescan shows negative deltas (mcapΔ=${d.mcapDelta?.toFixed(0)}% holderΔ=${d.holderDelta?.toFixed(0)}%)`);
+            logEvent('INFO', 'CONFIRMATION_REJECTED', `${enrichedCandidate.token ?? ca.slice(0,6)} negative deltas on rescan`);
+          }
+        }
+      }
+    }
+
     // Post if AUTO_POST — even if Claude verdict is null (Claude may have timed out/failed)
     // A null verdict means we fall back to scorer decision, which is still valid
     if (finalDecision === 'AUTO_POST') {
