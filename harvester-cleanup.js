@@ -28,7 +28,7 @@ const MIN_KEEP_SOL    = 8;
 const WHALE_SOL       = 100;
 const BATCH_SIZE      = 100;
 const BATCH_DELAY_MS  = 300;
-const HARVESTER_SOURCES = ['wallet-harvester', 'midcap-harvester', 'legendary-harvester'];
+const HARVESTER_SOURCES = ['wallet-harvester', 'midcap-harvester', 'legendary-harvester', 'early-buyer-harvester'];
 
 /**
  * Batch-fetch SOL balances for a list of addresses via Helius.

@@ -31,7 +31,7 @@ import {
   markCandidatePosted, isRecentlySeen, recordSeen,
   getStats, getRecentCalls, logEvent,
   recordFingerprint, backfillFingerprintOutcome, getFingerprintStats,
-  creditWalletsForWin, getSelfTrainedWalletStats,
+  creditWalletsForWin, creditWalletsForLoss, getSelfTrainedWalletStats,
   addToUserPortfolio, getUserPortfolio, removeFromUserPortfolio, clearUserPortfolio,
   createUserAlert, getUserAlerts, getPendingAlerts, fireAlert as fireUserAlert, cancelUserAlert,
   getCallsLeaderboard,
@@ -91,6 +91,7 @@ import {
   setTelegramHook as setMilestoneTelegramHook,
   setFingerprintHook,
   setWalletCreditHook,
+  setWalletLossHook,
 } from './missed-winner-tracker.js';
 import {
   startWalletScanner, runDuneWalletScan, crossReferenceHolders as duneXRef,
@@ -13098,6 +13099,33 @@ app.post('/api/midcap-harvester/run', async (req, res) => {
   }
 });
 
+// Early-buyer harvester — daily early-buyer sweep on $250K+ winners
+// Walks Helius Enhanced API back to coin creation, extracts the FIRST 100
+// real buyers (skipping dev + sniper-bot slots). Better alpha source than
+// current top-holders because it captures wallets that found the coin pre-run.
+const _earlyBuyerStatusHandler = async (req, res) => {
+  setCors(res);
+  try {
+    const { getEarlyBuyerStats } = await import('./early-buyer-harvester.js');
+    res.json({ ok: true, ...getEarlyBuyerStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+const _earlyBuyerRunHandler = async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerEarlyBuyerHarvest } = await import('./early-buyer-harvester.js');
+    triggerEarlyBuyerHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[early-buyer] run err:', err.message));
+    res.json({ ok: true, message: 'Early-buyer harvest triggered — pulls earliest swaps for up to 50 fresh midcap coins. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.get('/api/early-buyer-harvester/status', _earlyBuyerStatusHandler);
+app.post('/api/early-buyer-harvester/run', _earlyBuyerRunHandler);
+app.get('/api/early-buyer-harvester/run',  _earlyBuyerRunHandler);  // browser-bar trigger
+
 // Whale funding tracker — top WINNER wallets' outgoing SOL transfers
 app.get('/api/whale-funding/status', async (req, res) => {
   setCors(res);
@@ -13858,7 +13886,9 @@ app.get('/api/wallets/rankings', (req, res) => {
     const { limit = 200, category } = req.query;
     let q = `SELECT address, label, category, win_rate, avg_roi, trade_count, score,
                wins_found_in, losses_in, source, notes, dune_data, updated_at,
-               sol_balance, sol_scanned_at, ca_count
+               sol_balance, sol_scanned_at, ca_count,
+               our_win_count, our_loss_count, our_avg_win_multiple, our_avg_loss_multiple,
+               our_last_win_token, our_last_loss_token, our_last_win_at, our_last_loss_at
              FROM tracked_wallets WHERE is_blacklist=0`;
     const params = [];
     if (category) { q += ' AND category=?'; params.push(category); }
@@ -13875,7 +13905,8 @@ app.get('/api/wallets/rankings', (req, res) => {
 
     // Top WINNER wallets with full stats
     const topWinners = dbInstance.prepare(
-      `SELECT address, label, win_rate, avg_roi, trade_count, score, wins_found_in, notes, dune_data
+      `SELECT address, label, win_rate, avg_roi, trade_count, score, wins_found_in, notes, dune_data,
+              our_win_count, our_loss_count, our_avg_win_multiple, our_avg_loss_multiple
        FROM tracked_wallets WHERE category='WINNER' AND is_blacklist=0
        ORDER BY score DESC LIMIT 50`
     ).all().map(w => ({
@@ -14775,6 +14806,16 @@ app.listen(PORT, async () => {
     }
   });
 
+  // Mirror of the WIN hook — credits early holders into our_loss_count when a
+  // call resolves to LOSS. Lets the dashboard surface the "fade these wallets"
+  // signal alongside the WINNER stats.
+  setWalletLossHook((ca, peakMultiple) => {
+    const result = creditWalletsForLoss(ca, peakMultiple);
+    if (result.credited > 0) {
+      logEvent('INFO', 'WALLET_LOSS_DEBIT', `${result.credited} wallets debited a loss on ${ca.slice(0,8)} (peak ${peakMultiple.toFixed(2)}x)`);
+    }
+  });
+
   // Wire the exit-monitor Telegram hook — sends 🚨 EXIT NOW alerts to the
   // group when posted calls show rug/dump patterns (LP pull, sell flip,
   // deep drop from peak, dev wallet moving). Each alert type fires once
@@ -14971,6 +15012,22 @@ app.listen(PORT, async () => {
     startMidcapHarvester(dbInstance, HELIUS_API_KEY);
   } catch (err) {
     console.warn('[midcap-harvester] failed to start:', err.message);
+  }
+
+  // ── Early-Buyer Harvester (daily — first 100 buyers of $250K+ winners) ─
+  // Where midcap-harvester captures CURRENT top holders (often dev/LP/late
+  // bag-holders), this captures the EARLIEST 100 buyers — the wallets that
+  // bought before the coin ran. Source: midcap_harvest_log (already filled
+  // by midcap-harvester). Walks Helius Enhanced API backwards via `before`
+  // cursor until it hits coin creation, then extracts buyer addresses from
+  // tokenTransfers. Drops the first 3 (dev + sniper bots) and inserts the
+  // rest as source='early-buyer-harvester'. SOL-tier classified by
+  // classifyAllBySol — same rules as the other harvesters.
+  try {
+    const { startEarlyBuyerHarvester } = await import('./early-buyer-harvester.js');
+    startEarlyBuyerHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[early-buyer-harvester] failed to start:', err.message);
   }
 
   // ── One-time cleanup of harvester wallets inserted WITHOUT SOL check ──

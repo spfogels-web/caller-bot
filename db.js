@@ -713,6 +713,17 @@ function runMigrations() {
     `ALTER TABLE tracked_wallets ADD COLUMN our_last_win_at TEXT`,
     `ALTER TABLE tracked_wallets ADD COLUMN our_win_tokens TEXT`, // JSON array, last 20 winning CAs
     `CREATE INDEX IF NOT EXISTS idx_tw_our_wins ON tracked_wallets(our_win_count DESC, our_avg_win_multiple DESC)`,
+    // ── Self-trained LOSS tracking — mirror of WIN columns above ────────────
+    // Lets us identify wallets that consistently buy our LOSSes ("fade" signal).
+    // A wallet with high our_loss_count and low our_win_count is a counter-
+    // indicator. The dashboard Smart Money tab surfaces W/L record + ratio.
+    `ALTER TABLE tracked_wallets ADD COLUMN our_loss_count INTEGER DEFAULT 0`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_total_loss_multiple REAL DEFAULT 0`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_avg_loss_multiple REAL`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_last_loss_token TEXT`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_last_loss_at TEXT`,
+    `ALTER TABLE tracked_wallets ADD COLUMN our_loss_tokens TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_tw_our_losses ON tracked_wallets(our_loss_count DESC)`,
     // v13: Exit signal monitor — fires real-time alerts when posted calls
     // show rug/dump patterns. Tracks per-call which alert types have fired
     // so we don't spam the group with the same signal repeatedly.
@@ -1240,6 +1251,86 @@ export function creditWalletsForWin(contractAddress, peakMultiple, earlyHolders 
     console.log(`[wallet-credit] $${contractAddress.slice(0,8)}... ${peakMultiple.toFixed(2)}x → credited ${credited} holders${promoted ? ' · 🏆 promoted ' + promoted + ' to WINNER' : ''}`);
   }
   return { credited, promoted };
+}
+
+// ─── Self-trained LOSS tracking ────────────────────────────────────────────
+// Mirror of creditWalletsForWin. Fires when a call resolves to LOSS — credits
+// the early holders so we can identify wallets that consistently buy losers
+// (a fade signal). Per-wallet de-dup via our_loss_tokens (same pattern as WIN).
+// peakMultiple here is whatever peak the loser actually reached (e.g. 1.05x
+// for a flat call, 0.4x for a rug). We track it so the avg_loss_multiple
+// distinguishes flat losers from full rugs.
+export function creditWalletsForLoss(contractAddress, peakMultiple, earlyHolders = null) {
+  if (!contractAddress || !Number.isFinite(peakMultiple)) return { credited: 0 };
+
+  let holders = earlyHolders;
+  if (!holders) {
+    try {
+      const row = db.prepare('SELECT early_holders FROM calls WHERE contract_address = ? AND outcome = ? LIMIT 1').get(contractAddress, 'LOSS');
+      if (row?.early_holders) holders = JSON.parse(row.early_holders);
+    } catch {}
+  }
+  if (!Array.isArray(holders) || holders.length === 0) return { credited: 0 };
+
+  let credited = 0;
+  const nowIso = new Date().toISOString();
+
+  const upsert = db.transaction((holderList) => {
+    for (const addr of holderList) {
+      if (!addr || typeof addr !== 'string') continue;
+      try {
+        const existing = db.prepare(
+          'SELECT our_loss_count, our_total_loss_multiple, our_loss_tokens FROM tracked_wallets WHERE address = ?'
+        ).get(addr);
+
+        if (existing) {
+          // Skip if this loser already credited (de-dup on resolution retries)
+          let tokens = [];
+          try { tokens = JSON.parse(existing.our_loss_tokens || '[]'); } catch {}
+          if (tokens.includes(contractAddress)) continue;
+          tokens = [...tokens.slice(-19), contractAddress];   // keep last 20
+
+          const newLossCount  = (existing.our_loss_count || 0) + 1;
+          const newTotalMult  = (existing.our_total_loss_multiple || 0) + peakMultiple;
+          const newAvg        = newTotalMult / newLossCount;
+
+          db.prepare(`
+            UPDATE tracked_wallets SET
+              our_loss_count           = ?,
+              our_total_loss_multiple  = ?,
+              our_avg_loss_multiple    = ?,
+              our_last_loss_token      = ?,
+              our_last_loss_at         = ?,
+              our_loss_tokens          = ?
+            WHERE address = ?
+          `).run(newLossCount, newTotalMult, newAvg, contractAddress, nowIso, JSON.stringify(tokens), addr);
+          credited++;
+        } else {
+          // New wallet — first credit is a loss. Don't categorize as WINNER.
+          // Lands as NEUTRAL so future signals can re-tier it.
+          db.prepare(`
+            INSERT INTO tracked_wallets (
+              address, category, source, added_at,
+              our_loss_count, our_total_loss_multiple, our_avg_loss_multiple,
+              our_last_loss_token, our_last_loss_at, our_loss_tokens
+            ) VALUES (?, ?, 'self-trained-loss', datetime('now'), 1, ?, ?, ?, ?, ?)
+          `).run(addr, 'NEUTRAL', peakMultiple, peakMultiple, contractAddress, nowIso, JSON.stringify([contractAddress]));
+          credited++;
+        }
+      } catch (err) {
+        // Swallow per-wallet errors so the batch keeps going
+      }
+    }
+  });
+
+  try { upsert(holders); } catch (err) {
+    console.warn('[wallet-loss-credit] batch failed:', err.message);
+  }
+
+  if (credited > 0) {
+    console.log(`[wallet-loss-credit] $${contractAddress.slice(0,8)}... ${peakMultiple.toFixed(2)}x → debited ${credited} holders`);
+  }
+  return { credited };
 }
 
 // ─── Wallet Events (Helius webhook ingestion) ──────────────────────────────
