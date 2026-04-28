@@ -1511,7 +1511,7 @@ const SCANNER_CONFIG_DEFAULTS = {
   quickScoreAutoPromote: 35,
   quickScoreWatchlist:   22,
   quickScoreDrop:        15,
-  rescanScheduleMins:    '1,3,7,15',
+  rescanScheduleMins:    '3,15',   // CREDIT-SAVE: cut from '1,3,7,15' → '3,15' (saves ~1.25M Helius credits/day; meaningful inflection points are at 3min and 15min anyway)
 };
 const WALLETS_CONFIG_DEFAULTS = {
   topNWatched:        80,
@@ -1554,6 +1554,23 @@ try {
   if (loaded.wallets)   WALLETS_CONFIG   = { ...WALLETS_CONFIG_DEFAULTS,   ...loaded.wallets };
   if (loaded.prelaunch) PRELAUNCH_CONFIG = { ...PRELAUNCH_CONFIG_DEFAULTS, ...loaded.prelaunch };
   if (loaded.outcomes)  OUTCOMES_CONFIG  = { ...OUTCOMES_CONFIG_DEFAULTS,  ...loaded.outcomes };
+
+  // ── One-time force-migration for credit-save tuning ──────────────────────
+  // The kv_store-loaded SCANNER_CONFIG would otherwise pin the old
+  // '1,3,7,15' rescan schedule and leak Helius credits. Run once via flag.
+  try {
+    const flag = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scanner_credit_save_v1'`).get();
+    if (!flag || flag.value !== 'done') {
+      const oldSched = SCANNER_CONFIG.rescanScheduleMins;
+      SCANNER_CONFIG.rescanScheduleMins = SCANNER_CONFIG_DEFAULTS.rescanScheduleMins;
+      try {
+        dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scanner_config', ?)`)
+          .run(JSON.stringify(SCANNER_CONFIG));
+        dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scanner_credit_save_v1', 'done')`).run();
+        console.log(`[config] migration: rescanScheduleMins ${oldSched} → ${SCANNER_CONFIG.rescanScheduleMins} (credit-save v1)`);
+      } catch {}
+    }
+  } catch {}
 } catch (err) { console.warn('[config] Failed to restore extended configs:', err.message); }
 
 function persistExtendedConfig(category) {
@@ -5593,6 +5610,8 @@ async function processRescanQueue() {
         clearEntry(ca); continue;
       }
 
+      // Rescan path — score-trajectory tracking needs full Enhanced API data
+      candidate._forceEnhanced = true;
       candidate = await enrichCandidate(candidate);
       candidate.retestCount = entry.scanCount;
       const intel    = await runQuickWalletIntel(candidate);
@@ -14855,6 +14874,46 @@ app.listen(PORT, async () => {
 
   setIsWalletTrackedFn(addr => _trackedAddressesCache.has(addr));
 
+  // ── Helius webhook address-list auto-sync ─────────────────────────────────
+  // The early-buyer + midcap harvesters add 1000-3000 new wallets/day. Helius
+  // only delivers events for addresses on the webhook's accountAddresses list,
+  // so without this sync we'd silently miss webhook coverage on every newly
+  // harvested wallet. Runs daily (4 AM tick + 1h after boot).
+  // Only fires when both HELIUS_WEBHOOK_ID and the Enhanced API key are set —
+  // otherwise this is a no-op (safe to ship before user creates the webhook).
+  const _autoSyncWebhook = async () => {
+    const webhookId = process.env.HELIUS_WEBHOOK_ID;
+    const apiKey    = getEnhancedApiKey();
+    if (!webhookId || !apiKey) {
+      console.log('[helius-wh-sync] skipped — HELIUS_WEBHOOK_ID or Enhanced API key not set');
+      return;
+    }
+    try {
+      // Cap to top 10K wallets by score (Helius limit is 100K addresses, but
+      // smaller list = fewer wasted webhook deliveries on dust wallets).
+      const rows = dbInstance.prepare(`
+        SELECT address FROM tracked_wallets
+        WHERE is_blacklist = 0
+          AND (sol_balance IS NULL OR sol_balance >= 1)
+          AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
+        ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
+        LIMIT 10000
+      `).all();
+      const addresses = rows.map(r => r.address).filter(Boolean);
+      console.log(`[helius-wh-sync] pushing ${addresses.length} top-tier wallets to webhook ${webhookId.slice(0,8)}...`);
+      const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
+      if (result.ok) {
+        console.log(`[helius-wh-sync] ✓ ${result.registered} addresses synced (${result.skipped} skipped as invalid)`);
+        logEvent('INFO', 'HELIUS_WH_AUTOSYNC', `Synced ${result.registered} addresses`);
+      } else {
+        console.warn('[helius-wh-sync] failed:', result.error);
+      }
+    } catch (err) { console.warn('[helius-wh-sync] err:', err.message); }
+  };
+  // First run 1h after boot, then every 24h.
+  setTimeout(() => { _autoSyncWebhook().catch(() => {}); }, 60 * 60_000);
+  setInterval(_autoSyncWebhook, 24 * 60 * 60_000);
+
   // SWARM HOOK — when ≥3 tracked wallets buy the same CA in 10 min, this
   // fires. We feed the CA into the existing scanner pipeline as if our
   // scanner had discovered it, plus send a heads-up to the admin.
@@ -15055,39 +15114,63 @@ app.listen(PORT, async () => {
     console.warn('[boot] harvester-cleanup check failed:', err.message);
   }
 
-  try {
-    const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
-    startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {
-      try {
-        // EXIT alerts are WARNINGS about coins we already called or are
-        // watching — post a TG notice but do NOT push into processCandidate
-        // (no new call to make; we're flagging whale exits for awareness).
-        if (kind === 'exit') {
-          // User disabled the TG notification — too noisy. Still log the
-          // exit to Railway + system_log so wallet_activity keeps the
-          // SELL entry and the oracle can query "did whales exit this?"
-          // on demand, but no channel ping.
-          console.log(`[smart-money→pipeline] 📉 WHALE EXIT detected (silent) — ${ca.slice(0,8)} exitCluster=${clusterSize}`);
-          logEvent('WARN', 'WHALE_EXIT_SILENT', `${ca} — ${clusterSize} tracked winners dumping (TG alert disabled)`);
-          return;
+  // ── Smart Money: now driven by Helius webhook (push), not polling. ────────
+  // The previous polling watcher burned ~2.3M Helius credits/day hitting
+  // /v0/addresses/{wallet}/transactions for the top 80 wallets every 5 min.
+  // Helius Enhanced webhooks deliver the same data for free — already wired
+  // via /api/helius/webhook + processHeliusWebhookBatch (helius-webhook.js),
+  // which records wallet_events and fires the swarm hook (≥3 tracked wallets
+  // co-buying inside 10min). We hook the swarm output into the same
+  // processCandidate path the polling watcher used to.
+  // To re-enable polling (if webhook ever goes down) set
+  // SMART_MONEY_POLLING_ENABLED=1 in Railway env.
+  setSwarmHook(async (ca, buyers) => {
+    try {
+      const clusterSize = buyers?.length ?? 3;
+      console.log(`[helius-wh→pipeline] $${ca.slice(0,8)} swarm cluster=${clusterSize} — pushing into processCandidate`);
+      await processCandidate({
+        contractAddress: ca,
+        chain:           'solana',
+        candidateType:   'SMART_MONEY_CLUSTER',
+        _smartMoney:     { kind: 'cluster', clusterSize, detectedAt: Date.now() },
+        _discoveredAt:   Date.now(),
+      });
+    } catch (err) {
+      console.warn('[helius-wh→pipeline] processCandidate failed:', err.message);
+    }
+  });
+
+  if (String(process.env.SMART_MONEY_POLLING_ENABLED || '').toLowerCase() === '1' ||
+      String(process.env.SMART_MONEY_POLLING_ENABLED || '').toLowerCase() === 'true') {
+    try {
+      const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
+      startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {
+        try {
+          if (kind === 'exit') {
+            console.log(`[smart-money→pipeline] 📉 WHALE EXIT detected (silent) — ${ca.slice(0,8)} exitCluster=${clusterSize}`);
+            logEvent('WARN', 'WHALE_EXIT_SILENT', `${ca} — ${clusterSize} tracked winners dumping (TG alert disabled)`);
+            return;
+          }
+          console.log(`[smart-money→pipeline] $${ca.slice(0,8)} kind=${kind} cluster=${clusterSize} — pushing into processCandidate`);
+          await processCandidate({
+            contractAddress: ca,
+            chain:           'solana',
+            candidateType:   kind === 'kol'     ? 'KOL_FOLLOW'
+                           : kind === 'cluster' ? 'SMART_MONEY_CLUSTER'
+                           :                      'SMART_MONEY_SINGLE',
+            _smartMoney:     { kind, clusterSize, detectedAt: Date.now() },
+            _discoveredAt:   Date.now(),
+          });
+        } catch (err) {
+          console.warn('[smart-money→pipeline] processCandidate failed:', err.message);
         }
-        console.log(`[smart-money→pipeline] $${ca.slice(0,8)} kind=${kind} cluster=${clusterSize} — pushing into processCandidate`);
-        await processCandidate({
-          contractAddress: ca,
-          chain:           'solana',
-          candidateType:   kind === 'kol'     ? 'KOL_FOLLOW'
-                         : kind === 'cluster' ? 'SMART_MONEY_CLUSTER'
-                         :                      'SMART_MONEY_SINGLE',
-          _smartMoney:     { kind, clusterSize, detectedAt: Date.now() },
-          _discoveredAt:   Date.now(),
-        });
-      } catch (err) {
-        console.warn('[smart-money→pipeline] processCandidate failed:', err.message);
-      }
-    });
-    console.log('[startup] ✓ Smart Money watcher active — WINNER-tier wallets polled every 90s');
-  } catch (err) {
-    console.warn('[startup] Smart Money watcher failed to start:', err.message);
+      });
+      console.log('[startup] ⚠ Smart Money polling watcher ACTIVE (override env set) — burning Helius credits');
+    } catch (err) {
+      console.warn('[startup] Smart Money watcher failed to start:', err.message);
+    }
+  } else {
+    console.log('[startup] ✓ Smart Money: webhook-driven (polling disabled — saves ~2.3M Helius credits/day)');
   }
 
   // ── Smart Money: Solscan wallet enrichment loop (every 6h) ────────────────

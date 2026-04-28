@@ -40,7 +40,7 @@ const HELIUS_ENHANCED = (mint, key, before, type = 'SWAP', limit = 100) => {
 const TICK_MS               = 12 * 60 * 60 * 1000;   // every 12h — matches midcap-harvester cadence
 const BOOT_DELAY_MS         = 15 * 60 * 1000;        // 15 min after boot
 const MAX_COINS_PER_TICK    = 150;                   // 150 × 2 ticks/day = 300 coin scans/day
-const MAX_PAGES_PER_COIN    = 25;                    // cap on `before` walk (≈ 2500 swaps deep)
+const MAX_PAGES_PER_COIN    = 10;                    // CREDIT-SAVE: cut from 25 → 10 (Helius bills /v0 calls at 100 credits each, saves ~450K/day; still walks ~1000 swaps deep which captures all real launch buyers)
 const EARLY_BATCHES_TO_KEEP = 2;                     // keep last 2 pages → ~200 earliest swaps per coin
 const INTER_COIN_DELAY_MS   = 800;                   // courtesy delay between coins
 const INTER_PAGE_DELAY_MS   = 220;                   // courtesy delay between pagination pages
