@@ -46,6 +46,16 @@ function creditWalletsForWin(ca, peakMult) {
   try { if (_walletHook && ca && peakMult >= 1.5) _walletHook(ca, peakMult); }
   catch (err) { /* never crash the tracker on a credit error */ }
 }
+
+// Mirror of the WIN hook — fires once per call when outcome locks as LOSS.
+// Credits the same early holders into our_loss_count / our_avg_loss_multiple
+// so we can spot wallets that consistently bought our losers (fade signal).
+let _walletLossHook = null;
+export function setWalletLossHook(fn) { _walletLossHook = typeof fn === 'function' ? fn : null; }
+function creditWalletsForLoss(ca, peakMult) {
+  try { if (_walletLossHook && ca) _walletLossHook(ca, peakMult ?? 1.0); }
+  catch (err) { /* never crash the tracker on a credit error */ }
+}
 const CLAUDE_API_URL  = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL    = 'claude-sonnet-4-20250514';
 
@@ -587,6 +597,9 @@ export async function runOutcomeTracker(dbInstance) {
               WHERE contract_address = ? AND outcome != 'WIN'
             `).run(finalOutcome, peakNow, peakNow, ca);
           } catch {}
+          // Debit early holders — builds the fade-signal half of our wallet
+          // intelligence. De-duped per-wallet via our_loss_tokens.
+          creditWalletsForLoss(ca, peakNow);
         }
         console.log(`[outcome-tracker] ${emoji} Auto-${finalOutcome}: $${call.token} peak=${peakNow.toFixed(2)}x after 2h (current ${result.pctChange.toFixed(0)}%)`);
       } else {

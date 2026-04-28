@@ -296,7 +296,7 @@ async function enrichWithBirdeyeWithRetry(ca, pairAgeHours) {
 
 // ─── Helius Enricher ──────────────────────────────────────────────────────────
 
-async function enrichWithHelius(ca, pairAddress = null) {
+async function enrichWithHelius(ca, pairAddress = null, candidate = null) {
   const result = { heliusOk: false };
   const key = getHeliusKey();
 
@@ -305,12 +305,38 @@ async function enrichWithHelius(ca, pairAddress = null) {
     return result;
   }
 
+  // Score-gate the Enhanced API call. fetchHeliusTransactions hits the
+  // /v0/addresses/{addr}/transactions endpoint which Helius bills at 100
+  // credits per call — vs. 1 credit for the standard RPC calls below. Most
+  // scanner candidates score below the post floor and never need swap
+  // history, so only fire it when the coin has signal worth investigating.
+  // Override allowed via candidate._forceEnhanced = true (used by re-scans
+  // of AUTO_POST candidates and smart-money cluster pushes).
+  const quickScore = candidate?.quickScore ?? candidate?.quick_score ?? null;
+  const mcap       = candidate?.marketCap ?? null;
+  const buys1h     = candidate?.buys1h    ?? null;
+  const isCluster  = candidate?._smartMoney?.kind === 'cluster' || candidate?._smartMoney?.kind === 'kol';
+  const force      = candidate?._forceEnhanced === true;
+  const enhancedWorthCalling = (
+    force                                                          ||
+    isCluster                                                      ||  // smart-money cluster — always worth it
+    (quickScore != null && quickScore >= 30)                       ||  // promising scanner candidate
+    (quickScore == null)                                           ||  // unknown score (rescan, smart-money push) — be safe
+    (mcap   != null && mcap   >= 25_000)                           ||  // real volume coin
+    (buys1h != null && buys1h >= 20)
+  );
+
   const [mintData, holdersData, supplyData, txData] = await Promise.all([
     heliusRpc('getAccountInfo', [ca, { encoding: 'jsonParsed' }], 'mintInfo'),
     heliusRpc('getTokenLargestAccounts', [ca, { commitment: 'finalized' }], 'topHolders'),
     heliusRpc('getTokenSupply', [ca], 'supply'),
-    fetchHeliusTransactions(ca, pairAddress, key),
+    enhancedWorthCalling
+      ? fetchHeliusTransactions(ca, pairAddress, key)
+      : Promise.resolve(null),
   ]);
+  if (!enhancedWorthCalling) {
+    console.log(`[enricher:helius] ⓘ Enhanced API skipped (quickScore=${quickScore} mcap=${mcap} buys1h=${buys1h}) — saved 100 credits`);
+  }
 
   // Log what Helius returned so we can diagnose data gaps
   const holdersCount = holdersData?.result?.value?.length ?? 0;
@@ -949,7 +975,7 @@ export async function enrichCandidate(candidate) {
 
   const [birdeyeData, heliusData, bubblemapData, lunarData] = await Promise.all([
     enrichWithBirdeyeWithRetry(ca, candidate.pairAgeHours ?? ageHours),
-    enrichWithHelius(ca, pairAddress),
+    enrichWithHelius(ca, pairAddress, candidate),
     bubblemapPromise,
     lunarPromise,
   ]);
@@ -998,8 +1024,9 @@ export async function enrichCandidate(candidate) {
 
   // ── Pump.fun graduation check ──────────────────────────────────────────
   // Only poll pump.fun for coins that plausibly came from it (<72h old or
-  // unknown age). If the coin graduated the bonding curve (~$69K MCap) and
-  // migrated to Raydium, that's proven organic demand — ~1% of pump.fun
+  // unknown age). If the coin graduated the bonding curve (~$44K MCap as of
+  // 2026-04, was ~$69K originally) and migrated to Raydium, that's proven
+  // organic demand — ~1% of pump.fun
   // launches make it. Adds pumpFunMigrated / pumpFunStage / pumpFunBondingPct
   // / pumpFunReplyCount / pumpFunKOTH fields for scorer consumption.
   try {
@@ -1010,6 +1037,10 @@ export async function enrichCandidate(candidate) {
       if (pf) {
         enriched.pumpFunStage        = pf.stage;                    // 'PRE_BOND' | 'MIGRATED'
         enriched.pumpFunMigrated     = pf.bondingCurveComplete === true;
+        // Fall-through image: DexScreener doesn't always have a token's
+        // image (especially fresh pump.fun coins) — pump.fun does. Only
+        // overwrite if not already set so DS-supplied images take priority.
+        if (!enriched.imageUrl && pf.imageUrl) enriched.imageUrl = pf.imageUrl;
         enriched.pumpFunBondingPct   = pf.bondingCurvePct ?? null;
         enriched.pumpFunReplyCount   = pf.replyCount ?? 0;
         enriched.pumpFunKOTH         = pf.pumpRank === 'KOTH';

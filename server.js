@@ -31,7 +31,7 @@ import {
   markCandidatePosted, isRecentlySeen, recordSeen,
   getStats, getRecentCalls, logEvent,
   recordFingerprint, backfillFingerprintOutcome, getFingerprintStats,
-  creditWalletsForWin, getSelfTrainedWalletStats,
+  creditWalletsForWin, creditWalletsForLoss, getSelfTrainedWalletStats,
   addToUserPortfolio, getUserPortfolio, removeFromUserPortfolio, clearUserPortfolio,
   createUserAlert, getUserAlerts, getPendingAlerts, fireAlert as fireUserAlert, cancelUserAlert,
   getCallsLeaderboard,
@@ -65,6 +65,7 @@ import { runPerformanceTracker, exportFineTuningData }                          
 import { runExitMonitor, setExitTelegramHook, getExitMonitorStats }                  from './exit-signal-monitor.js';
 import {
   processHeliusWebhookBatch, syncTrackedAddressesToHelius, listHeliusWebhooks,
+  createHeliusWebhook,
   setSwarmHook, setEventHook, setIsWalletTrackedFn,
   getEnhancedApiKey,
 } from './helius-webhook.js';
@@ -76,7 +77,7 @@ import {
 import {
   startHeliusListener, stopHeliusListener, getHeliusListener, getHeliusStatus,
   fetchPumpFunCoin, fetchPumpFunNewCoins, checkPumpFunLivestream,
-  getTokenMetadata, getTopHolders,
+  getTokenMetadata, getTopHolders, getPumpFunGraduationMcapUsd,
 } from './helius-listener.js';
 import {
   walletDb, deployerDb, initWalletDb, crossReferenceHolders,
@@ -91,6 +92,7 @@ import {
   setTelegramHook as setMilestoneTelegramHook,
   setFingerprintHook,
   setWalletCreditHook,
+  setWalletLossHook,
 } from './missed-winner-tracker.js';
 import {
   startWalletScanner, runDuneWalletScan, crossReferenceHolders as duneXRef,
@@ -102,8 +104,9 @@ import {
 
 const {
   TELEGRAM_BOT_TOKEN,
-  TELEGRAM_GROUP_CHAT_ID,        // VIP channel — fires on raw signal
-  TELEGRAM_FREE_CHAT_ID,         // Free channel — fires only after 2x delayed
+  TELEGRAM_GROUP_CHAT_ID,         // VIP channel — fires on raw signal
+  TELEGRAM_FREE_CHAT_ID,          // Free channel — fires only after 2x delayed
+  TELEGRAM_TRENCH_THREAD_ID,      // Forum-topic thread ID for call cards (e.g. "Trench Calls"). When set, all CA beacons + call cards + threaded follow-ups + milestone alerts route here. Banter/persona replies stay on the main thread (General).
   CLAUDE_API_KEY,
   OPENAI_API_KEY,
   ADMIN_TELEGRAM_ID,
@@ -112,6 +115,17 @@ const {
   MIN_SCORE_TO_POST = 50,
   SCAN_INTERVAL_MS  = 60 * 1000,  // 60s — was 90s, scan more frequently
 } = process.env;
+// Helper that adds message_thread_id to a Telegram-API body when the env
+// var is set. Supergroups in forum mode require the integer thread ID; absent
+// it Telegram routes to the General topic.
+const _trenchThreadId = TELEGRAM_TRENCH_THREAD_ID
+  ? Number(TELEGRAM_TRENCH_THREAD_ID)
+  : null;
+function _withTrenchThread(body) {
+  return _trenchThreadId
+    ? { ...body, message_thread_id: _trenchThreadId }
+    : body;
+}
 
 const TELEGRAM_API   = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -195,9 +209,11 @@ const CLAUDE_TIMEOUT_MS   = 12_000; // tightened 20→12s
 const OPENAI_TIMEOUT_MS   = 10_000; // tightened 15→10s
 const ENRICHMENT_TIMEOUT  = 6_000;  // tightened 10→6s — fail fast on slow APIs, score with partial data
 
-// Pre-bonding detection: pump.fun tokens before PumpSwap migration
-const PREBOND_MAX_MCAP    = 69_000;   // pump.fun completes at ~$69K
-const PREBOND_MIN_MCAP    = 500;      // ignore sub-$500 (too illiquid)
+// Pre-bonding detection: pump.fun tokens before PumpSwap migration.
+// Threshold is SOL-denominated upstream so floats with SOL price + team
+// adjustments — single source of truth lives in helius-listener.js.
+const PREBOND_MAX_MCAP    = getPumpFunGraduationMcapUsd();   // ~$44K as of 2026-04 (was $69K)
+const PREBOND_MIN_MCAP    = 500;                              // ignore sub-$500 (too illiquid)
 
 // ─── OpenAI Fine-tune ─────────────────────────────────────────────────────────
 
@@ -1380,6 +1396,18 @@ const SCORING_CONFIG_DEFAULTS = {
   scoreTrumpYoungThreshold:   60,    // young (<2h) score floor
   scoreTrumpYoungMaxAgeHours:  2,    // "young" = age <= 2h
   scoreTrumpMaxMcap:       80000,    // gem-range cap
+
+  // ── CLUSTER / SMART-MONEY GUARDRAILS ───────────────────────────────────
+  // The webhook fires "cluster" events when ≥3 tracked wallets co-buy a coin
+  // in 10 min. With 10K+ wallets registered, that signal is too noisy to act
+  // on alone — a score-25 coin that 3 random WINNER wallets touched is not
+  // alpha. These two knobs gate cluster-driven posts:
+  //   - clusterMinScoreToPost: cluster signal alone won't override a low
+  //     score (35 is the relaxed bar — vs 45 NEUTRAL baseline)
+  //   - absoluteMinScoreToPost: hard floor below which NOTHING posts, even
+  //     under regime/cluster discount. Failsafe.
+  clusterMinScoreToPost:      35,
+  absoluteMinScoreToPost:     30,
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -1510,7 +1538,7 @@ const SCANNER_CONFIG_DEFAULTS = {
   quickScoreAutoPromote: 35,
   quickScoreWatchlist:   22,
   quickScoreDrop:        15,
-  rescanScheduleMins:    '1,3,7,15',
+  rescanScheduleMins:    '1,3,7,15',   // RESTORED to 4-tick cadence (matches 4/27-morning behavior). Webhook savings on smart-money offset the extra rescans on the credit budget.
 };
 const WALLETS_CONFIG_DEFAULTS = {
   topNWatched:        80,
@@ -1553,6 +1581,27 @@ try {
   if (loaded.wallets)   WALLETS_CONFIG   = { ...WALLETS_CONFIG_DEFAULTS,   ...loaded.wallets };
   if (loaded.prelaunch) PRELAUNCH_CONFIG = { ...PRELAUNCH_CONFIG_DEFAULTS, ...loaded.prelaunch };
   if (loaded.outcomes)  OUTCOMES_CONFIG  = { ...OUTCOMES_CONFIG_DEFAULTS,  ...loaded.outcomes };
+
+  // ── Force-migration for rescan-schedule restoration ──────────────────────
+  // Re-applies the current SCANNER_CONFIG_DEFAULTS.rescanScheduleMins when
+  // the migration flag hasn't run on this version. Bump the flag suffix any
+  // time the default changes so previously-cached kv_store values get
+  // overwritten cleanly.
+  //   v1: '1,3,7,15' → '3,15' (credit-save while polling watcher was active)
+  //   v2: '3,15' → '1,3,7,15' (webhook savings restored credit budget)
+  try {
+    const flag = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scanner_rescan_migration_v2'`).get();
+    if (!flag || flag.value !== 'done') {
+      const oldSched = SCANNER_CONFIG.rescanScheduleMins;
+      SCANNER_CONFIG.rescanScheduleMins = SCANNER_CONFIG_DEFAULTS.rescanScheduleMins;
+      try {
+        dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scanner_config', ?)`)
+          .run(JSON.stringify(SCANNER_CONFIG));
+        dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scanner_rescan_migration_v2', 'done')`).run();
+        console.log(`[config] migration v2: rescanScheduleMins ${oldSched} → ${SCANNER_CONFIG.rescanScheduleMins} (4-tick restored)`);
+      } catch {}
+    }
+  } catch {}
 } catch (err) { console.warn('[config] Failed to restore extended configs:', err.message); }
 
 function persistExtendedConfig(category) {
@@ -2158,12 +2207,12 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
     const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(_withTrenchThread({
         chat_id:    TELEGRAM_GROUP_CHAT_ID,
         photo:      photoSrc,
         caption:    safeCaption,
         parse_mode: 'HTML',
-      }),
+      })),
       signal: AbortSignal.timeout(20_000),
     });
 
@@ -2209,7 +2258,7 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
       console.warn(`[TG] Full report truncated from ${fullDetailText.length} to 4090 chars`);
     }
     try {
-      const body = {
+      let body = {
         chat_id: TELEGRAM_GROUP_CHAT_ID,
         text: full,
         parse_mode: 'HTML',
@@ -2217,6 +2266,8 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
       };
       // Thread the full report under the photo if we have its message_id
       if (photoMessageId) body.reply_to_message_id = photoMessageId;
+      // Route to Trench Calls topic if configured (matches the photo's thread)
+      body = _withTrenchThread(body);
       const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3408,8 +3459,14 @@ async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
         } catch {}
         return;
       }
+      // Capture the failure body BEFORE any retry — Telegram describes
+      // exactly why it rejected (file too big, MIME wrong, URL 404, etc).
+      const usedFileId = !!_leaderboardBannerFileId;
+      const errBody    = await res.text().catch(() => '');
+      console.warn(`[TG-leaderboard] photo send failed (used ${usedFileId ? 'file_id' : 'URL'}, status=${res.status}): ${errBody.slice(0, 250)}`);
+
       // If file_id was stale (e.g. server restart) clear it and retry once with URL
-      if (_leaderboardBannerFileId) {
+      if (usedFileId) {
         _leaderboardBannerFileId = null;
         const retry = await fetch(`${TELEGRAM_API}/sendPhoto`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3419,9 +3476,18 @@ async function sendLeaderboardWithBanner(chatId, caption, replyMarkup) {
           }),
           signal: AbortSignal.timeout(10_000),
         });
-        if (retry.ok) return;
+        if (retry.ok) {
+          // Cache the new file_id from the URL-based send
+          try {
+            const j = await retry.json();
+            const photos = j?.result?.photo;
+            if (photos?.length) _leaderboardBannerFileId = photos[photos.length - 1].file_id;
+          } catch {}
+          return;
+        }
+        const retryBody = await retry.text().catch(() => '');
+        console.warn(`[TG-leaderboard] URL retry also failed (status=${retry.status}): ${retryBody.slice(0, 250)}`);
       }
-      console.warn(`[TG-leaderboard] photo send failed: ${(await res.text()).slice(0, 200)}`);
     } catch (err) {
       console.warn(`[TG-leaderboard] photo error: ${err.message}`);
     }
@@ -4828,13 +4894,22 @@ async function processCandidate(candidate, isRescan = false) {
       // KOL follow-buys are treated as cluster-tier conviction: force AUTO_POST.
       // These are hardcoded public alpha wallets (Cupsey / Unipcs / Ansem etc.)
       // with >60% micro-cap hit rates. Their entry alone is enough signal.
+      // Webhook-detected clusters are NOT treated equivalently — with 10K+
+      // tracked wallets registered, a 3-wallet co-buy in 10 min is statistical
+      // noise rather than alpha. Require a real score for cluster overrides.
       const label = sm.kind === 'kol' ? 'KOL' : `cluster=${sm.clusterSize}`;
+      const score = scoreResult?.score ?? 0;
+      const clusterMinScore = SCORING_CONFIG.clusterMinScoreToPost ?? 35;
       if (v5HardBlock) {
         logEvent('WARN', 'SMART_MONEY_OVERRIDE_BLOCKED', `${enrichedCandidate.token ?? ca.slice(0,6)} ${label} ignored — v5 hard BLOCK (rug=${v5?.scores?.rugRisk})`);
+      } else if (sm.kind === 'cluster' && score < clusterMinScore) {
+        // Cluster alone isn't enough — score must clear a relaxed bar.
+        logEvent('INFO', 'CLUSTER_BLOCKED_BY_SCORE', `${enrichedCandidate.token ?? ca.slice(0,6)} cluster=${sm.clusterSize} score=${score} < ${clusterMinScore} → keeping ${finalDecision}`);
+        console.log(`[smart-money] 🛑 cluster blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score=${score} below ${clusterMinScore} threshold (${sm.clusterSize} wallets but no quality signal)`);
       } else {
         if (finalDecision !== 'AUTO_POST') {
-          logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
-          console.log(`[smart-money] ${sm.kind === 'kol' ? '⭐' : '🐋🐋🐋'} ${sm.kind.toUpperCase()} OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
+          logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label} · score=${score})`);
+          console.log(`[smart-money] ${sm.kind === 'kol' ? '⭐' : '🐋🐋🐋'} ${sm.kind.toUpperCase()} OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label} · score=${score})`);
         }
         finalDecision = 'AUTO_POST';
       }
@@ -4850,11 +4925,15 @@ async function processCandidate(candidate, isRescan = false) {
     // The baseline minScoreToPost (from SCORING_CONFIG) is tuned for NEUTRAL
     // markets. In DEAD regimes where memecoins bleed and false signals spike,
     // require a higher score. In HOT regimes where everything pumps, loosen.
-    // KOL and cluster alerts bypass — their conviction is independent of regime.
+    // KOL alerts bypass entirely (curated trusted wallets — high signal).
+    // Webhook-detected clusters get a relaxed floor (regimeFloor − 10, but
+    // never below an absolute hard floor) instead of a free pass — fixes the
+    // bug where score=15-25 garbage was leaking through every cluster swarm.
     {
       const smKindFloor = enrichedCandidate._smartMoney?.kind;
-      const bypassFloor = smKindFloor === 'cluster' || smKindFloor === 'kol';
-      if (!bypassFloor && finalDecision === 'AUTO_POST') {
+      const isKolSignal     = smKindFloor === 'kol';
+      const isClusterSignal = smKindFloor === 'cluster';
+      if (finalDecision === 'AUTO_POST' && !isKolSignal) {
         const baseFloor = SCORING_CONFIG.minScoreToPost ?? 50;
         const marketRegime = getRegime()?.market || 'NEUTRAL';
         const regimeAdj =
@@ -4862,10 +4941,15 @@ async function processCandidate(candidate, isRescan = false) {
           marketRegime === 'COLD'    ? +5  :
           marketRegime === 'HOT'     ? -5  :
           0;  // NEUTRAL
-        const effectiveFloor = baseFloor + regimeAdj;
+        const regimeFloor    = baseFloor + regimeAdj;
+        const absoluteMin    = SCORING_CONFIG.absoluteMinScoreToPost ?? 30;
+        const effectiveFloor = isClusterSignal
+          ? Math.max(absoluteMin, regimeFloor - 10)   // cluster gets 10pt discount, never below absolute
+          : regimeFloor;
         if ((scoreResult.score ?? 0) < effectiveFloor) {
-          logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${effectiveFloor} (base ${baseFloor} ${regimeAdj >= 0 ? '+' : ''}${regimeAdj} ${marketRegime}) → WATCHLIST`);
-          console.log(`[auto-caller] 📊 Regime floor — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} in ${marketRegime} → WATCHLIST`);
+          const tier = isClusterSignal ? `cluster-relaxed ${effectiveFloor}` : `${effectiveFloor} (${marketRegime})`;
+          logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${tier} → WATCHLIST`);
+          console.log(`[auto-caller] 📊 Floor blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} (${isClusterSignal ? 'cluster' : marketRegime}) → WATCHLIST`);
           finalDecision = 'WATCHLIST';
         }
       }
@@ -5336,15 +5420,15 @@ async function processCandidate(candidate, isRescan = false) {
           const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+            body: JSON.stringify(_withTrenchThread({
               chat_id: TELEGRAM_GROUP_CHAT_ID,
               text: caBeacon,
               disable_web_page_preview: true,
-            }),
+            })),
             signal: AbortSignal.timeout(10_000),
           });
           if (!r.ok) console.warn(`[TG-CA] beacon status ${r.status}: ${(await r.text()).slice(0,150)}`);
-          else console.log(`[TG-CA] ✓ CA beacon posted FIRST for Phanes/Sect: ${caBeacon}`);
+          else console.log(`[TG-CA] ✓ CA beacon posted FIRST for Phanes/Sect: ${caBeacon}${_trenchThreadId ? ' (Trench Calls thread)' : ''}`);
         } catch (err) {
           console.warn(`[TG-CA] beacon failed: ${err.message}`);
         }
@@ -5630,6 +5714,8 @@ async function processRescanQueue() {
         clearEntry(ca); continue;
       }
 
+      // Rescan path — score-trajectory tracking needs full Enhanced API data
+      candidate._forceEnhanced = true;
       candidate = await enrichCandidate(candidate);
       candidate.retestCount = entry.scanCount;
       const intel    = await runQuickWalletIntel(candidate);
@@ -7357,7 +7443,11 @@ app.get('/api/control-station', (req, res) => {
 });
 
 // POST — Claude auto-optimizes freely, applies changes, logs detailed reasoning
-app.post('/api/control-station/auto-optimize', express.json(), async (req, res) => {
+// Auto-optimize handler — registered for BOTH POST (canonical) and GET
+// (so the operator can paste the URL into a browser bar to fire the
+// optimizer and see Claude's full response inline). The handler doesn't
+// read req.body, so GET works fine.
+const _autoOptimizeHandler = async (req, res) => {
   setCors(res);
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
   try {
@@ -7671,7 +7761,12 @@ Respond ONLY with valid JSON:
           continue;
         }
 
-        // Audit log with detailed reasoning
+        // Audit log with detailed reasoning — TWO destinations:
+        // 1. tuning_audit table (legacy, used by some internal views)
+        // 2. config_changes table (read by /api/config/audit + the AI Tuning
+        //    Audit panel on the dashboard). MUST go here too or AI changes
+        //    show up nowhere visible. logConfigChange handles the JSON
+        //    encoding + reason synthesis.
         dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
           `[${change.system}] ${change.param}`,
           String(oldVal ?? ''),
@@ -7679,6 +7774,17 @@ Respond ONLY with valid JSON:
           `[AUTO-PILOT] ${change.reason} | Expected: ${change.expected_improvement || 'improved accuracy'} | Confidence: ${change.confidence || '?'}%`,
           'AUTO_APPLIED'
         );
+        try {
+          const fullReason = `${change.reason || 'auto-applied'} | Expected: ${change.expected_improvement || '—'} | Confidence: ${change.confidence ?? '?'}% | Risk: ${change.risk ?? 'UNKNOWN'}`;
+          logConfigChange(
+            (change.system || 'AUTO').toUpperCase(),
+            change.param,
+            oldVal,
+            change.new_value,
+            'claude',
+            fullReason
+          );
+        } catch (e) { console.warn('[control-station] config_changes log failed:', e.message); }
         applied.push({ ...change, old_value: oldVal });
         console.log(`[control-station] AUTO-APPLIED: ${change.system}.${change.param} ${oldVal} → ${change.new_value} | ${change.reason?.slice(0,80)}`);
       } catch (e) { console.warn('[control-station] Failed to apply:', change.param, e.message); }
@@ -7699,7 +7805,219 @@ Respond ONLY with valid JSON:
     console.error('[control-station/auto-optimize]', err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
-});
+};
+app.post('/api/control-station/auto-optimize', express.json(), _autoOptimizeHandler);
+app.get('/api/control-station/auto-optimize', _autoOptimizeHandler);
+
+// One-shot revert of the auto-tuner's first run (the 10 changes from
+// 4/27 that loosened minScoreToPost / dev pct / top10 etc). Operator
+// requested a clean baseline before letting Claude tune again. Each
+// revert is logged to config_changes so the audit panel reflects it.
+const _revertLastAiTuningHandler = async (req, res) => {
+  setCors(res);
+  // Pre-tuner values per Claude's "current" field in the 4/27 audit JSON
+  const reverts = [
+    { system: 'scoring',    section: null,         param: 'minScoreToPost',         value: 45  },
+    { system: 'tuning',     section: 'discovery',  param: 'buyPressure',            value: 20  },
+    { system: 'tuning',     section: 'discovery',  param: 'volumeVelocity',         value: 35  },
+    { system: 'tuning',     section: 'discovery',  param: 'walletQuality',          value: 25  },
+    { system: 'tuning',     section: 'discovery',  param: 'holderDistribution',     value: 20  },
+    { system: 'tuning',     section: 'thresholds', param: 'eliteThreshold',         value: 52  },
+    { system: 'overrides',  section: null,         param: 'devWalletPctBlock',      value: 'block_above_3.2pct' },
+    { system: 'overrides',  section: null,         param: 'top10ConcentrationBlock',value: 'block_above_24pct'  },
+    { system: 'overrides',  section: null,         param: 'v5_explosiveMin1h',      value: 200 },
+  ];
+
+  const applied = [];
+  const skipped = [];
+  for (const r of reverts) {
+    try {
+      let oldVal = null;
+      if (r.system === 'scoring' && r.param in SCORING_CONFIG) {
+        oldVal = SCORING_CONFIG[r.param];
+        SCORING_CONFIG[r.param] = r.value;
+      } else if (r.system === 'tuning' && TUNING_CONFIG[r.section]) {
+        oldVal = TUNING_CONFIG[r.section][r.param];
+        TUNING_CONFIG[r.section][r.param] = r.value;
+      } else if (r.system === 'overrides') {
+        oldVal = AI_CONFIG_OVERRIDES[r.param];
+        AI_CONFIG_OVERRIDES[r.param] = r.value;
+      } else {
+        skipped.push({ ...r, reason: 'param not found in target system' });
+        continue;
+      }
+      if (JSON.stringify(oldVal) === JSON.stringify(r.value)) {
+        skipped.push({ ...r, reason: 'already at target value' });
+        continue;
+      }
+      logConfigChange(
+        r.system.toUpperCase(),
+        r.param,
+        oldVal,
+        r.value,
+        'operator',
+        `Manual revert of 4/27 auto-tuner loosening — operator requested clean baseline before next AI tuning cycle. Was ${JSON.stringify(oldVal)}, restored to pre-tuner ${JSON.stringify(r.value)}.`
+      );
+      applied.push({ ...r, old_value: oldVal });
+    } catch (err) {
+      skipped.push({ ...r, reason: err.message });
+    }
+  }
+
+  // Persist all three config stores
+  try { persistScoringConfig(); } catch {}
+  try { saveTuningConfig();    } catch {}
+  try { persistAIConfig();     } catch {}
+
+  res.json({
+    ok: true,
+    applied,
+    skipped,
+    count: applied.length,
+    message: `Reverted ${applied.length} knobs to pre-tuner values. Bot is now on a clean baseline. Next auto-tune cycle fires 24h from now (or hit /api/control-station/auto-optimize manually after a few days of fresh data).`,
+  });
+};
+app.post('/api/control-station/revert-last-ai-tuning', _revertLastAiTuningHandler);
+app.get('/api/control-station/revert-last-ai-tuning',  _revertLastAiTuningHandler);
+
+// Full wipe — undo EVERY change AI/Claude has ever made and delete those
+// audit rows so the panel shows only the original operator history.
+// Algorithm:
+//   1. Walk config_changes ASC. For each knob, track:
+//        - lastOperatorValue: most recent operator-set value (post-AI wins)
+//        - preFirstAiValue:   value just before the FIRST AI touch
+//   2. For every knob the AI has touched, compute target =
+//        lastOperatorValue if operator changed it AFTER any AI change
+//        else preFirstAiValue (pristine pre-AI baseline)
+//   3. Apply target to the appropriate config (SCORING/TUNING/OVERRIDES)
+//   4. DELETE all rows where source IN ('claude','auto_optimize')
+//   5. Log one summary row noting how many were wiped
+const _wipeAiChangesHandler = async (req, res) => {
+  setCors(res);
+  try {
+    const tryParse = (s) => { try { return JSON.parse(s); } catch { return s; } };
+
+    const rows = dbInstance.prepare(
+      `SELECT id, changed_at, category, source, knob_key, old_value, new_value
+       FROM config_changes
+       ORDER BY id ASC`
+    ).all();
+
+    // Per-knob walk
+    const aiTouched = new Map();   // key = `${category}|${knob_key}` → { category, knob, preFirstAiValue, lastOperatorAfterAI, hasAi, lastAiId }
+    let lastSourceByKnob = new Map(); // for tracking operator-after-AI
+    for (const r of rows) {
+      const key = `${r.category}|${r.knob_key}`;
+      const isAi = r.source === 'claude' || r.source === 'auto_optimize';
+      const oldV = r.old_value != null ? tryParse(r.old_value) : null;
+      const newV = r.new_value != null ? tryParse(r.new_value) : null;
+      const entry = aiTouched.get(key) ?? {
+        category:           r.category,
+        knob:               r.knob_key,
+        preFirstAiValue:    null,
+        lastOperatorAfterAI:null,
+        hasOperatorAfter:   false,
+        hasAi:              false,
+      };
+      if (isAi) {
+        if (!entry.hasAi) entry.preFirstAiValue = oldV;
+        entry.hasAi = true;
+      } else if (r.source === 'operator') {
+        if (entry.hasAi) {
+          entry.lastOperatorAfterAI = newV;
+          entry.hasOperatorAfter = true;
+        }
+      }
+      aiTouched.set(key, entry);
+    }
+
+    // Apply reverts
+    const applyConfigValue = (category, knobKey, value) => {
+      const cat = String(category || '').toUpperCase();
+      if (cat === 'SCORING' && (knobKey in SCORING_CONFIG)) {
+        SCORING_CONFIG[knobKey] = value;
+        return 'scoring';
+      }
+      if (cat === 'OVERRIDES') {
+        AI_CONFIG_OVERRIDES[knobKey] = value;
+        return 'overrides';
+      }
+      if (cat === 'TUNING' && TUNING_CONFIG && typeof TUNING_CONFIG === 'object') {
+        for (const section of Object.keys(TUNING_CONFIG)) {
+          if (TUNING_CONFIG[section] && knobKey in TUNING_CONFIG[section]) {
+            TUNING_CONFIG[section][knobKey] = value;
+            return `tuning.${section}`;
+          }
+        }
+      }
+      if (cat === 'AI') {
+        AI_CONFIG_OVERRIDES[knobKey] = value;
+        return 'overrides';
+      }
+      return null;
+    };
+
+    const reverted = [];
+    const skipped  = [];
+    for (const entry of aiTouched.values()) {
+      if (!entry.hasAi) continue;
+      const target = entry.hasOperatorAfter ? entry.lastOperatorAfterAI : entry.preFirstAiValue;
+      const where  = applyConfigValue(entry.category, entry.knob, target);
+      if (where) {
+        reverted.push({
+          category: entry.category,
+          knob:     entry.knob,
+          target,
+          source:   entry.hasOperatorAfter ? 'last_operator_value' : 'pre_first_ai_value',
+          appliedTo: where,
+        });
+      } else {
+        skipped.push({ category: entry.category, knob: entry.knob, reason: 'unknown target system' });
+      }
+    }
+
+    // Persist
+    try { persistScoringConfig(); } catch {}
+    try { saveTuningConfig();    } catch {}
+    try { persistAIConfig();     } catch {}
+
+    // Delete the AI audit rows
+    let deletedRows = 0;
+    try {
+      const info = dbInstance.prepare(
+        `DELETE FROM config_changes WHERE source IN ('claude','auto_optimize')`
+      ).run();
+      deletedRows = info.changes ?? 0;
+    } catch (err) {
+      console.warn('[wipe-ai-changes] delete failed:', err.message);
+    }
+
+    // Single summary audit row
+    try {
+      logConfigChange(
+        'AUDIT',
+        'wipe_ai_changes',
+        `${deletedRows} AI rows`,
+        `${reverted.length} knobs reverted`,
+        'operator',
+        `Operator wiped all AI/Claude tuning history. ${reverted.length} knobs restored to pre-AI state, ${deletedRows} audit rows deleted.`
+      );
+    } catch {}
+
+    res.json({
+      ok: true,
+      reverted,
+      skipped,
+      deletedRows,
+      message: `Removed ${deletedRows} AI audit rows. Reverted ${reverted.length} knobs to pre-AI baseline. Audit panel now shows operator-only history.`,
+    });
+  } catch (err) {
+    console.error('[wipe-ai-changes]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.post('/api/control-station/wipe-ai-changes', _wipeAiChangesHandler);
+app.get('/api/control-station/wipe-ai-changes',  _wipeAiChangesHandler);
 
 // ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
 app.get('/api/agent/memory', (req, res) => {
@@ -8103,6 +8421,15 @@ app.post('/api/agent/daily-review', async (req, res) => {
 let _selfImproveRunning = false;
 
 async function runSelfImproveLoop() {
+  // Operator kill-switch: set AUTO_TUNE_DISABLED=1 in Railway env to lock the
+  // current config and stop Claude from re-tightening knobs every 6h. Use
+  // when manually-tuned settings are working and the auto-tuner keeps drifting
+  // them. Manual triggers via /api/self-improve/run-now still respect this.
+  const tuneDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
+  if (tuneDisabled === '1' || tuneDisabled === 'true') {
+    console.log('[self-improve] AUTO_TUNE_DISABLED=1 — config locked, skipping');
+    return;
+  }
   if (!_botActive) { console.log('[self-improve] Bot OFF — skipping'); return; }
   if (_selfImproveRunning) { console.log('[self-improve] Already running, skipping'); return; }
   if (!CLAUDE_API_KEY) { console.log('[self-improve] No CLAUDE_API_KEY, skipping'); return; }
@@ -12654,6 +12981,17 @@ app.get('/api/v8/learning-stats', (req, res) => {
   res.json({ ok: true, ...getLearningStats(dbInstance) });
 });
 
+// X (Twitter) API health — burn rate, cache hits, budget remaining
+app.get('/api/x/health', async (req, res) => {
+  setCors(res);
+  try {
+    const { getXApiStats } = await import('./x-api.js');
+    res.json({ ok: true, ...getXApiStats() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Bond rate stat — what % of our pre-bond calls actually graduated to Raydium
 app.get('/api/calls/bond-stats', async (req, res) => {
   setCors(res);
@@ -12668,6 +13006,122 @@ app.get('/api/calls/bond-stats', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// One-shot backfill of pump_fun_stage_at_call + bonding_pct_at_call for
+// historical calls that predate the bonding columns. For each call where the
+// stage is NULL, hit pump.fun /coins/{mint}: if it's a pump.fun coin, infer
+// the at-call stage from mcap_at_call (using current PumpFun graduation
+// threshold, ~$44K as of 2026-04 — sourced from getPumpFunGraduationMcapUsd
+// so it tracks the env override). Non-pump.fun coins are left NULL — they
+// were never on the bonding curve. Idempotent: skips rows already populated.
+//
+// Runs asynchronously since 200+ pump.fun calls × 200ms = ~40s+. Fire once,
+// then poll /api/calls/bonding-backfill/status to watch progress.
+let _bondingBackfillState = { running: false, startedAt: null, total: 0, processed: 0, updated: 0, skipped: 0, errors: 0, lastError: null, finishedAt: null };
+
+async function _runBondingBackfill() {
+  if (_bondingBackfillState.running) return;
+  _bondingBackfillState = { running: true, startedAt: new Date().toISOString(), total: 0, processed: 0, updated: 0, skipped: 0, errors: 0, lastError: null, finishedAt: null };
+
+  try {
+    const { fetchPumpFunCoin } = await import('./helius-listener.js');
+    const calls = dbInstance.prepare(`
+      SELECT id, contract_address, market_cap_at_call, called_at
+      FROM calls
+      WHERE pump_fun_stage_at_call IS NULL
+        AND contract_address IS NOT NULL
+      ORDER BY called_at DESC
+    `).all();
+    _bondingBackfillState.total = calls.length;
+    console.log(`[bonding-backfill] starting — ${calls.length} calls to scan`);
+
+    const update = dbInstance.prepare(`
+      UPDATE calls
+      SET pump_fun_stage_at_call = ?,
+          bonding_pct_at_call    = ?,
+          bonded_at              = COALESCE(bonded_at, ?),
+          bonded_mcap            = COALESCE(bonded_mcap, ?)
+      WHERE id = ?
+    `);
+
+    const GRAD_MCAP = getPumpFunGraduationMcapUsd();
+    for (const call of calls) {
+      _bondingBackfillState.processed++;
+      try {
+        const pf = await fetchPumpFunCoin(call.contract_address);
+        if (!pf) { _bondingBackfillState.skipped++; await sleep(180); continue; }
+
+        // pf.bondingCurveComplete is the CURRENT graduation state on pump.fun.
+        // We use mcap_at_call to infer the AT-CALL stage, which is what the
+        // calls.pump_fun_stage_at_call column represents.
+        const mcapAtCall = Number(call.market_cap_at_call) || null;
+        let stageAtCall;
+        let pctAtCall;
+        if (mcapAtCall != null && mcapAtCall < GRAD_MCAP) {
+          stageAtCall = 'PRE_BOND';
+          pctAtCall   = Math.min((mcapAtCall / GRAD_MCAP) * 100, 100);
+        } else if (mcapAtCall != null && mcapAtCall >= GRAD_MCAP) {
+          stageAtCall = 'MIGRATED';
+          pctAtCall   = 100;
+        } else {
+          // No mcap_at_call — fall back to current pump.fun state. Less precise
+          // but better than leaving NULL.
+          stageAtCall = pf.bondingCurveComplete ? 'MIGRATED' : 'PRE_BOND';
+          pctAtCall   = pf.bondingCurvePct ?? null;
+        }
+
+        // If pump.fun shows the coin is currently graduated AND we tagged it
+        // as PRE_BOND at call-time, the call is "bonded" (graduated post-call).
+        // Use the current snapshot's mcap as a best-effort bonded_mcap (the
+        // actual graduation mcap floats with SOL price; GRAD_MCAP is the
+        // average target).
+        let bondedAt = null, bondedMcap = null;
+        if (stageAtCall === 'PRE_BOND' && pf.bondingCurveComplete) {
+          bondedAt   = new Date().toISOString();          // approx — actual ts unknown
+          bondedMcap = pf.marketCap ?? GRAD_MCAP;
+        }
+
+        update.run(stageAtCall, pctAtCall, bondedAt, bondedMcap, call.id);
+        _bondingBackfillState.updated++;
+      } catch (err) {
+        _bondingBackfillState.errors++;
+        _bondingBackfillState.lastError = err.message;
+      }
+      // Pace ~5 req/sec to pump.fun (their public API is generous but be polite)
+      await sleep(180);
+      if (_bondingBackfillState.processed % 25 === 0) {
+        console.log(`[bonding-backfill] progress ${_bondingBackfillState.processed}/${calls.length} — updated:${_bondingBackfillState.updated} skipped:${_bondingBackfillState.skipped} errors:${_bondingBackfillState.errors}`);
+      }
+    }
+
+    _bondingBackfillState.finishedAt = new Date().toISOString();
+    _bondingBackfillState.running = false;
+    console.log(`[bonding-backfill] done — total:${_bondingBackfillState.total} updated:${_bondingBackfillState.updated} skipped:${_bondingBackfillState.skipped} errors:${_bondingBackfillState.errors}`);
+    logEvent('INFO', 'BONDING_BACKFILL_DONE', `${_bondingBackfillState.updated} updated, ${_bondingBackfillState.skipped} skipped, ${_bondingBackfillState.errors} errors`);
+  } catch (err) {
+    _bondingBackfillState.running = false;
+    _bondingBackfillState.lastError = err.message;
+    _bondingBackfillState.finishedAt = new Date().toISOString();
+    console.warn('[bonding-backfill] fatal:', err.message);
+  }
+}
+
+const _bondingBackfillKickoff = (req, res) => {
+  setCors(res);
+  if (_bondingBackfillState.running) {
+    return res.json({ ok: true, action: 'already_running', state: _bondingBackfillState });
+  }
+  // Fire and forget — caller polls /status for progress.
+  _runBondingBackfill().catch(err => console.warn('[bonding-backfill] err:', err.message));
+  res.json({ ok: true, action: 'started', message: 'Bonding backfill kicked off — poll /api/calls/bonding-backfill/status for progress.' });
+};
+const _bondingBackfillStatus = (req, res) => {
+  setCors(res);
+  res.json({ ok: true, ..._bondingBackfillState });
+};
+app.post('/api/calls/bonding-backfill',         _bondingBackfillKickoff);
+app.get('/api/calls/bonding-backfill',          _bondingBackfillKickoff);   // browser-bar trigger
+app.get('/api/calls/bonding-backfill/status',   _bondingBackfillStatus);
 
 // Manually trigger the learning loop — detects missed winners + asks
 // Claude to write scoring recommendations. Normally runs every 6h, but
@@ -12823,6 +13277,54 @@ app.get('/api/diagnose/holders/:ca', async (req, res) => {
   res.json({ ok: true, ca, result });
 });
 
+// Diagnose the current Railway SOLSCAN_API_KEY without exposing it. Hits
+// /v2.0/account/transfer with a known dummy address (wrapped SOL mint) and
+// reports the exact HTTP status + response body. Tells the operator whether
+// the env var is missing, expired (401), forbidden by plan tier (403), or
+// fine but Railway still has a stale value.
+const _solscanDiagHandler = async (req, res) => {
+  setCors(res);
+  const key = process.env.SOLSCAN_API_KEY || '';
+  const out = {
+    keyPresent:    !!key,
+    keyLength:     key.length,
+    keyFirst6:     key ? key.slice(0, 6) : null,    // safe to show — JWT prefix is public
+    keyLast4:      key ? key.slice(-4)  : null,
+    railway_redeployed: 'Check that Railway is on commit 9aa11b0 or later',
+    test:          null,
+  };
+  if (!key) {
+    out.test = { skipped: 'no_key', advice: 'Set SOLSCAN_API_KEY in Railway env and redeploy' };
+    return res.json(out);
+  }
+  try {
+    const url = 'https://pro-api.solscan.io/v2.0/account/transfer'
+              + '?address=So11111111111111111111111111111111111111112&page=1&page_size=10';
+    const r = await fetch(url, {
+      headers: { token: key, accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const text = await r.text();
+    let body = null;
+    try { body = JSON.parse(text); } catch { body = text.slice(0, 300); }
+    out.test = {
+      status: r.status,
+      ok:     r.ok,
+      bodySnippet: typeof body === 'string' ? body : JSON.stringify(body).slice(0, 300),
+    };
+    if (r.status === 401) out.advice = 'Key is invalid or rotated — copy the current key from https://pro.solscan.io/account → API Management and update Railway';
+    else if (r.status === 403) out.advice = 'Plan tier does not allow this endpoint — upgrade Solscan plan or disable enricher';
+    else if (r.ok) out.advice = '✅ Key works. If 401s still appear in logs, Railway has stale env — click Redeploy.';
+    else out.advice = `Unexpected status ${r.status} — see bodySnippet`;
+  } catch (err) {
+    out.test = { error: err.message };
+    out.advice = 'Network error reaching Solscan — try again';
+  }
+  res.json(out);
+};
+app.get('/api/diagnostics/solscan',  _solscanDiagHandler);
+app.post('/api/diagnostics/solscan', _solscanDiagHandler);
+
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
@@ -12892,6 +13394,33 @@ app.post('/api/midcap-harvester/run', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// Early-buyer harvester — daily early-buyer sweep on $250K+ winners
+// Walks Helius Enhanced API back to coin creation, extracts the FIRST 100
+// real buyers (skipping dev + sniper-bot slots). Better alpha source than
+// current top-holders because it captures wallets that found the coin pre-run.
+const _earlyBuyerStatusHandler = async (req, res) => {
+  setCors(res);
+  try {
+    const { getEarlyBuyerStats } = await import('./early-buyer-harvester.js');
+    res.json({ ok: true, ...getEarlyBuyerStats(dbInstance) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+const _earlyBuyerRunHandler = async (req, res) => {
+  setCors(res);
+  try {
+    const { triggerEarlyBuyerHarvest } = await import('./early-buyer-harvester.js');
+    triggerEarlyBuyerHarvest(dbInstance, HELIUS_API_KEY).catch(err => console.warn('[early-buyer] run err:', err.message));
+    res.json({ ok: true, message: 'Early-buyer harvest triggered — pulls earliest swaps for up to 50 fresh midcap coins. Check logs.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.get('/api/early-buyer-harvester/status', _earlyBuyerStatusHandler);
+app.post('/api/early-buyer-harvester/run', _earlyBuyerRunHandler);
+app.get('/api/early-buyer-harvester/run',  _earlyBuyerRunHandler);  // browser-bar trigger
 
 // Whale funding tracker — top WINNER wallets' outgoing SOL transfers
 app.get('/api/whale-funding/status', async (req, res) => {
@@ -13448,6 +13977,114 @@ app.post('/api/helius/webhook', express.json({ limit: '10mb' }), (req, res) => {
   }
 });
 
+// Create helper: creates a brand-new Helius Enhanced webhook pointing at our
+// /api/helius/webhook receiver, pre-populated with our top tracked wallets.
+// Returns the webhookID — operator pastes that into Railway as HELIUS_WEBHOOK_ID
+// and the auto-sync cron takes over from there. One-shot first-time setup.
+//
+// Idempotency: if HELIUS_WEBHOOK_ID is already set in env, this skips the create
+// and just runs the sync — safe to fire repeatedly.
+//
+// Usage (browser bar OK — GET alias provided):
+//   POST /api/helius/webhook/create
+//   POST /api/helius/webhook/create   { "publicUrl": "https://my-railway.app" }
+const _heliusWebhookCreateHandler = async (req, res) => {
+  setCors(res);
+  const apiKey = getEnhancedApiKey();
+  if (!apiKey) return res.status(400).json({ ok: false, error: 'HELIUS_ENHANCED_API_KEY (or HELIUS_API_KEY) missing in Railway env' });
+
+  // If the operator already has a webhook configured, skip the create and
+  // just push the latest address list (the auto-sync does this nightly anyway).
+  if (process.env.HELIUS_WEBHOOK_ID) {
+    try {
+      const rows = dbInstance.prepare(`
+        SELECT address FROM tracked_wallets
+        WHERE is_blacklist = 0 AND (sol_balance IS NULL OR sol_balance >= 1)
+          AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
+        ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
+        LIMIT 10000
+      `).all();
+      const addresses = rows.map(r => r.address).filter(Boolean);
+      const result = await syncTrackedAddressesToHelius(process.env.HELIUS_WEBHOOK_ID, apiKey, addresses);
+      return res.json({
+        ok:        result.ok,
+        action:    'sync_existing',
+        webhookId: process.env.HELIUS_WEBHOOK_ID,
+        message:   `Webhook already exists (HELIUS_WEBHOOK_ID set). Pushed ${result.registered ?? 0} addresses.`,
+        ...result,
+      });
+    } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+  }
+
+  // Detect public URL from request headers (Railway sets X-Forwarded-Host /
+  // X-Forwarded-Proto). Fall back to body.publicUrl, then PUBLIC_URL env, then
+  // a hardcoded Railway prod host. Always validate with a regex so a malformed
+  // header can't trick Helius into a bad webhook.
+  const proto    = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+  const hostHdr  = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(',')[0].trim();
+  const inferred = hostHdr ? `${proto}://${hostHdr}` : null;
+  const explicit = (req.body && req.body.publicUrl) || process.env.PUBLIC_URL;
+  const publicUrl = explicit || inferred || 'https://caller-bot-production.up.railway.app';
+  if (!/^https:\/\/[a-zA-Z0-9.\-]+/.test(publicUrl)) {
+    return res.status(400).json({ ok: false, error: `Invalid public URL: ${publicUrl}` });
+  }
+  const webhookURL = `${publicUrl.replace(/\/+$/, '')}/api/helius/webhook`;
+
+  // Reuse HELIUS_WEBHOOK_SECRET if already set, otherwise generate one + tell
+  // the operator to add it to Railway env. Helius will send it back in the
+  // Authorization header, and our /api/helius/webhook receiver checks it.
+  const authHeader = process.env.HELIUS_WEBHOOK_SECRET
+    || `pulse-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+
+  try {
+    // Pull initial address list — top 10K by score, real categories only.
+    const rows = dbInstance.prepare(`
+      SELECT address FROM tracked_wallets
+      WHERE is_blacklist = 0 AND (sol_balance IS NULL OR sol_balance >= 1)
+        AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
+      ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
+      LIMIT 10000
+    `).all();
+    const addresses = rows.map(r => r.address).filter(Boolean);
+    console.log(`[helius-wh] Create → ${webhookURL} with ${addresses.length} initial addresses`);
+
+    const result = await createHeliusWebhook({
+      apiKey,
+      webhookURL,
+      accountAddresses: addresses,
+      authHeader,
+    });
+
+    if (!result.ok) return res.status(500).json(result);
+
+    logEvent('INFO', 'HELIUS_WEBHOOK_CREATED', `id=${result.webhookID} addrs=${result.registered}`);
+    console.log(`[helius-wh] Create ✓ id=${result.webhookID} url=${result.webhookURL} addrs=${result.registered}`);
+
+    // Tell the operator the exact env vars to set in Railway.
+    res.json({
+      ok:           true,
+      action:       'created',
+      webhookId:    result.webhookID,
+      webhookURL:   result.webhookURL,
+      registered:   result.registered,
+      skipped:      result.skipped,
+      message:      'Webhook created successfully. Set the env vars below in Railway and redeploy.',
+      next_steps_railway_env: {
+        HELIUS_WEBHOOK_ID:     result.webhookID,
+        HELIUS_WEBHOOK_SECRET: authHeader,
+      },
+      verify_endpoints: {
+        list:  '/api/helius/webhook/list',
+        stats: '/api/helius/webhook/stats',
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.post('/api/helius/webhook/create', _heliusWebhookCreateHandler);
+app.get('/api/helius/webhook/create',  _heliusWebhookCreateHandler);  // browser-bar trigger
+
 // Setup helper: pushes all currently-tracked wallet addresses to a Helius
 // webhook by ID. Call this AFTER you've created the webhook in the Helius
 // dashboard and added HELIUS_WEBHOOK_ID to Railway env. Replaces the
@@ -13653,7 +14290,9 @@ app.get('/api/wallets/rankings', (req, res) => {
     const { limit = 200, category } = req.query;
     let q = `SELECT address, label, category, win_rate, avg_roi, trade_count, score,
                wins_found_in, losses_in, source, notes, dune_data, updated_at,
-               sol_balance, sol_scanned_at, ca_count
+               sol_balance, sol_scanned_at, ca_count,
+               our_win_count, our_loss_count, our_avg_win_multiple, our_avg_loss_multiple,
+               our_last_win_token, our_last_loss_token, our_last_win_at, our_last_loss_at
              FROM tracked_wallets WHERE is_blacklist=0`;
     const params = [];
     if (category) { q += ' AND category=?'; params.push(category); }
@@ -13670,7 +14309,8 @@ app.get('/api/wallets/rankings', (req, res) => {
 
     // Top WINNER wallets with full stats
     const topWinners = dbInstance.prepare(
-      `SELECT address, label, win_rate, avg_roi, trade_count, score, wins_found_in, notes, dune_data
+      `SELECT address, label, win_rate, avg_roi, trade_count, score, wins_found_in, notes, dune_data,
+              our_win_count, our_loss_count, our_avg_win_multiple, our_avg_loss_multiple
        FROM tracked_wallets WHERE category='WINNER' AND is_blacklist=0
        ORDER BY score DESC LIMIT 50`
     ).all().map(w => ({
@@ -14570,6 +15210,16 @@ app.listen(PORT, async () => {
     }
   });
 
+  // Mirror of the WIN hook — credits early holders into our_loss_count when a
+  // call resolves to LOSS. Lets the dashboard surface the "fade these wallets"
+  // signal alongside the WINNER stats.
+  setWalletLossHook((ca, peakMultiple) => {
+    const result = creditWalletsForLoss(ca, peakMultiple);
+    if (result.credited > 0) {
+      logEvent('INFO', 'WALLET_LOSS_DEBIT', `${result.credited} wallets debited a loss on ${ca.slice(0,8)} (peak ${peakMultiple.toFixed(2)}x)`);
+    }
+  });
+
   // Wire the exit-monitor Telegram hook — sends 🚨 EXIT NOW alerts to the
   // group when posted calls show rug/dump patterns (LP pull, sell flip,
   // deep drop from peak, dev wallet moving). Each alert type fires once
@@ -14581,12 +15231,12 @@ app.listen(PORT, async () => {
       await fetch(`${TELEGRAM_API}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(_withTrenchThread({
           chat_id: TELEGRAM_GROUP_CHAT_ID,
           text: msg,
           parse_mode: 'HTML',
           disable_web_page_preview: true,
-        }),
+        })),
         signal: AbortSignal.timeout(10_000),
       });
     } catch (err) { console.warn('[exit-tg] send failed:', err.message); }
@@ -14608,6 +15258,46 @@ app.listen(PORT, async () => {
   setInterval(refreshTrackedAddresses, 5 * 60_000);
 
   setIsWalletTrackedFn(addr => _trackedAddressesCache.has(addr));
+
+  // ── Helius webhook address-list auto-sync ─────────────────────────────────
+  // The early-buyer + midcap harvesters add 1000-3000 new wallets/day. Helius
+  // only delivers events for addresses on the webhook's accountAddresses list,
+  // so without this sync we'd silently miss webhook coverage on every newly
+  // harvested wallet. Runs daily (4 AM tick + 1h after boot).
+  // Only fires when both HELIUS_WEBHOOK_ID and the Enhanced API key are set —
+  // otherwise this is a no-op (safe to ship before user creates the webhook).
+  const _autoSyncWebhook = async () => {
+    const webhookId = process.env.HELIUS_WEBHOOK_ID;
+    const apiKey    = getEnhancedApiKey();
+    if (!webhookId || !apiKey) {
+      console.log('[helius-wh-sync] skipped — HELIUS_WEBHOOK_ID or Enhanced API key not set');
+      return;
+    }
+    try {
+      // Cap to top 10K wallets by score (Helius limit is 100K addresses, but
+      // smaller list = fewer wasted webhook deliveries on dust wallets).
+      const rows = dbInstance.prepare(`
+        SELECT address FROM tracked_wallets
+        WHERE is_blacklist = 0
+          AND (sol_balance IS NULL OR sol_balance >= 1)
+          AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
+        ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
+        LIMIT 10000
+      `).all();
+      const addresses = rows.map(r => r.address).filter(Boolean);
+      console.log(`[helius-wh-sync] pushing ${addresses.length} top-tier wallets to webhook ${webhookId.slice(0,8)}...`);
+      const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
+      if (result.ok) {
+        console.log(`[helius-wh-sync] ✓ ${result.registered} addresses synced (${result.skipped} skipped as invalid)`);
+        logEvent('INFO', 'HELIUS_WH_AUTOSYNC', `Synced ${result.registered} addresses`);
+      } else {
+        console.warn('[helius-wh-sync] failed:', result.error);
+      }
+    } catch (err) { console.warn('[helius-wh-sync] err:', err.message); }
+  };
+  // First run 1h after boot, then every 24h.
+  setTimeout(() => { _autoSyncWebhook().catch(() => {}); }, 60 * 60_000);
+  setInterval(_autoSyncWebhook, 24 * 60 * 60_000);
 
   // SWARM HOOK — when ≥3 tracked wallets buy the same CA in 10 min, this
   // fires. We feed the CA into the existing scanner pipeline as if our
@@ -14668,7 +15358,10 @@ app.listen(PORT, async () => {
     if (!TELEGRAM_BOT_TOKEN) return;
     const sends = [];
 
-    // Always fire milestone to VIP group
+    // Milestone alerts (2x / 5x / 10x) intentionally route to General, NOT
+    // Trench Calls — operator wants milestones visible in main chat for
+    // celebration / momentum vibes; the trade signals + exit warnings are
+    // the noisy stuff that gets corralled into the dedicated topic.
     if (TELEGRAM_GROUP_CHAT_ID) {
       sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg));
     }
@@ -14768,6 +15461,22 @@ app.listen(PORT, async () => {
     console.warn('[midcap-harvester] failed to start:', err.message);
   }
 
+  // ── Early-Buyer Harvester (daily — first 100 buyers of $250K+ winners) ─
+  // Where midcap-harvester captures CURRENT top holders (often dev/LP/late
+  // bag-holders), this captures the EARLIEST 100 buyers — the wallets that
+  // bought before the coin ran. Source: midcap_harvest_log (already filled
+  // by midcap-harvester). Walks Helius Enhanced API backwards via `before`
+  // cursor until it hits coin creation, then extracts buyer addresses from
+  // tokenTransfers. Drops the first 3 (dev + sniper bots) and inserts the
+  // rest as source='early-buyer-harvester'. SOL-tier classified by
+  // classifyAllBySol — same rules as the other harvesters.
+  try {
+    const { startEarlyBuyerHarvester } = await import('./early-buyer-harvester.js');
+    startEarlyBuyerHarvester(dbInstance, HELIUS_API_KEY);
+  } catch (err) {
+    console.warn('[early-buyer-harvester] failed to start:', err.message);
+  }
+
   // ── One-time cleanup of harvester wallets inserted WITHOUT SOL check ──
   // Previous harvester versions wrote every top-holder straight into
   // tracked_wallets as WINNER regardless of SOL balance, polluting the
@@ -14793,39 +15502,63 @@ app.listen(PORT, async () => {
     console.warn('[boot] harvester-cleanup check failed:', err.message);
   }
 
-  try {
-    const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
-    startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {
-      try {
-        // EXIT alerts are WARNINGS about coins we already called or are
-        // watching — post a TG notice but do NOT push into processCandidate
-        // (no new call to make; we're flagging whale exits for awareness).
-        if (kind === 'exit') {
-          // User disabled the TG notification — too noisy. Still log the
-          // exit to Railway + system_log so wallet_activity keeps the
-          // SELL entry and the oracle can query "did whales exit this?"
-          // on demand, but no channel ping.
-          console.log(`[smart-money→pipeline] 📉 WHALE EXIT detected (silent) — ${ca.slice(0,8)} exitCluster=${clusterSize}`);
-          logEvent('WARN', 'WHALE_EXIT_SILENT', `${ca} — ${clusterSize} tracked winners dumping (TG alert disabled)`);
-          return;
+  // ── Smart Money: now driven by Helius webhook (push), not polling. ────────
+  // The previous polling watcher burned ~2.3M Helius credits/day hitting
+  // /v0/addresses/{wallet}/transactions for the top 80 wallets every 5 min.
+  // Helius Enhanced webhooks deliver the same data for free — already wired
+  // via /api/helius/webhook + processHeliusWebhookBatch (helius-webhook.js),
+  // which records wallet_events and fires the swarm hook (≥3 tracked wallets
+  // co-buying inside 10min). We hook the swarm output into the same
+  // processCandidate path the polling watcher used to.
+  // To re-enable polling (if webhook ever goes down) set
+  // SMART_MONEY_POLLING_ENABLED=1 in Railway env.
+  setSwarmHook(async (ca, buyers) => {
+    try {
+      const clusterSize = buyers?.length ?? 3;
+      console.log(`[helius-wh→pipeline] $${ca.slice(0,8)} swarm cluster=${clusterSize} — pushing into processCandidate`);
+      await processCandidate({
+        contractAddress: ca,
+        chain:           'solana',
+        candidateType:   'SMART_MONEY_CLUSTER',
+        _smartMoney:     { kind: 'cluster', clusterSize, detectedAt: Date.now() },
+        _discoveredAt:   Date.now(),
+      });
+    } catch (err) {
+      console.warn('[helius-wh→pipeline] processCandidate failed:', err.message);
+    }
+  });
+
+  if (String(process.env.SMART_MONEY_POLLING_ENABLED || '').toLowerCase() === '1' ||
+      String(process.env.SMART_MONEY_POLLING_ENABLED || '').toLowerCase() === 'true') {
+    try {
+      const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
+      startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {
+        try {
+          if (kind === 'exit') {
+            console.log(`[smart-money→pipeline] 📉 WHALE EXIT detected (silent) — ${ca.slice(0,8)} exitCluster=${clusterSize}`);
+            logEvent('WARN', 'WHALE_EXIT_SILENT', `${ca} — ${clusterSize} tracked winners dumping (TG alert disabled)`);
+            return;
+          }
+          console.log(`[smart-money→pipeline] $${ca.slice(0,8)} kind=${kind} cluster=${clusterSize} — pushing into processCandidate`);
+          await processCandidate({
+            contractAddress: ca,
+            chain:           'solana',
+            candidateType:   kind === 'kol'     ? 'KOL_FOLLOW'
+                           : kind === 'cluster' ? 'SMART_MONEY_CLUSTER'
+                           :                      'SMART_MONEY_SINGLE',
+            _smartMoney:     { kind, clusterSize, detectedAt: Date.now() },
+            _discoveredAt:   Date.now(),
+          });
+        } catch (err) {
+          console.warn('[smart-money→pipeline] processCandidate failed:', err.message);
         }
-        console.log(`[smart-money→pipeline] $${ca.slice(0,8)} kind=${kind} cluster=${clusterSize} — pushing into processCandidate`);
-        await processCandidate({
-          contractAddress: ca,
-          chain:           'solana',
-          candidateType:   kind === 'kol'     ? 'KOL_FOLLOW'
-                         : kind === 'cluster' ? 'SMART_MONEY_CLUSTER'
-                         :                      'SMART_MONEY_SINGLE',
-          _smartMoney:     { kind, clusterSize, detectedAt: Date.now() },
-          _discoveredAt:   Date.now(),
-        });
-      } catch (err) {
-        console.warn('[smart-money→pipeline] processCandidate failed:', err.message);
-      }
-    });
-    console.log('[startup] ✓ Smart Money watcher active — WINNER-tier wallets polled every 90s');
-  } catch (err) {
-    console.warn('[startup] Smart Money watcher failed to start:', err.message);
+      });
+      console.log('[startup] ⚠ Smart Money polling watcher ACTIVE (override env set) — burning Helius credits');
+    } catch (err) {
+      console.warn('[startup] Smart Money watcher failed to start:', err.message);
+    }
+  } else {
+    console.log('[startup] ✓ Smart Money: webhook-driven (polling disabled — saves ~2.3M Helius credits/day)');
   }
 
   // ── Smart Money: Solscan wallet enrichment loop (every 6h) ────────────────

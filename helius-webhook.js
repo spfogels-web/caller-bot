@@ -33,7 +33,11 @@ export function setSwarmHook(fn)         { _onSwarmDetected = typeof fn === 'fun
 export function setEventHook(fn)         { _onWalletEvent   = typeof fn === 'function' ? fn : null; }
 export function setIsWalletTrackedFn(fn) { _isWalletTracked = typeof fn === 'function' ? fn : null; }
 
-const SWARM_MIN_WALLETS = 3;        // ≥3 distinct wallets co-buying = swarm
+// Raised from 3 → 5 after the 10K-wallet webhook list went live. With that
+// many addresses registered, 3-wallet co-buys are statistical noise rather
+// than alpha — was producing score-15 to score-25 calls that posted via
+// the cluster bypass. 5 buyers in 10 min is a real conviction signal.
+const SWARM_MIN_WALLETS = 5;
 const SWARM_WINDOW_SEC  = 600;      // within 10 minutes
 const SWARM_MIN_SOL     = 0.5;      // each buy ≥ 0.5 SOL (filter dust)
 // Cooldown so a single hot coin doesn't fire 50 swarm signals back-to-back
@@ -236,6 +240,53 @@ export async function syncTrackedAddressesToHelius(webhookId, apiKey, addresses)
       transactionTypes: updated.transactionTypes,
     };
   } catch (err) { return { ok: false, error: 'PUT webhook err: ' + err.message }; }
+}
+
+/**
+ * Create a brand-new Helius Enhanced webhook with the given URL + addresses.
+ * Use this for first-time setup — replaces the manual dashboard click-through.
+ * Returns: { ok, webhookID, webhookURL, registered, skipped, error }
+ */
+export async function createHeliusWebhook({ apiKey, webhookURL, accountAddresses = [], authHeader = '' }) {
+  if (!apiKey)     return { ok: false, error: 'apiKey missing' };
+  if (!webhookURL) return { ok: false, error: 'webhookURL missing' };
+
+  const VALID_ADDR = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  const validAddresses = (accountAddresses || []).filter(a => typeof a === 'string' && VALID_ADDR.test(a));
+  // Helius requires at least one accountAddress at creation. If we don't have
+  // any yet, seed with a dummy SOL system address — the auto-sync will swap
+  // in our real wallets within an hour.
+  const seed = validAddresses.length ? validAddresses : ['So11111111111111111111111111111111111111112'];
+
+  const body = {
+    webhookURL,
+    transactionTypes: ['SWAP'],
+    accountAddresses: seed,
+    webhookType:    'enhanced',
+    authHeader:     authHeader || '',
+  };
+
+  try {
+    const r = await fetch(`https://api.helius.xyz/v0/webhooks?api-key=${apiKey}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+      signal:  AbortSignal.timeout(20_000),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      return { ok: false, error: 'POST webhook failed: HTTP ' + r.status + ' ' + text.slice(0, 300) };
+    }
+    const created = await r.json();
+    return {
+      ok: true,
+      webhookID:    created.webhookID,
+      webhookURL:   created.webhookURL,
+      registered:   seed.length,
+      skipped:      (accountAddresses?.length ?? 0) - validAddresses.length,
+      transactionTypes: created.transactionTypes,
+    };
+  } catch (err) { return { ok: false, error: 'POST webhook err: ' + err.message }; }
 }
 
 /**

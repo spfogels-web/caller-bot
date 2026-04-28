@@ -15,6 +15,8 @@
  */
 'use strict';
 
+import { getPumpFunGraduationMcapUsd } from './helius-listener.js';
+
 // Base58 alphabet excludes 0/O/I/l. Solana addresses are 32-44 chars
 // (mostly 43-44). The regex catches embedded CAs in any message text.
 const SOLANA_CA_REGEX = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
@@ -523,7 +525,9 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   let imageUrl = pair.info?.imageUrl || heliusMeta?.content?.links?.image || null;
   let pfData = null;
   try {
-    const pf = await fetch(`https://frontend-api.pump.fun/coins/${ca}`, {
+    // Pump.fun migrated to v3 host — old frontend-api.pump.fun returns
+    // Cloudflare 1016. helius-listener.js has the matching constant.
+    const pf = await fetch(`https://frontend-api-v3.pump.fun/coins/${ca}`, {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(5_000),
     });
@@ -604,7 +608,10 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   if (pfData) {
     const usdMc       = Number(pfData.usd_market_cap ?? 0);
     const isComplete  = pfData.complete === true;
-    const bondingPct  = !isComplete && usdMc > 0 ? Math.min(100, (usdMc / 69_000) * 100) : (isComplete ? 100 : null);
+    // Pump.fun graduation threshold: SOL-denominated upstream so it floats.
+    // Sourced from helius-listener.js's env-overridable helper.
+    const GRAD_MCAP   = getPumpFunGraduationMcapUsd();
+    const bondingPct  = !isComplete && usdMc > 0 ? Math.min(100, (usdMc / GRAD_MCAP) * 100) : (isComplete ? 100 : null);
     const replyCount  = pfData.reply_count ?? 0;
     const isKOTH      = !!pfData.king_of_the_hill_timestamp;
     lines.push('');
@@ -619,7 +626,7 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
       })();
       lines.push(`┣ Status: 🟠 <b>PRE-BOND</b> (${bondingPct.toFixed(1)}%)`);
       lines.push(`┣ ${bar}`);
-      lines.push(`┣ Goal: $${(usdMc / 1000).toFixed(1)}K / $69K`);
+      lines.push(`┣ Goal: $${(usdMc / 1000).toFixed(1)}K / $${(GRAD_MCAP / 1000).toFixed(0)}K`);
       lines.push(`┗ Replies: ${replyCount}${isKOTH ? ' · 👑 KOTH' : ''}`);
     }
   }
@@ -632,6 +639,7 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   lines.push(`┗ DEX Paid: ${pair.boosts?.active > 0 ? '🟢' : '⚪'}`);
 
   // Links
+  let twitterHandle = null;
   if (websites.length || socials.length) {
     lines.push('');
     lines.push(`🔗 <b>Links</b>`);
@@ -642,9 +650,40 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
         const t = (s.type || '').toLowerCase();
         const ic = t.includes('twitter') || t === 'x' ? '🐦' : t.includes('telegram') ? '💬' : '🔗';
         linkRow.push(`${ic} <a href="${s.url}">${safe(s.type || 'Link')}</a>`);
+        // Capture the X/Twitter handle for profile lookup below
+        if ((t.includes('twitter') || t === 'x') && !twitterHandle) {
+          const m = s.url.match(/(?:twitter\.com|x\.com)\/(@?[A-Za-z0-9_]{1,32})/i);
+          if (m) twitterHandle = m[1].replace(/^@/, '');
+        }
       }
     }
     if (linkRow.length) lines.push(`┗ ${linkRow.join(' | ')}`);
+  }
+
+  // ── X / Twitter profile intel (only fires when X_BEARER_TOKEN is set
+  //    AND we extracted a handle from the coin's socials). Cached 30min
+  //    per handle in x-api.js so repeated card builds don't re-bill.
+  if (twitterHandle && process.env.X_BEARER_TOKEN) {
+    try {
+      const { getUserByUsername, fmtAccountAge } = await import('./x-api.js');
+      const xp = await getUserByUsername(twitterHandle);
+      if (xp) {
+        const followersFmt = (() => {
+          const n = xp.followers || 0;
+          if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+          if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
+          return String(n);
+        })();
+        const verifiedTag = xp.verified
+          ? (xp.verifiedType === 'business' ? ' 💼' : xp.verifiedType === 'government' ? ' 🏛' : ' ☑️')
+          : '';
+        lines.push('');
+        lines.push(`🐦 <b>Twitter</b>`);
+        lines.push(`┣ <a href="https://x.com/${safe(xp.username)}">@${safe(xp.username)}</a>${verifiedTag}`);
+        lines.push(`┣ Followers: <b>${followersFmt}</b> · Age: <b>${fmtAccountAge(xp.createdAt)}</b>`);
+        lines.push(`┗ Tweets: ${xp.tweetCount.toLocaleString()}`);
+      }
+    } catch { /* X API down or budget hit — skip silently */ }
   }
 
   // Charts row — clickable links to popular Solana chart/trade UIs

@@ -31,7 +31,9 @@ let _stats = {
 
 async function fetchPumpFunCoin(mint) {
   try {
-    const res = await fetch(`https://frontend-api.pump.fun/coins/${mint}`, {
+    // Pump.fun migrated to v3 host — the old frontend-api.pump.fun returns
+    // Cloudflare 1016 now. helius-listener.js has the matching constant.
+    const res = await fetch(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
@@ -106,46 +108,82 @@ export function stopBondingTracker() {
 
 export function getBondingTrackerStats() { return { ..._stats }; }
 
-// Aggregate stats for the dashboard. Counts pre-bond calls + how many
-// graduated. Returns { preBondCalls, bonded, bondRate, lifetime }.
+// Aggregate stats for the dashboard. MCap-based eligibility (was previously
+// pump_fun_stage based, which only covered pump.fun coins). New definition:
+//
+//   ELIGIBLE  = called when MCap ≤ BONDING_ELIGIBLE_MAX_MCAP_USD (default $35K)
+//               — these are "real pre-bond catches" with room to grow before
+//               hitting the ~$44K graduation threshold
+//   BONDED    = of those, peak_mcap ≥ PUMP_FUN_GRADUATION_MCAP_USD (default $44K)
+//               — i.e. the coin reached graduation MCap
+//   POST-BOND = called when MCap ≥ graduation threshold (already past the curve)
+//
+//   bondRate = bonded ÷ eligible
+//
+// Returned shape: same field names as before so the dashboard wiring keeps
+// working. preBondCalls now means "eligible" (MCap-defined). Subset
+// guarantees still hold because everything's a single SQL pass.
 export function getBondRateStats(dbInstance) {
   try {
-    const lifetime = dbInstance.prepare(`
+    const ELIGIBLE_MAX = Number(process.env.BONDING_ELIGIBLE_MAX_MCAP_USD) || 35_000;
+    const GRAD_MCAP    = Number(process.env.PUMP_FUN_GRADUATION_MCAP_USD)  || 44_000;
+
+    const aggSql = (whereClause) => `
       SELECT
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' THEN 1 ELSE 0 END) AS pre_bond,
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' AND bonded_at IS NOT NULL THEN 1 ELSE 0 END) AS bonded,
-        SUM(CASE WHEN pump_fun_stage_at_call = 'MIGRATED' THEN 1 ELSE 0 END) AS already_migrated,
-        COUNT(*) AS total_calls
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call <= ${ELIGIBLE_MAX} THEN 1 ELSE 0 END) AS pre_bond,
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call <= ${ELIGIBLE_MAX} AND COALESCE(peak_mcap, 0) >= ${GRAD_MCAP} THEN 1 ELSE 0 END) AS bonded,
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call >  ${GRAD_MCAP} THEN 1 ELSE 0 END) AS already_migrated,
+        AVG(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call <= ${ELIGIBLE_MAX} AND COALESCE(peak_mcap, 0) >= ${GRAD_MCAP} AND peak_multiple IS NOT NULL THEN peak_multiple END) AS avg_peak_bonded,
+        AVG(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call >  ${GRAD_MCAP} AND peak_multiple IS NOT NULL THEN peak_multiple END) AS avg_peak_postmig,
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL THEN 1 ELSE 0 END) AS tagged,
+        COUNT(*) AS total
       FROM calls
-    `).get();
-    const last7d = dbInstance.prepare(`
-      SELECT
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' THEN 1 ELSE 0 END) AS pre_bond,
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' AND bonded_at IS NOT NULL THEN 1 ELSE 0 END) AS bonded
-      FROM calls
-      WHERE called_at > datetime('now', '-7 days')
-    `).get();
-    const computeRate = (bonded, preBond) => {
+      ${whereClause}
+    `;
+    const lifetime = dbInstance.prepare(aggSql('')).get();
+    const last7d   = dbInstance.prepare(aggSql(`WHERE called_at > datetime('now', '-7 days')`)).get();
+
+    const rate = (bonded, preBond) => {
       const b = Number(bonded || 0);
       const p = Number(preBond || 0);
       return p > 0 ? Math.round((b / p) * 100) : null;
     };
+    const round1 = (v) => (v != null && Number.isFinite(v)) ? Math.round(v * 10) / 10 : null;
+    const coverage = (tagged, total) => {
+      const t = Number(total || 0);
+      return t > 0 ? Math.round((Number(tagged || 0) / t) * 100) : null;
+    };
+
     return {
       lifetime: {
         preBondCalls:     lifetime?.pre_bond ?? 0,
-        bonded:           lifetime?.bonded   ?? 0,
-        bondRate:         computeRate(lifetime?.bonded, lifetime?.pre_bond),
-        alreadyMigrated:  lifetime?.already_migrated ?? 0,
-        totalCalls:       lifetime?.total_calls ?? 0,
+        bonded:           lifetime?.bonded ?? 0,
+        bondRate:         rate(lifetime?.bonded, lifetime?.pre_bond),
+        avgPeakBonded:    round1(lifetime?.avg_peak_bonded),
+        postMigCalls:     lifetime?.already_migrated ?? 0,
+        avgPeakPostMig:   round1(lifetime?.avg_peak_postmig),
+        taggedCalls:      lifetime?.tagged ?? 0,
+        totalCalls:       lifetime?.total ?? 0,
+        coverage:         coverage(lifetime?.tagged, lifetime?.total),
       },
       last7d: {
-        preBondCalls:  last7d?.pre_bond ?? 0,
-        bonded:        last7d?.bonded   ?? 0,
-        bondRate:      computeRate(last7d?.bonded, last7d?.pre_bond),
+        preBondCalls:    last7d?.pre_bond ?? 0,
+        bonded:          last7d?.bonded ?? 0,
+        bondRate:        rate(last7d?.bonded, last7d?.pre_bond),
+        avgPeakBonded:   round1(last7d?.avg_peak_bonded),
+        postMigCalls:    last7d?.already_migrated ?? 0,
+        avgPeakPostMig:  round1(last7d?.avg_peak_postmig),
+      },
+      thresholds: {
+        eligibleMaxMcapUsd: ELIGIBLE_MAX,
+        gradMcapUsd:        GRAD_MCAP,
       },
     };
   } catch (err) {
     console.warn('[bonding-tracker] stats:', err.message);
-    return { lifetime: { preBondCalls: 0, bonded: 0, bondRate: null }, last7d: {} };
+    return {
+      lifetime: { preBondCalls: 0, bonded: 0, bondRate: null, avgPeakBonded: null, postMigCalls: 0, avgPeakPostMig: null, taggedCalls: 0, totalCalls: 0, coverage: null },
+      last7d:   { preBondCalls: 0, bonded: 0, bondRate: null, avgPeakBonded: null, postMigCalls: 0, avgPeakPostMig: null },
+    };
   }
 }

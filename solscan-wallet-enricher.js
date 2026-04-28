@@ -35,9 +35,22 @@ const MAX_PER_RUN        = 50;           // wallets to enrich per cron tick
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Solscan API call ───────────────────────────────────────────────────────
+// Auth-failure circuit breaker. Once we see 401/403, set this so subsequent
+// wallets in the same tick short-circuit instead of hammering Solscan
+// (previously firing ~50 401s per tick + spamming Railway logs once per second).
+// Reset to false at the start of each new batch so a fixed key recovers
+// automatically on the next 6h tick.
+let _solscanAuthBlocked = false;
+export function isSolscanAuthBlocked() { return _solscanAuthBlocked; }
+export function resetSolscanAuthBlock() { _solscanAuthBlocked = false; }
+
 async function solscanFetchTransfers(address, pageSize = 100) {
   if (!SOLSCAN_API_KEY) {
     throw new Error('SOLSCAN_API_KEY missing — set it in Railway variables');
+  }
+  if (_solscanAuthBlocked) {
+    // Already hit auth fail this tick — abort silently, no more log spam.
+    throw new Error('SOLSCAN_AUTH_BLOCKED');
   }
   // Solscan Pro v2 splits results across pages; pull two pages to get ~200
   const all = [];
@@ -68,6 +81,12 @@ async function solscanFetchTransfers(address, pageSize = 100) {
       break;
     }
     if (res.status === 401 || res.status === 403) {
+      // Trip the breaker — log ONCE for this batch, then every following
+      // wallet short-circuits silently until the next tick's reset.
+      if (!_solscanAuthBlocked) {
+        console.warn(`[solscan] AUTH FAILED (${res.status}) — check SOLSCAN_API_KEY in Railway. Aborting batch.`);
+      }
+      _solscanAuthBlocked = true;
       throw new Error(`Solscan auth failed (${res.status}) — check SOLSCAN_API_KEY`);
     }
     if (!res.ok) {
@@ -239,6 +258,9 @@ export async function enrichStaleWallets(dbInstance, batchSize = MAX_PER_RUN) {
     console.warn('[solscan-enricher] skipped — SOLSCAN_API_KEY not set');
     return { enriched: 0, skipped: 'no-key' };
   }
+  // Reset auth circuit breaker at the start of each tick — if the key was
+  // fixed since last run, we want to try again instead of staying blocked.
+  resetSolscanAuthBlock();
 
   // Candidates to refresh: known tracked wallets + early-buyer wallets
   // from our promoted tokens that haven't been enriched yet.
@@ -279,6 +301,12 @@ export async function enrichStaleWallets(dbInstance, batchSize = MAX_PER_RUN) {
   let ok = 0, fail = 0;
   for (const { address } of wallets) {
     if (!address) continue;
+    if (isSolscanAuthBlocked()) {
+      // Breaker tripped — bail out of the whole batch rather than burning
+      // 250ms × N wallets failing one at a time.
+      console.warn(`[solscan-enricher] auth circuit-breaker tripped — aborting remaining ${wallets.length - (ok + fail)} wallets this tick`);
+      break;
+    }
     try {
       const stats = await enrichWallet(address, dbInstance);
       if (stats) ok++; else fail++;
@@ -287,14 +315,24 @@ export async function enrichStaleWallets(dbInstance, batchSize = MAX_PER_RUN) {
     }
     await sleep(RATE_DELAY_MS);
   }
-  console.log(`[solscan-enricher] done — enriched ${ok}, failed ${fail}`);
-  return { enriched: ok, failed: fail, total: wallets.length };
+  console.log(`[solscan-enricher] done — enriched ${ok}, failed ${fail}${isSolscanAuthBlocked() ? ' (aborted on auth fail)' : ''}`);
+  return { enriched: ok, failed: fail, total: wallets.length, authBlocked: isSolscanAuthBlocked() };
 }
 
 /**
  * Start the background interval. Call once from server.js startup.
  */
 export function startSolscanEnrichmentLoop(dbInstance, intervalMs = 6 * 60 * 60_000) {
+  // Operator kill-switch: set SOLSCAN_DISABLED=1 in Railway env when the
+  // Solscan free-tier 401s ("Unauthorized: Please upgrade your api key level")
+  // are spammy and you don't want to pay for Pro. Stops the loop entirely.
+  // Self-trained W/L tracking (our_win_count / our_loss_count) keeps working
+  // without Solscan — see creditWalletsForWin / creditWalletsForLoss in db.js.
+  const disabled = String(process.env.SOLSCAN_DISABLED || '').toLowerCase();
+  if (disabled === '1' || disabled === 'true') {
+    console.log('[solscan-enricher] SOLSCAN_DISABLED=1 — enricher loop disabled');
+    return null;
+  }
   if (!SOLSCAN_API_KEY) {
     console.warn('[solscan-enricher] not starting — SOLSCAN_API_KEY not set');
     return null;
