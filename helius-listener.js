@@ -523,7 +523,11 @@ function parseBondingCurveData(buffer) {
 
 // ─── Pump.fun API Helpers ─────────────────────────────────────────────────────
 
-const PUMPFUN_API = 'https://frontend-api.pump.fun';
+// Pump.fun migrated their public API to v3 sometime in 2026 — the old
+// frontend-api.pump.fun host now returns Cloudflare error 1016 (DNS-unresolved).
+// All pump.fun integrations in this codebase route through this constant so
+// the next move is a one-line change here.
+const PUMPFUN_API = 'https://frontend-api-v3.pump.fun';
 
 export async function fetchPumpFunCoin(mint) {
   try {

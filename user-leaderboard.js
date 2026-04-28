@@ -525,7 +525,9 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   let imageUrl = pair.info?.imageUrl || heliusMeta?.content?.links?.image || null;
   let pfData = null;
   try {
-    const pf = await fetch(`https://frontend-api.pump.fun/coins/${ca}`, {
+    // Pump.fun migrated to v3 host — old frontend-api.pump.fun returns
+    // Cloudflare 1016. helius-listener.js has the matching constant.
+    const pf = await fetch(`https://frontend-api-v3.pump.fun/coins/${ca}`, {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(5_000),
     });

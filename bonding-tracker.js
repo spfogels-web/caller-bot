@@ -31,7 +31,9 @@ let _stats = {
 
 async function fetchPumpFunCoin(mint) {
   try {
-    const res = await fetch(`https://frontend-api.pump.fun/coins/${mint}`, {
+    // Pump.fun migrated to v3 host — the old frontend-api.pump.fun returns
+    // Cloudflare 1016 now. helius-listener.js has the matching constant.
+    const res = await fetch(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
