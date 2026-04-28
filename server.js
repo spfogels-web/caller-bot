@@ -7685,6 +7685,77 @@ Respond ONLY with valid JSON:
 app.post('/api/control-station/auto-optimize', express.json(), _autoOptimizeHandler);
 app.get('/api/control-station/auto-optimize', _autoOptimizeHandler);
 
+// One-shot revert of the auto-tuner's first run (the 10 changes from
+// 4/27 that loosened minScoreToPost / dev pct / top10 etc). Operator
+// requested a clean baseline before letting Claude tune again. Each
+// revert is logged to config_changes so the audit panel reflects it.
+const _revertLastAiTuningHandler = async (req, res) => {
+  setCors(res);
+  // Pre-tuner values per Claude's "current" field in the 4/27 audit JSON
+  const reverts = [
+    { system: 'scoring',    section: null,         param: 'minScoreToPost',         value: 45  },
+    { system: 'tuning',     section: 'discovery',  param: 'buyPressure',            value: 20  },
+    { system: 'tuning',     section: 'discovery',  param: 'volumeVelocity',         value: 35  },
+    { system: 'tuning',     section: 'discovery',  param: 'walletQuality',          value: 25  },
+    { system: 'tuning',     section: 'discovery',  param: 'holderDistribution',     value: 20  },
+    { system: 'tuning',     section: 'thresholds', param: 'eliteThreshold',         value: 52  },
+    { system: 'overrides',  section: null,         param: 'devWalletPctBlock',      value: 'block_above_3.2pct' },
+    { system: 'overrides',  section: null,         param: 'top10ConcentrationBlock',value: 'block_above_24pct'  },
+    { system: 'overrides',  section: null,         param: 'v5_explosiveMin1h',      value: 200 },
+  ];
+
+  const applied = [];
+  const skipped = [];
+  for (const r of reverts) {
+    try {
+      let oldVal = null;
+      if (r.system === 'scoring' && r.param in SCORING_CONFIG) {
+        oldVal = SCORING_CONFIG[r.param];
+        SCORING_CONFIG[r.param] = r.value;
+      } else if (r.system === 'tuning' && TUNING_CONFIG[r.section]) {
+        oldVal = TUNING_CONFIG[r.section][r.param];
+        TUNING_CONFIG[r.section][r.param] = r.value;
+      } else if (r.system === 'overrides') {
+        oldVal = AI_CONFIG_OVERRIDES[r.param];
+        AI_CONFIG_OVERRIDES[r.param] = r.value;
+      } else {
+        skipped.push({ ...r, reason: 'param not found in target system' });
+        continue;
+      }
+      if (JSON.stringify(oldVal) === JSON.stringify(r.value)) {
+        skipped.push({ ...r, reason: 'already at target value' });
+        continue;
+      }
+      logConfigChange(
+        r.system.toUpperCase(),
+        r.param,
+        oldVal,
+        r.value,
+        'operator',
+        `Manual revert of 4/27 auto-tuner loosening — operator requested clean baseline before next AI tuning cycle. Was ${JSON.stringify(oldVal)}, restored to pre-tuner ${JSON.stringify(r.value)}.`
+      );
+      applied.push({ ...r, old_value: oldVal });
+    } catch (err) {
+      skipped.push({ ...r, reason: err.message });
+    }
+  }
+
+  // Persist all three config stores
+  try { persistScoringConfig(); } catch {}
+  try { saveTuningConfig();    } catch {}
+  try { persistAIConfig();     } catch {}
+
+  res.json({
+    ok: true,
+    applied,
+    skipped,
+    count: applied.length,
+    message: `Reverted ${applied.length} knobs to pre-tuner values. Bot is now on a clean baseline. Next auto-tune cycle fires 24h from now (or hit /api/control-station/auto-optimize manually after a few days of fresh data).`,
+  });
+};
+app.post('/api/control-station/revert-last-ai-tuning', _revertLastAiTuningHandler);
+app.get('/api/control-station/revert-last-ai-tuning',  _revertLastAiTuningHandler);
+
 // ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
 app.get('/api/agent/memory', (req, res) => {
   setCors(res);
