@@ -1384,6 +1384,18 @@ const SCORING_CONFIG_DEFAULTS = {
   scoreTrumpYoungThreshold:   60,    // young (<2h) score floor
   scoreTrumpYoungMaxAgeHours:  2,    // "young" = age <= 2h
   scoreTrumpMaxMcap:       80000,    // gem-range cap
+
+  // ── CLUSTER / SMART-MONEY GUARDRAILS ───────────────────────────────────
+  // The webhook fires "cluster" events when ≥3 tracked wallets co-buy a coin
+  // in 10 min. With 10K+ wallets registered, that signal is too noisy to act
+  // on alone — a score-25 coin that 3 random WINNER wallets touched is not
+  // alpha. These two knobs gate cluster-driven posts:
+  //   - clusterMinScoreToPost: cluster signal alone won't override a low
+  //     score (35 is the relaxed bar — vs 45 NEUTRAL baseline)
+  //   - absoluteMinScoreToPost: hard floor below which NOTHING posts, even
+  //     under regime/cluster discount. Failsafe.
+  clusterMinScoreToPost:      35,
+  absoluteMinScoreToPost:     30,
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -1514,7 +1526,7 @@ const SCANNER_CONFIG_DEFAULTS = {
   quickScoreAutoPromote: 35,
   quickScoreWatchlist:   22,
   quickScoreDrop:        15,
-  rescanScheduleMins:    '3,15',   // CREDIT-SAVE: cut from '1,3,7,15' → '3,15' (saves ~1.25M Helius credits/day; meaningful inflection points are at 3min and 15min anyway)
+  rescanScheduleMins:    '1,3,7,15',   // RESTORED to 4-tick cadence (matches 4/27-morning behavior). Webhook savings on smart-money offset the extra rescans on the credit budget.
 };
 const WALLETS_CONFIG_DEFAULTS = {
   topNWatched:        80,
@@ -1558,19 +1570,23 @@ try {
   if (loaded.prelaunch) PRELAUNCH_CONFIG = { ...PRELAUNCH_CONFIG_DEFAULTS, ...loaded.prelaunch };
   if (loaded.outcomes)  OUTCOMES_CONFIG  = { ...OUTCOMES_CONFIG_DEFAULTS,  ...loaded.outcomes };
 
-  // ── One-time force-migration for credit-save tuning ──────────────────────
-  // The kv_store-loaded SCANNER_CONFIG would otherwise pin the old
-  // '1,3,7,15' rescan schedule and leak Helius credits. Run once via flag.
+  // ── Force-migration for rescan-schedule restoration ──────────────────────
+  // Re-applies the current SCANNER_CONFIG_DEFAULTS.rescanScheduleMins when
+  // the migration flag hasn't run on this version. Bump the flag suffix any
+  // time the default changes so previously-cached kv_store values get
+  // overwritten cleanly.
+  //   v1: '1,3,7,15' → '3,15' (credit-save while polling watcher was active)
+  //   v2: '3,15' → '1,3,7,15' (webhook savings restored credit budget)
   try {
-    const flag = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scanner_credit_save_v1'`).get();
+    const flag = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scanner_rescan_migration_v2'`).get();
     if (!flag || flag.value !== 'done') {
       const oldSched = SCANNER_CONFIG.rescanScheduleMins;
       SCANNER_CONFIG.rescanScheduleMins = SCANNER_CONFIG_DEFAULTS.rescanScheduleMins;
       try {
         dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scanner_config', ?)`)
           .run(JSON.stringify(SCANNER_CONFIG));
-        dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scanner_credit_save_v1', 'done')`).run();
-        console.log(`[config] migration: rescanScheduleMins ${oldSched} → ${SCANNER_CONFIG.rescanScheduleMins} (credit-save v1)`);
+        dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES ('scanner_rescan_migration_v2', 'done')`).run();
+        console.log(`[config] migration v2: rescanScheduleMins ${oldSched} → ${SCANNER_CONFIG.rescanScheduleMins} (4-tick restored)`);
       } catch {}
     }
   } catch {}
@@ -4864,13 +4880,22 @@ async function processCandidate(candidate, isRescan = false) {
       // KOL follow-buys are treated as cluster-tier conviction: force AUTO_POST.
       // These are hardcoded public alpha wallets (Cupsey / Unipcs / Ansem etc.)
       // with >60% micro-cap hit rates. Their entry alone is enough signal.
+      // Webhook-detected clusters are NOT treated equivalently — with 10K+
+      // tracked wallets registered, a 3-wallet co-buy in 10 min is statistical
+      // noise rather than alpha. Require a real score for cluster overrides.
       const label = sm.kind === 'kol' ? 'KOL' : `cluster=${sm.clusterSize}`;
+      const score = scoreResult?.score ?? 0;
+      const clusterMinScore = SCORING_CONFIG.clusterMinScoreToPost ?? 35;
       if (v5HardBlock) {
         logEvent('WARN', 'SMART_MONEY_OVERRIDE_BLOCKED', `${enrichedCandidate.token ?? ca.slice(0,6)} ${label} ignored — v5 hard BLOCK (rug=${v5?.scores?.rugRisk})`);
+      } else if (sm.kind === 'cluster' && score < clusterMinScore) {
+        // Cluster alone isn't enough — score must clear a relaxed bar.
+        logEvent('INFO', 'CLUSTER_BLOCKED_BY_SCORE', `${enrichedCandidate.token ?? ca.slice(0,6)} cluster=${sm.clusterSize} score=${score} < ${clusterMinScore} → keeping ${finalDecision}`);
+        console.log(`[smart-money] 🛑 cluster blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score=${score} below ${clusterMinScore} threshold (${sm.clusterSize} wallets but no quality signal)`);
       } else {
         if (finalDecision !== 'AUTO_POST') {
-          logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
-          console.log(`[smart-money] ${sm.kind === 'kol' ? '⭐' : '🐋🐋🐋'} ${sm.kind.toUpperCase()} OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label})`);
+          logEvent('INFO', 'SMART_MONEY_OVERRIDE', `${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label} · score=${score})`);
+          console.log(`[smart-money] ${sm.kind === 'kol' ? '⭐' : '🐋🐋🐋'} ${sm.kind.toUpperCase()} OVERRIDE — $${enrichedCandidate.token ?? ca.slice(0,6)} ${finalDecision} → AUTO_POST (${label} · score=${score})`);
         }
         finalDecision = 'AUTO_POST';
       }
@@ -4886,11 +4911,15 @@ async function processCandidate(candidate, isRescan = false) {
     // The baseline minScoreToPost (from SCORING_CONFIG) is tuned for NEUTRAL
     // markets. In DEAD regimes where memecoins bleed and false signals spike,
     // require a higher score. In HOT regimes where everything pumps, loosen.
-    // KOL and cluster alerts bypass — their conviction is independent of regime.
+    // KOL alerts bypass entirely (curated trusted wallets — high signal).
+    // Webhook-detected clusters get a relaxed floor (regimeFloor − 10, but
+    // never below an absolute hard floor) instead of a free pass — fixes the
+    // bug where score=15-25 garbage was leaking through every cluster swarm.
     {
       const smKindFloor = enrichedCandidate._smartMoney?.kind;
-      const bypassFloor = smKindFloor === 'cluster' || smKindFloor === 'kol';
-      if (!bypassFloor && finalDecision === 'AUTO_POST') {
+      const isKolSignal     = smKindFloor === 'kol';
+      const isClusterSignal = smKindFloor === 'cluster';
+      if (finalDecision === 'AUTO_POST' && !isKolSignal) {
         const baseFloor = SCORING_CONFIG.minScoreToPost ?? 50;
         const marketRegime = getRegime()?.market || 'NEUTRAL';
         const regimeAdj =
@@ -4898,10 +4927,15 @@ async function processCandidate(candidate, isRescan = false) {
           marketRegime === 'COLD'    ? +5  :
           marketRegime === 'HOT'     ? -5  :
           0;  // NEUTRAL
-        const effectiveFloor = baseFloor + regimeAdj;
+        const regimeFloor    = baseFloor + regimeAdj;
+        const absoluteMin    = SCORING_CONFIG.absoluteMinScoreToPost ?? 30;
+        const effectiveFloor = isClusterSignal
+          ? Math.max(absoluteMin, regimeFloor - 10)   // cluster gets 10pt discount, never below absolute
+          : regimeFloor;
         if ((scoreResult.score ?? 0) < effectiveFloor) {
-          logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${effectiveFloor} (base ${baseFloor} ${regimeAdj >= 0 ? '+' : ''}${regimeAdj} ${marketRegime}) → WATCHLIST`);
-          console.log(`[auto-caller] 📊 Regime floor — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} in ${marketRegime} → WATCHLIST`);
+          const tier = isClusterSignal ? `cluster-relaxed ${effectiveFloor}` : `${effectiveFloor} (${marketRegime})`;
+          logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${tier} → WATCHLIST`);
+          console.log(`[auto-caller] 📊 Floor blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} (${isClusterSignal ? 'cluster' : marketRegime}) → WATCHLIST`);
           finalDecision = 'WATCHLIST';
         }
       }

@@ -33,7 +33,11 @@ export function setSwarmHook(fn)         { _onSwarmDetected = typeof fn === 'fun
 export function setEventHook(fn)         { _onWalletEvent   = typeof fn === 'function' ? fn : null; }
 export function setIsWalletTrackedFn(fn) { _isWalletTracked = typeof fn === 'function' ? fn : null; }
 
-const SWARM_MIN_WALLETS = 3;        // ≥3 distinct wallets co-buying = swarm
+// Raised from 3 → 5 after the 10K-wallet webhook list went live. With that
+// many addresses registered, 3-wallet co-buys are statistical noise rather
+// than alpha — was producing score-15 to score-25 calls that posted via
+// the cluster bypass. 5 buyers in 10 min is a real conviction signal.
+const SWARM_MIN_WALLETS = 5;
 const SWARM_WINDOW_SEC  = 600;      // within 10 minutes
 const SWARM_MIN_SOL     = 0.5;      // each buy ≥ 0.5 SOL (filter dust)
 // Cooldown so a single hot coin doesn't fire 50 swarm signals back-to-back
