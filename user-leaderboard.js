@@ -632,6 +632,7 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   lines.push(`┗ DEX Paid: ${pair.boosts?.active > 0 ? '🟢' : '⚪'}`);
 
   // Links
+  let twitterHandle = null;
   if (websites.length || socials.length) {
     lines.push('');
     lines.push(`🔗 <b>Links</b>`);
@@ -642,9 +643,40 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
         const t = (s.type || '').toLowerCase();
         const ic = t.includes('twitter') || t === 'x' ? '🐦' : t.includes('telegram') ? '💬' : '🔗';
         linkRow.push(`${ic} <a href="${s.url}">${safe(s.type || 'Link')}</a>`);
+        // Capture the X/Twitter handle for profile lookup below
+        if ((t.includes('twitter') || t === 'x') && !twitterHandle) {
+          const m = s.url.match(/(?:twitter\.com|x\.com)\/(@?[A-Za-z0-9_]{1,32})/i);
+          if (m) twitterHandle = m[1].replace(/^@/, '');
+        }
       }
     }
     if (linkRow.length) lines.push(`┗ ${linkRow.join(' | ')}`);
+  }
+
+  // ── X / Twitter profile intel (only fires when X_BEARER_TOKEN is set
+  //    AND we extracted a handle from the coin's socials). Cached 30min
+  //    per handle in x-api.js so repeated card builds don't re-bill.
+  if (twitterHandle && process.env.X_BEARER_TOKEN) {
+    try {
+      const { getUserByUsername, fmtAccountAge } = await import('./x-api.js');
+      const xp = await getUserByUsername(twitterHandle);
+      if (xp) {
+        const followersFmt = (() => {
+          const n = xp.followers || 0;
+          if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+          if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
+          return String(n);
+        })();
+        const verifiedTag = xp.verified
+          ? (xp.verifiedType === 'business' ? ' 💼' : xp.verifiedType === 'government' ? ' 🏛' : ' ☑️')
+          : '';
+        lines.push('');
+        lines.push(`🐦 <b>Twitter</b>`);
+        lines.push(`┣ <a href="https://x.com/${safe(xp.username)}">@${safe(xp.username)}</a>${verifiedTag}`);
+        lines.push(`┣ Followers: <b>${followersFmt}</b> · Age: <b>${fmtAccountAge(xp.createdAt)}</b>`);
+        lines.push(`┗ Tweets: ${xp.tweetCount.toLocaleString()}`);
+      }
+    } catch { /* X API down or budget hit — skip silently */ }
   }
 
   // Charts row — clickable links to popular Solana chart/trade UIs

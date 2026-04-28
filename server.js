@@ -12616,6 +12616,17 @@ app.get('/api/v8/learning-stats', (req, res) => {
   res.json({ ok: true, ...getLearningStats(dbInstance) });
 });
 
+// X (Twitter) API health — burn rate, cache hits, budget remaining
+app.get('/api/x/health', async (req, res) => {
+  setCors(res);
+  try {
+    const { getXApiStats } = await import('./x-api.js');
+    res.json({ ok: true, ...getXApiStats() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Bond rate stat — what % of our pre-bond calls actually graduated to Raydium
 app.get('/api/calls/bond-stats', async (req, res) => {
   setCors(res);
