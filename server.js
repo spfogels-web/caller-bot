@@ -14482,14 +14482,14 @@ app.listen(PORT, async () => {
   // fires. We feed the CA into the existing scanner pipeline as if our
   // scanner had discovered it, plus send a heads-up to the admin.
   //
-  // FEATURE FLAG: temporarily disabled per operator request. Wallet events
-  // still flow into wallet_events DB for win-rate / burner analysis — only
-  // the auto-discovery / admin DM is paused. Flip SWARM_SIGNAL_ENABLED
-  // back to true to re-enable.
-  const SWARM_SIGNAL_ENABLED = false;
+  // TOGGLE: controlled by Railway env var SWARM_SIGNAL_ENABLED.
+  //   not set / "false" / "0"  → DISABLED (default — only logs to console)
+  //   "true" / "1"             → ENABLED  (admin DMs + auto-trigger fire)
+  // Wallet events always flow into wallet_events DB regardless.
   setSwarmHook(async (ca, buyers) => {
-    if (!SWARM_SIGNAL_ENABLED) {
-      console.log(`[swarm-hook] DISABLED — would have fired on ${ca.slice(0,8)} (${buyers.length} wallets) — feature flag off`);
+    const swarmOn = String(process.env.SWARM_SIGNAL_ENABLED || '').toLowerCase();
+    if (swarmOn !== 'true' && swarmOn !== '1') {
+      console.log(`[swarm-hook] DISABLED — would have fired on ${ca.slice(0,8)} (${buyers.length} wallets) — set SWARM_SIGNAL_ENABLED=true in Railway to enable`);
       return;
     }
     if (!_botActive) return;
