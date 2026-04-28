@@ -14481,7 +14481,17 @@ app.listen(PORT, async () => {
   // SWARM HOOK — when ≥3 tracked wallets buy the same CA in 10 min, this
   // fires. We feed the CA into the existing scanner pipeline as if our
   // scanner had discovered it, plus send a heads-up to the admin.
+  //
+  // FEATURE FLAG: temporarily disabled per operator request. Wallet events
+  // still flow into wallet_events DB for win-rate / burner analysis — only
+  // the auto-discovery / admin DM is paused. Flip SWARM_SIGNAL_ENABLED
+  // back to true to re-enable.
+  const SWARM_SIGNAL_ENABLED = false;
   setSwarmHook(async (ca, buyers) => {
+    if (!SWARM_SIGNAL_ENABLED) {
+      console.log(`[swarm-hook] DISABLED — would have fired on ${ca.slice(0,8)} (${buyers.length} wallets) — feature flag off`);
+      return;
+    }
     if (!_botActive) return;
     try {
       const total_sol = buyers.reduce((a,b) => a + (Number(b.total_sol_in) || 0), 0);
