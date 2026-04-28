@@ -3441,14 +3441,40 @@ body::before {
           <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls50AvgPeak">—</div></div>
         </div>
 
-        <!-- Bonding-curve stats: how many of our pre-bond calls actually graduated -->
-        <div class="g5" style="margin-bottom:14px;grid-template-columns:repeat(6,1fr)">
-          <div class="tile" style="border-color:rgba(255,109,0,0.3);background:rgba(255,109,0,0.04)"><div class="tile-label" style="color:#ff6d00">🎯 BONDING (lifetime)</div><div class="tile-val" style="color:#ff6d00;font-size:11px" id="bondTitle">pre-bond → graduated</div></div>
-          <div class="tile"><div class="tile-label">PRE-BOND CALLS</div><div class="tile-val" id="bondPreBond">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--cyan)">7D BOND RATE</div><div class="tile-val" style="color:var(--cyan)" id="bondRate7d">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--purple)">POST-MIGRATION</div><div class="tile-val" style="color:var(--purple)" id="bondAlreadyMig">—</div></div>
+        <!-- ═══ BONDING-CURVE STATS — pump.fun lifecycle tracking ═══ -->
+        <!-- Two rows: LIFETIME (all calls) + LAST 7D + a coverage footer.
+             "Pre-bond" = called while coin was still on the bonding curve.
+             "Bonded" = those calls that subsequently graduated to Raydium.
+             "Post-mig" = called AFTER the coin had already graduated.
+             Older calls (pre-tracking) show as "—" in counts; coverage footer
+             shows what fraction of all calls actually have bonding data. -->
+        <div style="margin-bottom:6px;display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:9px;color:#ff6d00;font-weight:700;letter-spacing:0.05em">
+          <span>🎯 BONDING-CURVE LIFECYCLE</span>
+          <span style="color:var(--text3);font-weight:400;text-transform:none">·</span>
+          <span style="color:var(--text3);font-weight:400">how many pre-bond calls graduated · post-mig avg peak</span>
+        </div>
+        <!-- Row 1 — LIFETIME -->
+        <div class="g5" style="margin-bottom:6px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(255,109,0,0.3);background:rgba(255,109,0,0.04)"><div class="tile-label" style="color:#ff6d00">📡 SCOPE</div><div class="tile-val" style="color:#ff6d00;font-size:11px">LIFETIME</div></div>
+          <div class="tile" title="Calls we made while the coin was still on the pump.fun bonding curve (pre-graduation)"><div class="tile-label">PRE-BOND CALLS</div><div class="tile-val" id="bondPreBond">—</div></div>
+          <div class="tile" title="Of pre-bond calls, how many subsequently graduated to Raydium"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated">—</div></div>
+          <div class="tile" title="bonded ÷ pre-bond calls. Pump.fun's overall graduation rate is ~1% — anything above that is alpha."><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate">—</div></div>
+          <div class="tile" title="Average peak multiple of calls that graduated. Higher = we're catching the runners early."><div class="tile-label" style="color:var(--cyan)">AVG PEAK (BONDED)</div><div class="tile-val" style="color:var(--cyan)" id="bondAvgPeak">—</div></div>
+          <div class="tile" title="Calls we made AFTER the coin had already migrated to Raydium"><div class="tile-label" style="color:var(--purple)">POST-MIG CALLS</div><div class="tile-val" style="color:var(--purple)" id="bondAlreadyMig">—</div></div>
+        </div>
+        <!-- Row 2 — LAST 7D + post-mig peak -->
+        <div class="g5" style="margin-bottom:6px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(24,255,255,0.3);background:rgba(24,255,255,0.03)"><div class="tile-label" style="color:var(--cyan)">📡 SCOPE</div><div class="tile-val" style="color:var(--cyan);font-size:11px">LAST 7 DAYS</div></div>
+          <div class="tile"><div class="tile-label">PRE-BOND CALLS</div><div class="tile-val" id="bondPreBond7d">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated7d">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate7d">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">AVG PEAK (BONDED)</div><div class="tile-val" style="color:var(--cyan)" id="bondAvgPeak7d">—</div></div>
+          <div class="tile" title="Average peak multiple of post-migration calls. Compare vs pre-bond avg peak to see which entry point pays better."><div class="tile-label" style="color:var(--purple)">AVG PEAK (POST-MIG)</div><div class="tile-val" style="color:var(--purple)" id="bondAvgPeakPostMig">—</div></div>
+        </div>
+        <!-- Coverage footer: tells the operator how much of total calls have bonding data tracked -->
+        <div style="margin-bottom:14px;padding:6px 10px;border:1px solid rgba(255,109,0,0.15);border-radius:5px;background:rgba(255,109,0,0.02);font-family:var(--mono);font-size:9px;color:var(--text3);display:flex;justify-content:space-between;align-items:center">
+          <span>📊 Bonding stage tracked on <span id="bondCoverage" style="color:var(--text2)">—</span> of <span id="bondTotal" style="color:var(--text2)">—</span> total calls (<span id="bondCoveragePct" style="color:var(--cyan)">—</span>) · earlier calls were posted before this column was added so they show as untagged.</span>
+          <span style="color:var(--text3)">⏱ updates every 15 min</span>
         </div>
 
         <!-- ═══ 🔥 PROMOTED (scanner's top picks — awaiting full decision) ═══ -->
@@ -13702,16 +13728,32 @@ async function loadCallsTab(){
   renderWindow(sortedByTime.slice(0, 20), 'calls20');
   renderWindow(sortedByTime.slice(0, 50), 'calls50');
 
-  // Bond-rate row (pump.fun graduation tracking)
+  // Bonding-curve lifecycle stats (pump.fun graduation tracking).
+  // Two rows: lifetime + 7d. Renders avg peak multiples for bonded + post-mig
+  // calls so we can see which entry point pays better. Coverage footer
+  // explains why some old calls show as untagged.
   fetch('/api/calls/bond-stats').then(r => r.json()).then(d => {
     if (!d?.ok) return;
     const lt = d.stats?.lifetime || {};
     const w7 = d.stats?.last7d || {};
-    setText('bondPreBond',     (lt.preBondCalls || 0).toLocaleString());
-    setText('bondGraduated',   (lt.bonded || 0).toLocaleString());
-    setText('bondRate',        lt.bondRate != null ? lt.bondRate + '%' : '—');
-    setText('bondRate7d',      w7.bondRate != null ? w7.bondRate + '%' : '—');
-    setText('bondAlreadyMig',  (lt.alreadyMigrated || 0).toLocaleString());
+    const fmtMult = (v) => v != null ? v.toFixed(1) + 'x' : '—';
+    const fmtRate = (v) => v != null ? v + '%' : '—';
+    // Lifetime row
+    setText('bondPreBond',          (lt.preBondCalls || 0).toLocaleString());
+    setText('bondGraduated',        (lt.bonded || 0).toLocaleString());
+    setText('bondRate',             fmtRate(lt.bondRate));
+    setText('bondAvgPeak',          fmtMult(lt.avgPeakBonded));
+    setText('bondAlreadyMig',       (lt.postMigCalls || 0).toLocaleString());
+    // 7-day row
+    setText('bondPreBond7d',        (w7.preBondCalls || 0).toLocaleString());
+    setText('bondGraduated7d',      (w7.bonded || 0).toLocaleString());
+    setText('bondRate7d',           fmtRate(w7.bondRate));
+    setText('bondAvgPeak7d',        fmtMult(w7.avgPeakBonded));
+    setText('bondAvgPeakPostMig',   fmtMult(lt.avgPeakPostMig));
+    // Coverage footer
+    setText('bondCoverage',         (lt.taggedCalls || 0).toLocaleString());
+    setText('bondTotal',            (lt.totalCalls || 0).toLocaleString());
+    setText('bondCoveragePct',      lt.coverage != null ? lt.coverage + '%' : '—');
   }).catch(() => {});
 
   renderCallsFeed();

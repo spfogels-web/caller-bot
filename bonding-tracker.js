@@ -106,46 +106,74 @@ export function stopBondingTracker() {
 
 export function getBondingTrackerStats() { return { ..._stats }; }
 
-// Aggregate stats for the dashboard. Counts pre-bond calls + how many
-// graduated. Returns { preBondCalls, bonded, bondRate, lifetime }.
+// Aggregate stats for the dashboard. Each metric is computed in a single
+// SQL pass so subset relationships (bonded ≤ preBondCalls) are guaranteed —
+// previous version derived counts from separate queries that could drift.
+//
+// Returned shape:
+//   {
+//     lifetime: {
+//       preBondCalls, bonded, bondRate,             // pre-bond → graduated funnel
+//       avgPeakBonded,                              // avg peak multiple of bonded calls
+//       postMigCalls, avgPeakPostMig,               // calls made AFTER graduation
+//       taggedCalls, totalCalls, coverage,          // how many calls have stage data
+//     },
+//     last7d: { preBondCalls, bonded, bondRate, avgPeakBonded, postMigCalls, avgPeakPostMig },
+//   }
 export function getBondRateStats(dbInstance) {
   try {
-    const lifetime = dbInstance.prepare(`
+    const aggSql = (whereClause) => `
       SELECT
         SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' THEN 1 ELSE 0 END) AS pre_bond,
         SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' AND bonded_at IS NOT NULL THEN 1 ELSE 0 END) AS bonded,
         SUM(CASE WHEN pump_fun_stage_at_call = 'MIGRATED' THEN 1 ELSE 0 END) AS already_migrated,
-        COUNT(*) AS total_calls
+        AVG(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' AND bonded_at IS NOT NULL AND peak_multiple IS NOT NULL THEN peak_multiple END) AS avg_peak_bonded,
+        AVG(CASE WHEN pump_fun_stage_at_call = 'MIGRATED' AND peak_multiple IS NOT NULL THEN peak_multiple END)                              AS avg_peak_postmig,
+        SUM(CASE WHEN pump_fun_stage_at_call IS NOT NULL THEN 1 ELSE 0 END) AS tagged,
+        COUNT(*) AS total
       FROM calls
-    `).get();
-    const last7d = dbInstance.prepare(`
-      SELECT
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' THEN 1 ELSE 0 END) AS pre_bond,
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' AND bonded_at IS NOT NULL THEN 1 ELSE 0 END) AS bonded
-      FROM calls
-      WHERE called_at > datetime('now', '-7 days')
-    `).get();
-    const computeRate = (bonded, preBond) => {
+      ${whereClause}
+    `;
+    const lifetime = dbInstance.prepare(aggSql('')).get();
+    const last7d   = dbInstance.prepare(aggSql(`WHERE called_at > datetime('now', '-7 days')`)).get();
+
+    const rate = (bonded, preBond) => {
       const b = Number(bonded || 0);
       const p = Number(preBond || 0);
       return p > 0 ? Math.round((b / p) * 100) : null;
     };
+    const round1 = (v) => (v != null && Number.isFinite(v)) ? Math.round(v * 10) / 10 : null;
+    const coverage = (tagged, total) => {
+      const t = Number(total || 0);
+      return t > 0 ? Math.round((Number(tagged || 0) / t) * 100) : null;
+    };
+
     return {
       lifetime: {
         preBondCalls:     lifetime?.pre_bond ?? 0,
-        bonded:           lifetime?.bonded   ?? 0,
-        bondRate:         computeRate(lifetime?.bonded, lifetime?.pre_bond),
-        alreadyMigrated:  lifetime?.already_migrated ?? 0,
-        totalCalls:       lifetime?.total_calls ?? 0,
+        bonded:           lifetime?.bonded ?? 0,
+        bondRate:         rate(lifetime?.bonded, lifetime?.pre_bond),
+        avgPeakBonded:    round1(lifetime?.avg_peak_bonded),
+        postMigCalls:     lifetime?.already_migrated ?? 0,
+        avgPeakPostMig:   round1(lifetime?.avg_peak_postmig),
+        taggedCalls:      lifetime?.tagged ?? 0,
+        totalCalls:       lifetime?.total ?? 0,
+        coverage:         coverage(lifetime?.tagged, lifetime?.total),
       },
       last7d: {
-        preBondCalls:  last7d?.pre_bond ?? 0,
-        bonded:        last7d?.bonded   ?? 0,
-        bondRate:      computeRate(last7d?.bonded, last7d?.pre_bond),
+        preBondCalls:    last7d?.pre_bond ?? 0,
+        bonded:          last7d?.bonded ?? 0,
+        bondRate:        rate(last7d?.bonded, last7d?.pre_bond),
+        avgPeakBonded:   round1(last7d?.avg_peak_bonded),
+        postMigCalls:    last7d?.already_migrated ?? 0,
+        avgPeakPostMig:  round1(last7d?.avg_peak_postmig),
       },
     };
   } catch (err) {
     console.warn('[bonding-tracker] stats:', err.message);
-    return { lifetime: { preBondCalls: 0, bonded: 0, bondRate: null }, last7d: {} };
+    return {
+      lifetime: { preBondCalls: 0, bonded: 0, bondRate: null, avgPeakBonded: null, postMigCalls: 0, avgPeakPostMig: null, taggedCalls: 0, totalCalls: 0, coverage: null },
+      last7d:   { preBondCalls: 0, bonded: 0, bondRate: null, avgPeakBonded: null, postMigCalls: 0, avgPeakPostMig: null },
+    };
   }
 }
