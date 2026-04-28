@@ -7756,6 +7756,145 @@ const _revertLastAiTuningHandler = async (req, res) => {
 app.post('/api/control-station/revert-last-ai-tuning', _revertLastAiTuningHandler);
 app.get('/api/control-station/revert-last-ai-tuning',  _revertLastAiTuningHandler);
 
+// Full wipe — undo EVERY change AI/Claude has ever made and delete those
+// audit rows so the panel shows only the original operator history.
+// Algorithm:
+//   1. Walk config_changes ASC. For each knob, track:
+//        - lastOperatorValue: most recent operator-set value (post-AI wins)
+//        - preFirstAiValue:   value just before the FIRST AI touch
+//   2. For every knob the AI has touched, compute target =
+//        lastOperatorValue if operator changed it AFTER any AI change
+//        else preFirstAiValue (pristine pre-AI baseline)
+//   3. Apply target to the appropriate config (SCORING/TUNING/OVERRIDES)
+//   4. DELETE all rows where source IN ('claude','auto_optimize')
+//   5. Log one summary row noting how many were wiped
+const _wipeAiChangesHandler = async (req, res) => {
+  setCors(res);
+  try {
+    const tryParse = (s) => { try { return JSON.parse(s); } catch { return s; } };
+
+    const rows = dbInstance.prepare(
+      `SELECT id, changed_at, category, source, knob_key, old_value, new_value
+       FROM config_changes
+       ORDER BY id ASC`
+    ).all();
+
+    // Per-knob walk
+    const aiTouched = new Map();   // key = `${category}|${knob_key}` → { category, knob, preFirstAiValue, lastOperatorAfterAI, hasAi, lastAiId }
+    let lastSourceByKnob = new Map(); // for tracking operator-after-AI
+    for (const r of rows) {
+      const key = `${r.category}|${r.knob_key}`;
+      const isAi = r.source === 'claude' || r.source === 'auto_optimize';
+      const oldV = r.old_value != null ? tryParse(r.old_value) : null;
+      const newV = r.new_value != null ? tryParse(r.new_value) : null;
+      const entry = aiTouched.get(key) ?? {
+        category:           r.category,
+        knob:               r.knob_key,
+        preFirstAiValue:    null,
+        lastOperatorAfterAI:null,
+        hasOperatorAfter:   false,
+        hasAi:              false,
+      };
+      if (isAi) {
+        if (!entry.hasAi) entry.preFirstAiValue = oldV;
+        entry.hasAi = true;
+      } else if (r.source === 'operator') {
+        if (entry.hasAi) {
+          entry.lastOperatorAfterAI = newV;
+          entry.hasOperatorAfter = true;
+        }
+      }
+      aiTouched.set(key, entry);
+    }
+
+    // Apply reverts
+    const applyConfigValue = (category, knobKey, value) => {
+      const cat = String(category || '').toUpperCase();
+      if (cat === 'SCORING' && (knobKey in SCORING_CONFIG)) {
+        SCORING_CONFIG[knobKey] = value;
+        return 'scoring';
+      }
+      if (cat === 'OVERRIDES') {
+        AI_CONFIG_OVERRIDES[knobKey] = value;
+        return 'overrides';
+      }
+      if (cat === 'TUNING' && TUNING_CONFIG && typeof TUNING_CONFIG === 'object') {
+        for (const section of Object.keys(TUNING_CONFIG)) {
+          if (TUNING_CONFIG[section] && knobKey in TUNING_CONFIG[section]) {
+            TUNING_CONFIG[section][knobKey] = value;
+            return `tuning.${section}`;
+          }
+        }
+      }
+      if (cat === 'AI') {
+        AI_CONFIG_OVERRIDES[knobKey] = value;
+        return 'overrides';
+      }
+      return null;
+    };
+
+    const reverted = [];
+    const skipped  = [];
+    for (const entry of aiTouched.values()) {
+      if (!entry.hasAi) continue;
+      const target = entry.hasOperatorAfter ? entry.lastOperatorAfterAI : entry.preFirstAiValue;
+      const where  = applyConfigValue(entry.category, entry.knob, target);
+      if (where) {
+        reverted.push({
+          category: entry.category,
+          knob:     entry.knob,
+          target,
+          source:   entry.hasOperatorAfter ? 'last_operator_value' : 'pre_first_ai_value',
+          appliedTo: where,
+        });
+      } else {
+        skipped.push({ category: entry.category, knob: entry.knob, reason: 'unknown target system' });
+      }
+    }
+
+    // Persist
+    try { persistScoringConfig(); } catch {}
+    try { saveTuningConfig();    } catch {}
+    try { persistAIConfig();     } catch {}
+
+    // Delete the AI audit rows
+    let deletedRows = 0;
+    try {
+      const info = dbInstance.prepare(
+        `DELETE FROM config_changes WHERE source IN ('claude','auto_optimize')`
+      ).run();
+      deletedRows = info.changes ?? 0;
+    } catch (err) {
+      console.warn('[wipe-ai-changes] delete failed:', err.message);
+    }
+
+    // Single summary audit row
+    try {
+      logConfigChange(
+        'AUDIT',
+        'wipe_ai_changes',
+        `${deletedRows} AI rows`,
+        `${reverted.length} knobs reverted`,
+        'operator',
+        `Operator wiped all AI/Claude tuning history. ${reverted.length} knobs restored to pre-AI state, ${deletedRows} audit rows deleted.`
+      );
+    } catch {}
+
+    res.json({
+      ok: true,
+      reverted,
+      skipped,
+      deletedRows,
+      message: `Removed ${deletedRows} AI audit rows. Reverted ${reverted.length} knobs to pre-AI baseline. Audit panel now shows operator-only history.`,
+    });
+  } catch (err) {
+    console.error('[wipe-ai-changes]', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.post('/api/control-station/wipe-ai-changes', _wipeAiChangesHandler);
+app.get('/api/control-station/wipe-ai-changes',  _wipeAiChangesHandler);
+
 // ── Bot Knowledge / Persistent Memory CRUD ───────────────────────────────────
 app.get('/api/agent/memory', (req, res) => {
   setCors(res);
