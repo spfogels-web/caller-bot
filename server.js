@@ -77,7 +77,7 @@ import {
 import {
   startHeliusListener, stopHeliusListener, getHeliusListener, getHeliusStatus,
   fetchPumpFunCoin, fetchPumpFunNewCoins, checkPumpFunLivestream,
-  getTokenMetadata, getTopHolders,
+  getTokenMetadata, getTopHolders, getPumpFunGraduationMcapUsd,
 } from './helius-listener.js';
 import {
   walletDb, deployerDb, initWalletDb, crossReferenceHolders,
@@ -197,9 +197,11 @@ const CLAUDE_TIMEOUT_MS   = 12_000; // tightened 20→12s
 const OPENAI_TIMEOUT_MS   = 10_000; // tightened 15→10s
 const ENRICHMENT_TIMEOUT  = 6_000;  // tightened 10→6s — fail fast on slow APIs, score with partial data
 
-// Pre-bonding detection: pump.fun tokens before PumpSwap migration
-const PREBOND_MAX_MCAP    = 69_000;   // pump.fun completes at ~$69K
-const PREBOND_MIN_MCAP    = 500;      // ignore sub-$500 (too illiquid)
+// Pre-bonding detection: pump.fun tokens before PumpSwap migration.
+// Threshold is SOL-denominated upstream so floats with SOL price + team
+// adjustments — single source of truth lives in helius-listener.js.
+const PREBOND_MAX_MCAP    = getPumpFunGraduationMcapUsd();   // ~$44K as of 2026-04 (was $69K)
+const PREBOND_MIN_MCAP    = 500;                              // ignore sub-$500 (too illiquid)
 
 // ─── OpenAI Fine-tune ─────────────────────────────────────────────────────────
 
@@ -12907,10 +12909,10 @@ app.get('/api/calls/bond-stats', async (req, res) => {
 // One-shot backfill of pump_fun_stage_at_call + bonding_pct_at_call for
 // historical calls that predate the bonding columns. For each call where the
 // stage is NULL, hit pump.fun /coins/{mint}: if it's a pump.fun coin, infer
-// the at-call stage from mcap_at_call ($69K = graduation), compute bonding %,
-// and (if currently graduated) approximate bonded_at/bonded_mcap from the
-// current pump.fun snapshot. Non-pump.fun coins are left NULL — they were
-// never on the bonding curve. Idempotent: skips rows already populated.
+// the at-call stage from mcap_at_call (using current PumpFun graduation
+// threshold, ~$44K as of 2026-04 — sourced from getPumpFunGraduationMcapUsd
+// so it tracks the env override). Non-pump.fun coins are left NULL — they
+// were never on the bonding curve. Idempotent: skips rows already populated.
 //
 // Runs asynchronously since 200+ pump.fun calls × 200ms = ~40s+. Fire once,
 // then poll /api/calls/bonding-backfill/status to watch progress.
@@ -12941,6 +12943,7 @@ async function _runBondingBackfill() {
       WHERE id = ?
     `);
 
+    const GRAD_MCAP = getPumpFunGraduationMcapUsd();
     for (const call of calls) {
       _bondingBackfillState.processed++;
       try {
@@ -12953,10 +12956,10 @@ async function _runBondingBackfill() {
         const mcapAtCall = Number(call.market_cap_at_call) || null;
         let stageAtCall;
         let pctAtCall;
-        if (mcapAtCall != null && mcapAtCall < 69_000) {
+        if (mcapAtCall != null && mcapAtCall < GRAD_MCAP) {
           stageAtCall = 'PRE_BOND';
-          pctAtCall   = Math.min((mcapAtCall / 69_000) * 100, 100);
-        } else if (mcapAtCall != null && mcapAtCall >= 69_000) {
+          pctAtCall   = Math.min((mcapAtCall / GRAD_MCAP) * 100, 100);
+        } else if (mcapAtCall != null && mcapAtCall >= GRAD_MCAP) {
           stageAtCall = 'MIGRATED';
           pctAtCall   = 100;
         } else {
@@ -12968,12 +12971,13 @@ async function _runBondingBackfill() {
 
         // If pump.fun shows the coin is currently graduated AND we tagged it
         // as PRE_BOND at call-time, the call is "bonded" (graduated post-call).
-        // Use the current snapshot's mcap as a best-effort bonded_mcap (real
-        // graduation mcap is ~$69K but pump.fun doesn't expose the exact moment).
+        // Use the current snapshot's mcap as a best-effort bonded_mcap (the
+        // actual graduation mcap floats with SOL price; GRAD_MCAP is the
+        // average target).
         let bondedAt = null, bondedMcap = null;
         if (stageAtCall === 'PRE_BOND' && pf.bondingCurveComplete) {
           bondedAt   = new Date().toISOString();          // approx — actual ts unknown
-          bondedMcap = pf.marketCap ?? 69_000;
+          bondedMcap = pf.marketCap ?? GRAD_MCAP;
         }
 
         update.run(stageAtCall, pctAtCall, bondedAt, bondedMcap, call.id);

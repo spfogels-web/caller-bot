@@ -49,6 +49,13 @@ const HELIUS_WS_URL = (apiKey) => `wss://mainnet.helius-rpc.com/?api-key=${apiKe
 const HELIUS_RPC    = (apiKey) => `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
 const SOLANA_PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
 
+// Pump.fun bonding-curve graduation threshold (USD MCap). SOL-denominated
+// upstream so this floats — was ~$69K originally, ~$44K as of 2026-04. Set
+// PUMP_FUN_GRADUATION_MCAP_USD in Railway env to override without a deploy.
+export function getPumpFunGraduationMcapUsd() {
+  return Number(process.env.PUMP_FUN_GRADUATION_MCAP_USD) || 44_000;
+}
+
 // Program IDs we care about
 const PUMP_FUN_PROGRAM    = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const PUMP_FUN_MIGRATION  = '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg'; // pumpswap migration
@@ -596,10 +603,11 @@ function normalizePumpCoin(raw) {
   const ageMs     = Date.now() - createdAt.getTime();
   const ageHours  = ageMs / 3_600_000;
 
-  // Bonding curve progress from market cap
-  // Pump.fun completes at ~$69K USD market cap
+  // Bonding curve progress from market cap (uses module-level helper so the
+  // threshold stays consistent across files via the env var).
+  const PUMP_GRAD_MCAP = getPumpFunGraduationMcapUsd();
   const bondingPct = raw.usd_market_cap
-    ? Math.min((raw.usd_market_cap / 69_000) * 100, 100)
+    ? Math.min((raw.usd_market_cap / PUMP_GRAD_MCAP) * 100, 100)
     : null;
 
   return {

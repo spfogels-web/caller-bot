@@ -1024,8 +1024,9 @@ export async function enrichCandidate(candidate) {
 
   // ── Pump.fun graduation check ──────────────────────────────────────────
   // Only poll pump.fun for coins that plausibly came from it (<72h old or
-  // unknown age). If the coin graduated the bonding curve (~$69K MCap) and
-  // migrated to Raydium, that's proven organic demand — ~1% of pump.fun
+  // unknown age). If the coin graduated the bonding curve (~$44K MCap as of
+  // 2026-04, was ~$69K originally) and migrated to Raydium, that's proven
+  // organic demand — ~1% of pump.fun
   // launches make it. Adds pumpFunMigrated / pumpFunStage / pumpFunBondingPct
   // / pumpFunReplyCount / pumpFunKOTH fields for scorer consumption.
   try {

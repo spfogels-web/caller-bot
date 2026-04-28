@@ -15,6 +15,8 @@
  */
 'use strict';
 
+import { getPumpFunGraduationMcapUsd } from './helius-listener.js';
+
 // Base58 alphabet excludes 0/O/I/l. Solana addresses are 32-44 chars
 // (mostly 43-44). The regex catches embedded CAs in any message text.
 const SOLANA_CA_REGEX = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
@@ -604,7 +606,10 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   if (pfData) {
     const usdMc       = Number(pfData.usd_market_cap ?? 0);
     const isComplete  = pfData.complete === true;
-    const bondingPct  = !isComplete && usdMc > 0 ? Math.min(100, (usdMc / 69_000) * 100) : (isComplete ? 100 : null);
+    // Pump.fun graduation threshold: SOL-denominated upstream so it floats.
+    // Sourced from helius-listener.js's env-overridable helper.
+    const GRAD_MCAP   = getPumpFunGraduationMcapUsd();
+    const bondingPct  = !isComplete && usdMc > 0 ? Math.min(100, (usdMc / GRAD_MCAP) * 100) : (isComplete ? 100 : null);
     const replyCount  = pfData.reply_count ?? 0;
     const isKOTH      = !!pfData.king_of_the_hill_timestamp;
     lines.push('');
@@ -619,7 +624,7 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
       })();
       lines.push(`┣ Status: 🟠 <b>PRE-BOND</b> (${bondingPct.toFixed(1)}%)`);
       lines.push(`┣ ${bar}`);
-      lines.push(`┣ Goal: $${(usdMc / 1000).toFixed(1)}K / $69K`);
+      lines.push(`┣ Goal: $${(usdMc / 1000).toFixed(1)}K / $${(GRAD_MCAP / 1000).toFixed(0)}K`);
       lines.push(`┗ Replies: ${replyCount}${isKOTH ? ' · 👑 KOTH' : ''}`);
     }
   }
