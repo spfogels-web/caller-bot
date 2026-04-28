@@ -15305,11 +15305,12 @@ app.listen(PORT, async () => {
     if (!TELEGRAM_BOT_TOKEN) return;
     const sends = [];
 
-    // Always fire milestone to VIP group — routes to Trench Calls topic
-    // when configured (matches the call-card thread).
+    // Milestone alerts (2x / 5x / 10x) intentionally route to General, NOT
+    // Trench Calls — operator wants milestones visible in main chat for
+    // celebration / momentum vibes; the trade signals + exit warnings are
+    // the noisy stuff that gets corralled into the dedicated topic.
     if (TELEGRAM_GROUP_CHAT_ID) {
-      const opts = _trenchThreadId ? { message_thread_id: _trenchThreadId } : {};
-      sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg, opts));
+      sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg));
     }
 
     // Free tier: first 2x unlocks the call (post the original + milestone).

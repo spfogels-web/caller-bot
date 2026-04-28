@@ -3421,14 +3421,14 @@ body::before {
           <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="callsAvgPeak">—</div></div>
         </div>
 
-        <!-- Rolling-window: last 20 calls -->
+        <!-- Rolling-window: last 100 calls -->
         <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
-          <div class="tile" style="border-color:rgba(255,215,64,0.25);background:rgba(255,215,64,0.04)"><div class="tile-label" style="color:var(--gold)">LAST 20 CALLS</div><div class="tile-val" style="color:var(--gold)" id="calls20Total">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls20Wins">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls20Losses">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls20WinDiff">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls20WinRate">—</div></div>
-          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls20AvgPeak">—</div></div>
+          <div class="tile" style="border-color:rgba(156,39,176,0.25);background:rgba(156,39,176,0.04)"><div class="tile-label" style="color:var(--purple)">LAST 100 CALLS</div><div class="tile-val" style="color:var(--purple)" id="calls100Total">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls100Wins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls100Losses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls100WinDiff">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls100WinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls100AvgPeak">—</div></div>
         </div>
 
         <!-- Rolling-window: last 50 calls -->
@@ -3441,6 +3441,26 @@ body::before {
           <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls50AvgPeak">—</div></div>
         </div>
 
+        <!-- Rolling-window: last 25 calls -->
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(255,215,64,0.25);background:rgba(255,215,64,0.04)"><div class="tile-label" style="color:var(--gold)">LAST 25 CALLS</div><div class="tile-val" style="color:var(--gold)" id="calls25Total">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls25Wins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls25Losses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls25WinDiff">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls25WinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls25AvgPeak">—</div></div>
+        </div>
+
+        <!-- Rolling-window: last 10 calls -->
+        <div class="g5" style="margin-bottom:8px;grid-template-columns:repeat(6,1fr)">
+          <div class="tile" style="border-color:rgba(0,230,118,0.25);background:rgba(0,230,118,0.04)"><div class="tile-label" style="color:var(--green)">LAST 10 CALLS</div><div class="tile-val" style="color:var(--green)" id="calls10Total">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--green)">🏆 WINS</div><div class="tile-val" style="color:var(--green)" id="calls10Wins">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--red)">💀 LOSSES</div><div class="tile-val" style="color:var(--red)" id="calls10Losses">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--text2)">WIN DIFF</div><div class="tile-val" id="calls10WinDiff">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--cyan)">WIN RATE</div><div class="tile-val" style="color:var(--cyan)" id="calls10WinRate">—</div></div>
+          <div class="tile"><div class="tile-label" style="color:var(--gold)">AVG PEAK</div><div class="tile-val" style="color:var(--gold)" id="calls10AvgPeak">—</div></div>
+        </div>
+
         <!-- ═══ BONDING-CURVE STATS — pump.fun lifecycle tracking ═══ -->
         <!-- Two rows: LIFETIME (all calls) + LAST 7D + a coverage footer.
              "Pre-bond" = called while coin was still on the bonding curve.
@@ -3451,30 +3471,30 @@ body::before {
         <div style="margin-bottom:6px;display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:9px;color:#ff6d00;font-weight:700;letter-spacing:0.05em">
           <span>🎯 BONDING-CURVE LIFECYCLE</span>
           <span style="color:var(--text3);font-weight:400;text-transform:none">·</span>
-          <span style="color:var(--text3);font-weight:400">how many pre-bond calls graduated · post-mig avg peak</span>
+          <span style="color:var(--text3);font-weight:400">eligible = called ≤ $35K MCap · bonded = peak ≥ $44K (graduation)</span>
         </div>
         <!-- Row 1 — LIFETIME -->
         <div class="g5" style="margin-bottom:6px;grid-template-columns:repeat(6,1fr)">
           <div class="tile" style="border-color:rgba(255,109,0,0.3);background:rgba(255,109,0,0.04)"><div class="tile-label" style="color:#ff6d00">📡 SCOPE</div><div class="tile-val" style="color:#ff6d00;font-size:11px">LIFETIME</div></div>
-          <div class="tile" title="Calls we made while the coin was still on the pump.fun bonding curve (pre-graduation)"><div class="tile-label">PRE-BOND CALLS</div><div class="tile-val" id="bondPreBond">—</div></div>
-          <div class="tile" title="Of pre-bond calls, how many subsequently graduated to Raydium"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated">—</div></div>
-          <div class="tile" title="bonded ÷ pre-bond calls. Pump.fun's overall graduation rate is ~1% — anything above that is alpha."><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate">—</div></div>
-          <div class="tile" title="Average peak multiple of calls that graduated. Higher = we're catching the runners early."><div class="tile-label" style="color:var(--cyan)">AVG PEAK (BONDED)</div><div class="tile-val" style="color:var(--cyan)" id="bondAvgPeak">—</div></div>
-          <div class="tile" title="Calls we made AFTER the coin had already migrated to Raydium"><div class="tile-label" style="color:var(--purple)">POST-MIG CALLS</div><div class="tile-val" style="color:var(--purple)" id="bondAlreadyMig">—</div></div>
+          <div class="tile" title="Calls made when MCap ≤ $35K (eligible to bond — real pre-bond catches with room to grow)"><div class="tile-label">ELIGIBLE CALLS</div><div class="tile-val" id="bondPreBond">—</div></div>
+          <div class="tile" title="Of eligible calls, how many reached peak MCap ≥ $44K (graduated the bonding curve)"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated">—</div></div>
+          <div class="tile" title="bonded ÷ eligible. Pump.fun's overall graduation rate is ~1% — our rate measures how good we are at picking pre-bond winners."><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate">—</div></div>
+          <div class="tile" title="Average peak multiple of bonded calls. Higher = we're catching the runners early."><div class="tile-label" style="color:var(--cyan)">AVG PEAK (BONDED)</div><div class="tile-val" style="color:var(--cyan)" id="bondAvgPeak">—</div></div>
+          <div class="tile" title="Calls made when MCap was already > $44K (post-graduation entries — different alpha)"><div class="tile-label" style="color:var(--purple)">POST-BOND CALLS</div><div class="tile-val" style="color:var(--purple)" id="bondAlreadyMig">—</div></div>
         </div>
         <!-- Row 2 — LAST 7D + post-mig peak -->
         <div class="g5" style="margin-bottom:6px;grid-template-columns:repeat(6,1fr)">
           <div class="tile" style="border-color:rgba(24,255,255,0.3);background:rgba(24,255,255,0.03)"><div class="tile-label" style="color:var(--cyan)">📡 SCOPE</div><div class="tile-val" style="color:var(--cyan);font-size:11px">LAST 7 DAYS</div></div>
-          <div class="tile"><div class="tile-label">PRE-BOND CALLS</div><div class="tile-val" id="bondPreBond7d">—</div></div>
+          <div class="tile"><div class="tile-label">ELIGIBLE CALLS</div><div class="tile-val" id="bondPreBond7d">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--green)">🎓 BONDED</div><div class="tile-val" style="color:var(--green)" id="bondGraduated7d">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--gold)">BOND RATE</div><div class="tile-val" style="color:var(--gold)" id="bondRate7d">—</div></div>
           <div class="tile"><div class="tile-label" style="color:var(--cyan)">AVG PEAK (BONDED)</div><div class="tile-val" style="color:var(--cyan)" id="bondAvgPeak7d">—</div></div>
-          <div class="tile" title="Average peak multiple of post-migration calls. Compare vs pre-bond avg peak to see which entry point pays better."><div class="tile-label" style="color:var(--purple)">AVG PEAK (POST-MIG)</div><div class="tile-val" style="color:var(--purple)" id="bondAvgPeakPostMig">—</div></div>
+          <div class="tile" title="Average peak multiple of post-bond calls. Compare vs eligible/bonded avg peak to see which entry pays better."><div class="tile-label" style="color:var(--purple)">AVG PEAK (POST-BOND)</div><div class="tile-val" style="color:var(--purple)" id="bondAvgPeakPostMig">—</div></div>
         </div>
         <!-- Coverage footer: tells the operator how much of total calls have bonding data tracked -->
         <div style="margin-bottom:14px;padding:6px 10px;border:1px solid rgba(255,109,0,0.15);border-radius:5px;background:rgba(255,109,0,0.02);font-family:var(--mono);font-size:9px;color:var(--text3);display:flex;justify-content:space-between;align-items:center">
-          <span>📊 Bonding stage tracked on <span id="bondCoverage" style="color:var(--text2)">—</span> of <span id="bondTotal" style="color:var(--text2)">—</span> total calls (<span id="bondCoveragePct" style="color:var(--cyan)">—</span>) · earlier calls were posted before this column was added so they show as untagged.</span>
-          <span style="color:var(--text3)">⏱ updates every 15 min</span>
+          <span>📊 MCap at call recorded for <span id="bondCoverage" style="color:var(--text2)">—</span> of <span id="bondTotal" style="color:var(--text2)">—</span> total calls (<span id="bondCoveragePct" style="color:var(--cyan)">—</span>) · ELIGIBLE = ≤ $35K at call · BONDED = peak ≥ $44K. MCap-based, works for all coins (pump.fun + Raydium).</span>
+          <span style="color:var(--text3)">⏱ live</span>
         </div>
 
         <!-- ═══ 🔥 PROMOTED (scanner's top picks — awaiting full decision) ═══ -->
@@ -13725,8 +13745,10 @@ async function loadCallsTab(){
     setText(prefix + 'WinRate', wr);
     setText(prefix + 'AvgPeak', ap);
   };
-  renderWindow(sortedByTime.slice(0, 20), 'calls20');
-  renderWindow(sortedByTime.slice(0, 50), 'calls50');
+  renderWindow(sortedByTime.slice(0,  10), 'calls10');
+  renderWindow(sortedByTime.slice(0,  25), 'calls25');
+  renderWindow(sortedByTime.slice(0,  50), 'calls50');
+  renderWindow(sortedByTime.slice(0, 100), 'calls100');
 
   // Bonding-curve lifecycle stats (pump.fun graduation tracking).
   // Two rows: lifetime + 7d. Renders avg peak multiples for bonded + post-mig

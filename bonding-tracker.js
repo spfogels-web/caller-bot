@@ -108,30 +108,34 @@ export function stopBondingTracker() {
 
 export function getBondingTrackerStats() { return { ..._stats }; }
 
-// Aggregate stats for the dashboard. Each metric is computed in a single
-// SQL pass so subset relationships (bonded ≤ preBondCalls) are guaranteed —
-// previous version derived counts from separate queries that could drift.
+// Aggregate stats for the dashboard. MCap-based eligibility (was previously
+// pump_fun_stage based, which only covered pump.fun coins). New definition:
 //
-// Returned shape:
-//   {
-//     lifetime: {
-//       preBondCalls, bonded, bondRate,             // pre-bond → graduated funnel
-//       avgPeakBonded,                              // avg peak multiple of bonded calls
-//       postMigCalls, avgPeakPostMig,               // calls made AFTER graduation
-//       taggedCalls, totalCalls, coverage,          // how many calls have stage data
-//     },
-//     last7d: { preBondCalls, bonded, bondRate, avgPeakBonded, postMigCalls, avgPeakPostMig },
-//   }
+//   ELIGIBLE  = called when MCap ≤ BONDING_ELIGIBLE_MAX_MCAP_USD (default $35K)
+//               — these are "real pre-bond catches" with room to grow before
+//               hitting the ~$44K graduation threshold
+//   BONDED    = of those, peak_mcap ≥ PUMP_FUN_GRADUATION_MCAP_USD (default $44K)
+//               — i.e. the coin reached graduation MCap
+//   POST-BOND = called when MCap ≥ graduation threshold (already past the curve)
+//
+//   bondRate = bonded ÷ eligible
+//
+// Returned shape: same field names as before so the dashboard wiring keeps
+// working. preBondCalls now means "eligible" (MCap-defined). Subset
+// guarantees still hold because everything's a single SQL pass.
 export function getBondRateStats(dbInstance) {
   try {
+    const ELIGIBLE_MAX = Number(process.env.BONDING_ELIGIBLE_MAX_MCAP_USD) || 35_000;
+    const GRAD_MCAP    = Number(process.env.PUMP_FUN_GRADUATION_MCAP_USD)  || 44_000;
+
     const aggSql = (whereClause) => `
       SELECT
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' THEN 1 ELSE 0 END) AS pre_bond,
-        SUM(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' AND bonded_at IS NOT NULL THEN 1 ELSE 0 END) AS bonded,
-        SUM(CASE WHEN pump_fun_stage_at_call = 'MIGRATED' THEN 1 ELSE 0 END) AS already_migrated,
-        AVG(CASE WHEN pump_fun_stage_at_call = 'PRE_BOND' AND bonded_at IS NOT NULL AND peak_multiple IS NOT NULL THEN peak_multiple END) AS avg_peak_bonded,
-        AVG(CASE WHEN pump_fun_stage_at_call = 'MIGRATED' AND peak_multiple IS NOT NULL THEN peak_multiple END)                              AS avg_peak_postmig,
-        SUM(CASE WHEN pump_fun_stage_at_call IS NOT NULL THEN 1 ELSE 0 END) AS tagged,
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call <= ${ELIGIBLE_MAX} THEN 1 ELSE 0 END) AS pre_bond,
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call <= ${ELIGIBLE_MAX} AND COALESCE(peak_mcap, 0) >= ${GRAD_MCAP} THEN 1 ELSE 0 END) AS bonded,
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call >  ${GRAD_MCAP} THEN 1 ELSE 0 END) AS already_migrated,
+        AVG(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call <= ${ELIGIBLE_MAX} AND COALESCE(peak_mcap, 0) >= ${GRAD_MCAP} AND peak_multiple IS NOT NULL THEN peak_multiple END) AS avg_peak_bonded,
+        AVG(CASE WHEN market_cap_at_call IS NOT NULL AND market_cap_at_call >  ${GRAD_MCAP} AND peak_multiple IS NOT NULL THEN peak_multiple END) AS avg_peak_postmig,
+        SUM(CASE WHEN market_cap_at_call IS NOT NULL THEN 1 ELSE 0 END) AS tagged,
         COUNT(*) AS total
       FROM calls
       ${whereClause}
@@ -169,6 +173,10 @@ export function getBondRateStats(dbInstance) {
         avgPeakBonded:   round1(last7d?.avg_peak_bonded),
         postMigCalls:    last7d?.already_migrated ?? 0,
         avgPeakPostMig:  round1(last7d?.avg_peak_postmig),
+      },
+      thresholds: {
+        eligibleMaxMcapUsd: ELIGIBLE_MAX,
+        gradMcapUsd:        GRAD_MCAP,
       },
     };
   } catch (err) {
