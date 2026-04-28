@@ -7637,7 +7637,12 @@ Respond ONLY with valid JSON:
           continue;
         }
 
-        // Audit log with detailed reasoning
+        // Audit log with detailed reasoning — TWO destinations:
+        // 1. tuning_audit table (legacy, used by some internal views)
+        // 2. config_changes table (read by /api/config/audit + the AI Tuning
+        //    Audit panel on the dashboard). MUST go here too or AI changes
+        //    show up nowhere visible. logConfigChange handles the JSON
+        //    encoding + reason synthesis.
         dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?,?,?,?,?)`).run(
           `[${change.system}] ${change.param}`,
           String(oldVal ?? ''),
@@ -7645,6 +7650,17 @@ Respond ONLY with valid JSON:
           `[AUTO-PILOT] ${change.reason} | Expected: ${change.expected_improvement || 'improved accuracy'} | Confidence: ${change.confidence || '?'}%`,
           'AUTO_APPLIED'
         );
+        try {
+          const fullReason = `${change.reason || 'auto-applied'} | Expected: ${change.expected_improvement || '—'} | Confidence: ${change.confidence ?? '?'}% | Risk: ${change.risk ?? 'UNKNOWN'}`;
+          logConfigChange(
+            (change.system || 'AUTO').toUpperCase(),
+            change.param,
+            oldVal,
+            change.new_value,
+            'claude',
+            fullReason
+          );
+        } catch (e) { console.warn('[control-station] config_changes log failed:', e.message); }
         applied.push({ ...change, old_value: oldVal });
         console.log(`[control-station] AUTO-APPLIED: ${change.system}.${change.param} ${oldVal} → ${change.new_value} | ${change.reason?.slice(0,80)}`);
       } catch (e) { console.warn('[control-station] Failed to apply:', change.param, e.message); }
