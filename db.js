@@ -761,6 +761,26 @@ function runMigrations() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_alerts_user    ON user_alerts(user_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_alerts_pending ON user_alerts(fired_at, cancelled) WHERE fired_at IS NULL AND cancelled = 0`,
+    // v15: Helius webhook event log — every buy/sell from tracked wallets
+    // pushed in real-time via /api/helius/webhook. Powers co-buy swarm
+    // detection, win-rate calculation, and burner network discovery.
+    `CREATE TABLE IF NOT EXISTS wallet_events (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      wallet_address  TEXT NOT NULL,
+      event_type      TEXT NOT NULL,            -- 'BUY' | 'SELL' | 'TRANSFER_IN' | 'TRANSFER_OUT'
+      contract_address TEXT,                     -- the token bought/sold (NULL for SOL transfers)
+      token_symbol    TEXT,
+      sol_amount      REAL,                      -- SOL value of the trade
+      token_amount    REAL,                      -- token quantity
+      mcap_at_event   REAL,                      -- token mcap at time of event (best-effort)
+      tx_signature    TEXT UNIQUE,               -- dedupe by Solana tx signature
+      tx_timestamp    INTEGER NOT NULL,          -- unix seconds (block time)
+      received_at     TEXT DEFAULT (datetime('now')),
+      raw             TEXT                       -- compact JSON of original webhook event for debugging
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_we_wallet ON wallet_events(wallet_address, tx_timestamp DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_we_token  ON wallet_events(contract_address, tx_timestamp DESC) WHERE contract_address IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_we_time   ON wallet_events(tx_timestamp DESC)`,
     // Track last exit check on each call so we know when to next poll
     `ALTER TABLE calls ADD COLUMN exit_monitor_last_check_at TEXT`,
     `ALTER TABLE calls ADD COLUMN exit_monitor_last_liquidity REAL`,
@@ -1220,6 +1240,77 @@ export function creditWalletsForWin(contractAddress, peakMultiple, earlyHolders 
     console.log(`[wallet-credit] $${contractAddress.slice(0,8)}... ${peakMultiple.toFixed(2)}x → credited ${credited} holders${promoted ? ' · 🏆 promoted ' + promoted + ' to WINNER' : ''}`);
   }
   return { credited, promoted };
+}
+
+// ─── Wallet Events (Helius webhook ingestion) ──────────────────────────────
+// Records every buy/sell from tracked wallets pushed via Helius webhook.
+// tx_signature is UNIQUE — INSERT OR IGNORE de-dupes Helius retries.
+export function insertWalletEvent(evt) {
+  try {
+    db.prepare(`
+      INSERT OR IGNORE INTO wallet_events
+        (wallet_address, event_type, contract_address, token_symbol,
+         sol_amount, token_amount, mcap_at_event, tx_signature, tx_timestamp, raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      evt.wallet_address,
+      evt.event_type,
+      evt.contract_address || null,
+      evt.token_symbol || null,
+      evt.sol_amount || null,
+      evt.token_amount || null,
+      evt.mcap_at_event || null,
+      evt.tx_signature,
+      evt.tx_timestamp,
+      evt.raw ? JSON.stringify(evt.raw).slice(0, 4000) : null
+    );
+    return true;
+  } catch (err) { console.warn('[wallet-event] insert failed:', err.message); return false; }
+}
+
+// Find tracked wallets that BOUGHT this CA in the last N seconds.
+// Used by the co-buy swarm detector — when ≥3 distinct wallets buy the
+// same CA within 10 minutes, that's a swarm signal worth auto-discovering.
+export function getRecentBuyersForCA(ca, withinSeconds = 600) {
+  try {
+    const cutoff = Math.floor(Date.now() / 1000) - withinSeconds;
+    return db.prepare(`
+      SELECT wallet_address, MAX(tx_timestamp) AS latest_buy_at,
+             SUM(sol_amount) AS total_sol_in
+      FROM wallet_events
+      WHERE contract_address = ? AND event_type = 'BUY' AND tx_timestamp >= ?
+      GROUP BY wallet_address
+      ORDER BY latest_buy_at DESC
+    `).all(ca, cutoff);
+  } catch { return []; }
+}
+
+export function getWalletRecentEvents(walletAddress, limit = 50) {
+  try {
+    return db.prepare(`
+      SELECT * FROM wallet_events WHERE wallet_address = ?
+      ORDER BY tx_timestamp DESC LIMIT ?
+    `).all(walletAddress, limit);
+  } catch { return []; }
+}
+
+export function getWalletEventStats() {
+  try {
+    const totals = db.prepare(`
+      SELECT COUNT(*) AS total_events,
+             COUNT(DISTINCT wallet_address) AS unique_wallets,
+             COUNT(DISTINCT contract_address) AS unique_tokens,
+             SUM(CASE WHEN event_type='BUY' THEN 1 ELSE 0 END) AS buys,
+             SUM(CASE WHEN event_type='SELL' THEN 1 ELSE 0 END) AS sells,
+             MAX(tx_timestamp) AS last_event_ts
+      FROM wallet_events
+    `).get();
+    const last24h = db.prepare(`
+      SELECT COUNT(*) AS n FROM wallet_events
+      WHERE received_at > datetime('now', '-24 hours')
+    `).get().n;
+    return { ...totals, last_24h: last24h };
+  } catch { return {}; }
 }
 
 // ─── User Portfolio (Telegram personal watchlist) ──────────────────────────

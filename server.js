@@ -35,6 +35,7 @@ import {
   addToUserPortfolio, getUserPortfolio, removeFromUserPortfolio, clearUserPortfolio,
   createUserAlert, getUserAlerts, getPendingAlerts, fireAlert as fireUserAlert, cancelUserAlert,
   getCallsLeaderboard,
+  insertWalletEvent, getRecentBuyersForCA, getWalletRecentEvents, getWalletEventStats,
   getCandidates, getCandidateById, getAllCalls,
   getSystemLog, getScoreDistribution, getDecisionBreakdown,
   getTopIgnoredFull, getPendingCalls,
@@ -62,6 +63,10 @@ import {
 } from './regime.js';
 import { runPerformanceTracker, exportFineTuningData }                                 from './performance-tracker.js';
 import { runExitMonitor, setExitTelegramHook, getExitMonitorStats }                  from './exit-signal-monitor.js';
+import {
+  processHeliusWebhookBatch, syncTrackedAddressesToHelius, listHeliusWebhooks,
+  setSwarmHook, setEventHook, setIsWalletTrackedFn,
+} from './helius-webhook.js';
 import {
   getAllBotStatus, botStartCycle, botEndCycle, botPosted, botError,
 } from './bot-status.js';
@@ -13273,6 +13278,91 @@ app.get('/api/exit-monitor/stats', (req, res) => {
   }
 });
 
+// ── HELIUS WEBHOOK RECEIVER ────────────────────────────────────────────
+// Helius POSTs parsed transaction events to this endpoint when any of our
+// tracked wallets buys/sells/transfers. Stores events to wallet_events
+// table and runs co-buy swarm detection (3+ wallets buying same CA in
+// 10 min → fires SWARM signal that auto-triggers our scoring pipeline).
+//
+// Optional auth: if HELIUS_WEBHOOK_SECRET env var is set, expects matching
+// Authorization header — rejects requests without it.
+app.post('/api/helius/webhook', express.json({ limit: '10mb' }), (req, res) => {
+  setCors(res);
+
+  // Optional auth check
+  if (process.env.HELIUS_WEBHOOK_SECRET) {
+    const expected = process.env.HELIUS_WEBHOOK_SECRET;
+    const got = req.headers.authorization || req.headers['x-auth-token'] || '';
+    if (got !== expected && got !== `Bearer ${expected}`) {
+      console.warn('[helius-wh] Auth header mismatch — rejecting');
+      return res.status(401).json({ ok: false, error: 'Auth header missing or wrong' });
+    }
+  }
+
+  // Helius sends an ARRAY of parsed transactions
+  const payload = Array.isArray(req.body) ? req.body : [];
+  try {
+    const result = processHeliusWebhookBatch(payload, {
+      insertWalletEvent,
+      getRecentBuyersForCA,
+    });
+    if (result.swarmsFired > 0) {
+      console.log(`[helius-wh] batch: received=${result.received} stored=${result.stored} skipped=${result.skipped} swarms=${result.swarmsFired}`);
+    }
+    res.json(result);
+  } catch (err) {
+    console.warn('[helius-wh] processing err:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Setup helper: pushes all currently-tracked wallet addresses to a Helius
+// webhook by ID. Call this AFTER you've created the webhook in the Helius
+// dashboard and added HELIUS_WEBHOOK_ID to Railway env. Replaces the
+// webhook's accountAddresses list with our current 4,800+ tracked wallets.
+app.post('/api/helius/webhook/setup', async (req, res) => {
+  setCors(res);
+  const webhookId = process.env.HELIUS_WEBHOOK_ID || (req.body || {}).webhookId;
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!webhookId) return res.status(400).json({ ok: false, error: 'HELIUS_WEBHOOK_ID env var or webhookId in body required' });
+  if (!apiKey)    return res.status(400).json({ ok: false, error: 'HELIUS_API_KEY missing' });
+
+  try {
+    // Pull all tracked wallet addresses from DB
+    const rows = dbInstance.prepare('SELECT address FROM tracked_wallets').all();
+    const addresses = rows.map(r => r.address).filter(Boolean);
+    console.log(`[helius-wh] Setup → pushing ${addresses.length} addresses to webhook ${webhookId.slice(0,8)}...`);
+    const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
+    if (result.ok) {
+      console.log(`[helius-wh] Setup ✓ registered ${result.registered} addresses (${result.skipped} skipped as invalid)`);
+      logEvent('INFO', 'HELIUS_WEBHOOK_SETUP', `Registered ${result.registered} addresses`);
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Stats: see what the webhook has been ingesting
+app.get('/api/helius/webhook/stats', (req, res) => {
+  setCors(res);
+  try {
+    const stats = getWalletEventStats();
+    res.json({ ok: true, ...stats });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// List webhooks registered on the Helius account (for setup verification)
+app.get('/api/helius/webhook/list', async (req, res) => {
+  setCors(res);
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) return res.status(400).json({ ok: false, error: 'HELIUS_API_KEY missing' });
+  try {
+    const result = await listHeliusWebhooks(apiKey);
+    res.json(result);
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // Self-trained wallet leaderboard — shows wallets credited from OUR call
 // outcomes (separate from Dune's labels). Each WIN call credits its early
 // holders; wallets reach WINNER tier at 3 wins @ 2x average multiple.
@@ -14366,6 +14456,65 @@ app.listen(PORT, async () => {
         signal: AbortSignal.timeout(10_000),
       });
     } catch (err) { console.warn('[exit-tg] send failed:', err.message); }
+  });
+
+  // ── HELIUS WEBHOOK WIRING ─────────────────────────────────────────────
+  // Tells the webhook handler whether a given address is in our tracked DB.
+  // Cached in-memory (refreshed every 5 min) so we don't hit SQLite per event.
+  let _trackedAddressesCache = new Set();
+  let _trackedAddressesLastRefresh = 0;
+  function refreshTrackedAddresses() {
+    try {
+      const rows = dbInstance.prepare('SELECT address FROM tracked_wallets').all();
+      _trackedAddressesCache = new Set(rows.map(r => r.address));
+      _trackedAddressesLastRefresh = Date.now();
+    } catch (err) { console.warn('[helius-wh] refresh tracked addrs:', err.message); }
+  }
+  refreshTrackedAddresses();
+  setInterval(refreshTrackedAddresses, 5 * 60_000);
+
+  setIsWalletTrackedFn(addr => _trackedAddressesCache.has(addr));
+
+  // SWARM HOOK — when ≥3 tracked wallets buy the same CA in 10 min, this
+  // fires. We feed the CA into the existing scanner pipeline as if our
+  // scanner had discovered it, plus send a heads-up to the admin.
+  setSwarmHook(async (ca, buyers) => {
+    if (!_botActive) return;
+    try {
+      const total_sol = buyers.reduce((a,b) => a + (Number(b.total_sol_in) || 0), 0);
+      const msg = `🐋 <b>SWARM SIGNAL</b>\n\n` +
+                  `<b>${buyers.length}</b> tracked wallets bought\n` +
+                  `<code>${ca}</code>\n\n` +
+                  `Combined: <b>${total_sol.toFixed(2)} SOL</b> in last 10min\n` +
+                  `Auto-triggering scoring pipeline...\n\n` +
+                  `<a href="https://dexscreener.com/solana/${ca}">DEX</a> · <a href="https://pump.fun/${ca}">PF</a>`;
+      // DM admin only — not group spam
+      if (TELEGRAM_BOT_TOKEN && ADMIN_TELEGRAM_ID) {
+        try {
+          await fetch(`${TELEGRAM_API}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: ADMIN_TELEGRAM_ID, text: msg, parse_mode: 'HTML', disable_web_page_preview: true,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch {}
+      }
+      logEvent('INFO', 'WALLET_SWARM', `${buyers.length} wallets bought ${ca.slice(0,8)} (${total_sol.toFixed(2)} SOL total)`);
+      // Fast-track into scoring pipeline by injecting as a scanner hit.
+      // Use the existing onSmartMoneySignal path so all the standard
+      // enrichment + scoring + posting logic runs.
+      try {
+        const fakeCandidate = { contractAddress: ca, _swarmSignal: { buyers: buyers.length, total_sol } };
+        // Defer to next tick so this returns fast
+        setImmediate(() => {
+          try { processCandidate(fakeCandidate, false); } catch (err) {
+            console.warn('[swarm-trigger] processCandidate err:', err.message);
+          }
+        });
+      } catch {}
+    } catch (err) { console.warn('[swarm-hook] err:', err.message); }
   });
 
   // to the free channel (AXIOSCAN-style 2x-delayed free tier), and every
