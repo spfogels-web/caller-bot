@@ -104,8 +104,9 @@ import {
 
 const {
   TELEGRAM_BOT_TOKEN,
-  TELEGRAM_GROUP_CHAT_ID,        // VIP channel — fires on raw signal
-  TELEGRAM_FREE_CHAT_ID,         // Free channel — fires only after 2x delayed
+  TELEGRAM_GROUP_CHAT_ID,         // VIP channel — fires on raw signal
+  TELEGRAM_FREE_CHAT_ID,          // Free channel — fires only after 2x delayed
+  TELEGRAM_TRENCH_THREAD_ID,      // Forum-topic thread ID for call cards (e.g. "Trench Calls"). When set, all CA beacons + call cards + threaded follow-ups + milestone alerts route here. Banter/persona replies stay on the main thread (General).
   CLAUDE_API_KEY,
   OPENAI_API_KEY,
   ADMIN_TELEGRAM_ID,
@@ -114,6 +115,17 @@ const {
   MIN_SCORE_TO_POST = 50,
   SCAN_INTERVAL_MS  = 60 * 1000,  // 60s — was 90s, scan more frequently
 } = process.env;
+// Helper that adds message_thread_id to a Telegram-API body when the env
+// var is set. Supergroups in forum mode require the integer thread ID; absent
+// it Telegram routes to the General topic.
+const _trenchThreadId = TELEGRAM_TRENCH_THREAD_ID
+  ? Number(TELEGRAM_TRENCH_THREAD_ID)
+  : null;
+function _withTrenchThread(body) {
+  return _trenchThreadId
+    ? { ...body, message_thread_id: _trenchThreadId }
+    : body;
+}
 
 const TELEGRAM_API   = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -2195,12 +2207,12 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
     const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(_withTrenchThread({
         chat_id:    TELEGRAM_GROUP_CHAT_ID,
         photo:      photoSrc,
         caption:    safeCaption,
         parse_mode: 'HTML',
-      }),
+      })),
       signal: AbortSignal.timeout(20_000),
     });
 
@@ -2246,7 +2258,7 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
       console.warn(`[TG] Full report truncated from ${fullDetailText.length} to 4090 chars`);
     }
     try {
-      const body = {
+      let body = {
         chat_id: TELEGRAM_GROUP_CHAT_ID,
         text: full,
         parse_mode: 'HTML',
@@ -2254,6 +2266,8 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
       };
       // Thread the full report under the photo if we have its message_id
       if (photoMessageId) body.reply_to_message_id = photoMessageId;
+      // Route to Trench Calls topic if configured (matches the photo's thread)
+      body = _withTrenchThread(body);
       const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5353,15 +5367,15 @@ async function processCandidate(candidate, isRescan = false) {
           const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+            body: JSON.stringify(_withTrenchThread({
               chat_id: TELEGRAM_GROUP_CHAT_ID,
               text: caBeacon,
               disable_web_page_preview: true,
-            }),
+            })),
             signal: AbortSignal.timeout(10_000),
           });
           if (!r.ok) console.warn(`[TG-CA] beacon status ${r.status}: ${(await r.text()).slice(0,150)}`);
-          else console.log(`[TG-CA] ✓ CA beacon posted FIRST for Phanes/Sect: ${caBeacon}`);
+          else console.log(`[TG-CA] ✓ CA beacon posted FIRST for Phanes/Sect: ${caBeacon}${_trenchThreadId ? ' (Trench Calls thread)' : ''}`);
         } catch (err) {
           console.warn(`[TG-CA] beacon failed: ${err.message}`);
         }
@@ -15164,12 +15178,12 @@ app.listen(PORT, async () => {
       await fetch(`${TELEGRAM_API}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(_withTrenchThread({
           chat_id: TELEGRAM_GROUP_CHAT_ID,
           text: msg,
           parse_mode: 'HTML',
           disable_web_page_preview: true,
-        }),
+        })),
         signal: AbortSignal.timeout(10_000),
       });
     } catch (err) { console.warn('[exit-tg] send failed:', err.message); }
@@ -15291,9 +15305,11 @@ app.listen(PORT, async () => {
     if (!TELEGRAM_BOT_TOKEN) return;
     const sends = [];
 
-    // Always fire milestone to VIP group
+    // Always fire milestone to VIP group — routes to Trench Calls topic
+    // when configured (matches the call-card thread).
     if (TELEGRAM_GROUP_CHAT_ID) {
-      sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg));
+      const opts = _trenchThreadId ? { message_thread_id: _trenchThreadId } : {};
+      sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg, opts));
     }
 
     // Free tier: first 2x unlocks the call (post the original + milestone).
