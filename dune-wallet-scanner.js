@@ -28,6 +28,11 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+// Module-level handle to better-sqlite3. Set by server.js via setDb() on boot.
+// Was missing the declaration — ES modules run in strict mode so the bare
+// `_db = dbInstance` assignment threw ReferenceError, killing every Dune
+// scan that touched targeted lookups or upserts.
+let _db = null;
 export function setDb(dbInstance) { _db = dbInstance; }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
