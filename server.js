@@ -6561,6 +6561,41 @@ async function syncV5ConfigFromDb() {
 }
 syncV5ConfigFromDb(); // initial sync on boot
 
+// One-time cleanup of malformed autotune_params values. Earlier versions
+// of the apply path didn't validate that proposed values were numeric, so
+// the AI sometimes wrote strings like "increase_by_25pct" or "0.25h"
+// directly into current_value. Detect and reset any non-numeric to the
+// param's default_value (or min_value as fallback). Logs every fix.
+function cleanupMalformedAutotuneParams() {
+  try {
+    const rows = dbInstance.prepare(`SELECT key, current_value, default_value, min_value FROM autotune_params`).all();
+    let fixed = 0;
+    for (const r of rows) {
+      const cur = Number(r.current_value);
+      if (Number.isFinite(cur)) continue;
+      // Reset to default if available, else min
+      const fallback = Number(r.default_value);
+      const reset = Number.isFinite(fallback) ? fallback : Number(r.min_value);
+      if (!Number.isFinite(reset)) {
+        console.warn(`[boot:cleanup] cannot reset ${r.key} — no valid default or min`);
+        continue;
+      }
+      try {
+        dbInstance.prepare(`UPDATE autotune_params SET current_value=? WHERE key=?`).run(String(reset), r.key);
+        console.log(`[boot:cleanup] ✓ Reset ${r.key} from "${r.current_value}" → ${reset}`);
+        fixed++;
+      } catch (e) { console.warn(`[boot:cleanup] failed to reset ${r.key}: ${e.message}`); }
+    }
+    if (fixed > 0) {
+      console.log(`[boot:cleanup] Total params reset: ${fixed} (validation now prevents future malformed writes)`);
+      logEvent('INFO', 'AUTOTUNE_CLEANUP', `Reset ${fixed} malformed autotune params on boot`);
+    }
+  } catch (err) {
+    console.warn(`[boot:cleanup] sweep failed: ${err.message}`);
+  }
+}
+cleanupMalformedAutotuneParams(); // initial sweep on boot
+
 // GET current config + audit log
 app.get('/api/tuning/config', (req, res) => {
   setCors(res);
@@ -7157,17 +7192,29 @@ app.post('/api/agent/autonomous', async (req, res) => {
       // Check autotune bounds
       const bound = (() => { try { return dbInstance.prepare(`SELECT * FROM autotune_params WHERE key=?`).get(change.key); } catch { return null; } })();
       if (bound) {
+        // VALIDATION FIX: previously NaN passed all checks because NaN<min and
+        // NaN>max are both false. Bot would write strings like
+        // "increase_by_25pct" or "0.25h" → stored as garbage. Reject first.
         const proposed = Number(change.proposed);
+        if (!Number.isFinite(proposed)) {
+          console.warn(`[agent] BLOCKED non-numeric value for ${change.key}: "${change.proposed}" (must be a finite number)`);
+          actionsProposed.push({...change, blocked: true, reason: 'Value is not a finite number — bot must propose a numeric value, not prose'});
+          continue;
+        }
         const min = Number(bound.min_value), max = Number(bound.max_value), step = Number(bound.max_step_change);
         const current = Number(bound.current_value);
         if (proposed < min || proposed > max) { console.warn(`[agent] Out of bounds: ${change.key}=${proposed} (${min}-${max})`); actionsProposed.push({...change, blocked: true, reason: 'Out of autotune bounds'}); continue; }
-        if (Math.abs(proposed - current) > step) { console.warn(`[agent] Step too large: ${change.key} step=${Math.abs(proposed-current)} max=${step}`); actionsProposed.push({...change, blocked: true, reason: 'Step change exceeds max'}); continue; }
+        // Skip step check if current_value is non-finite (was malformed from prior bug)
+        if (Number.isFinite(current) && Math.abs(proposed - current) > step) { console.warn(`[agent] Step too large: ${change.key} step=${Math.abs(proposed-current)} max=${step}`); actionsProposed.push({...change, blocked: true, reason: 'Step change exceeds max'}); continue; }
         // Cooldown check
         if (bound.last_changed_at) {
           const lastChanged = new Date(bound.last_changed_at).getTime();
           const cooldownMs = (bound.cooldown_hours ?? 6) * 3_600_000;
           if (Date.now() - lastChanged < cooldownMs) { actionsProposed.push({...change, blocked: true, reason: 'Cooldown active until ' + new Date(lastChanged + cooldownMs).toISOString()}); continue; }
         }
+        // Replace change.proposed with the validated numeric value so
+        // downstream apply code uses the parsed number consistently
+        change.proposed = proposed;
       }
 
       // Log proposed action
