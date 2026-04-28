@@ -8318,6 +8318,15 @@ app.post('/api/agent/daily-review', async (req, res) => {
 let _selfImproveRunning = false;
 
 async function runSelfImproveLoop() {
+  // Operator kill-switch: set AUTO_TUNE_DISABLED=1 in Railway env to lock the
+  // current config and stop Claude from re-tightening knobs every 6h. Use
+  // when manually-tuned settings are working and the auto-tuner keeps drifting
+  // them. Manual triggers via /api/self-improve/run-now still respect this.
+  const tuneDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
+  if (tuneDisabled === '1' || tuneDisabled === 'true') {
+    console.log('[self-improve] AUTO_TUNE_DISABLED=1 — config locked, skipping');
+    return;
+  }
   if (!_botActive) { console.log('[self-improve] Bot OFF — skipping'); return; }
   if (_selfImproveRunning) { console.log('[self-improve] Already running, skipping'); return; }
   if (!CLAUDE_API_KEY) { console.log('[self-improve] No CLAUDE_API_KEY, skipping'); return; }
