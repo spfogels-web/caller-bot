@@ -65,6 +65,7 @@ import { runPerformanceTracker, exportFineTuningData }                          
 import { runExitMonitor, setExitTelegramHook, getExitMonitorStats }                  from './exit-signal-monitor.js';
 import {
   processHeliusWebhookBatch, syncTrackedAddressesToHelius, listHeliusWebhooks,
+  createHeliusWebhook,
   setSwarmHook, setEventHook, setIsWalletTrackedFn,
   getEnhancedApiKey,
 } from './helius-webhook.js';
@@ -13699,6 +13700,114 @@ app.post('/api/helius/webhook', express.json({ limit: '10mb' }), (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// Create helper: creates a brand-new Helius Enhanced webhook pointing at our
+// /api/helius/webhook receiver, pre-populated with our top tracked wallets.
+// Returns the webhookID — operator pastes that into Railway as HELIUS_WEBHOOK_ID
+// and the auto-sync cron takes over from there. One-shot first-time setup.
+//
+// Idempotency: if HELIUS_WEBHOOK_ID is already set in env, this skips the create
+// and just runs the sync — safe to fire repeatedly.
+//
+// Usage (browser bar OK — GET alias provided):
+//   POST /api/helius/webhook/create
+//   POST /api/helius/webhook/create   { "publicUrl": "https://my-railway.app" }
+const _heliusWebhookCreateHandler = async (req, res) => {
+  setCors(res);
+  const apiKey = getEnhancedApiKey();
+  if (!apiKey) return res.status(400).json({ ok: false, error: 'HELIUS_ENHANCED_API_KEY (or HELIUS_API_KEY) missing in Railway env' });
+
+  // If the operator already has a webhook configured, skip the create and
+  // just push the latest address list (the auto-sync does this nightly anyway).
+  if (process.env.HELIUS_WEBHOOK_ID) {
+    try {
+      const rows = dbInstance.prepare(`
+        SELECT address FROM tracked_wallets
+        WHERE is_blacklist = 0 AND (sol_balance IS NULL OR sol_balance >= 1)
+          AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
+        ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
+        LIMIT 10000
+      `).all();
+      const addresses = rows.map(r => r.address).filter(Boolean);
+      const result = await syncTrackedAddressesToHelius(process.env.HELIUS_WEBHOOK_ID, apiKey, addresses);
+      return res.json({
+        ok:        result.ok,
+        action:    'sync_existing',
+        webhookId: process.env.HELIUS_WEBHOOK_ID,
+        message:   `Webhook already exists (HELIUS_WEBHOOK_ID set). Pushed ${result.registered ?? 0} addresses.`,
+        ...result,
+      });
+    } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+  }
+
+  // Detect public URL from request headers (Railway sets X-Forwarded-Host /
+  // X-Forwarded-Proto). Fall back to body.publicUrl, then PUBLIC_URL env, then
+  // a hardcoded Railway prod host. Always validate with a regex so a malformed
+  // header can't trick Helius into a bad webhook.
+  const proto    = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+  const hostHdr  = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(',')[0].trim();
+  const inferred = hostHdr ? `${proto}://${hostHdr}` : null;
+  const explicit = (req.body && req.body.publicUrl) || process.env.PUBLIC_URL;
+  const publicUrl = explicit || inferred || 'https://caller-bot-production.up.railway.app';
+  if (!/^https:\/\/[a-zA-Z0-9.\-]+/.test(publicUrl)) {
+    return res.status(400).json({ ok: false, error: `Invalid public URL: ${publicUrl}` });
+  }
+  const webhookURL = `${publicUrl.replace(/\/+$/, '')}/api/helius/webhook`;
+
+  // Reuse HELIUS_WEBHOOK_SECRET if already set, otherwise generate one + tell
+  // the operator to add it to Railway env. Helius will send it back in the
+  // Authorization header, and our /api/helius/webhook receiver checks it.
+  const authHeader = process.env.HELIUS_WEBHOOK_SECRET
+    || `pulse-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+
+  try {
+    // Pull initial address list — top 10K by score, real categories only.
+    const rows = dbInstance.prepare(`
+      SELECT address FROM tracked_wallets
+      WHERE is_blacklist = 0 AND (sol_balance IS NULL OR sol_balance >= 1)
+        AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
+      ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
+      LIMIT 10000
+    `).all();
+    const addresses = rows.map(r => r.address).filter(Boolean);
+    console.log(`[helius-wh] Create → ${webhookURL} with ${addresses.length} initial addresses`);
+
+    const result = await createHeliusWebhook({
+      apiKey,
+      webhookURL,
+      accountAddresses: addresses,
+      authHeader,
+    });
+
+    if (!result.ok) return res.status(500).json(result);
+
+    logEvent('INFO', 'HELIUS_WEBHOOK_CREATED', `id=${result.webhookID} addrs=${result.registered}`);
+    console.log(`[helius-wh] Create ✓ id=${result.webhookID} url=${result.webhookURL} addrs=${result.registered}`);
+
+    // Tell the operator the exact env vars to set in Railway.
+    res.json({
+      ok:           true,
+      action:       'created',
+      webhookId:    result.webhookID,
+      webhookURL:   result.webhookURL,
+      registered:   result.registered,
+      skipped:      result.skipped,
+      message:      'Webhook created successfully. Set the env vars below in Railway and redeploy.',
+      next_steps_railway_env: {
+        HELIUS_WEBHOOK_ID:     result.webhookID,
+        HELIUS_WEBHOOK_SECRET: authHeader,
+      },
+      verify_endpoints: {
+        list:  '/api/helius/webhook/list',
+        stats: '/api/helius/webhook/stats',
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.post('/api/helius/webhook/create', _heliusWebhookCreateHandler);
+app.get('/api/helius/webhook/create',  _heliusWebhookCreateHandler);  // browser-bar trigger
 
 // Setup helper: pushes all currently-tracked wallet addresses to a Helius
 // webhook by ID. Call this AFTER you've created the webhook in the Helius

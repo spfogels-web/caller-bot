@@ -239,6 +239,53 @@ export async function syncTrackedAddressesToHelius(webhookId, apiKey, addresses)
 }
 
 /**
+ * Create a brand-new Helius Enhanced webhook with the given URL + addresses.
+ * Use this for first-time setup — replaces the manual dashboard click-through.
+ * Returns: { ok, webhookID, webhookURL, registered, skipped, error }
+ */
+export async function createHeliusWebhook({ apiKey, webhookURL, accountAddresses = [], authHeader = '' }) {
+  if (!apiKey)     return { ok: false, error: 'apiKey missing' };
+  if (!webhookURL) return { ok: false, error: 'webhookURL missing' };
+
+  const VALID_ADDR = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  const validAddresses = (accountAddresses || []).filter(a => typeof a === 'string' && VALID_ADDR.test(a));
+  // Helius requires at least one accountAddress at creation. If we don't have
+  // any yet, seed with a dummy SOL system address — the auto-sync will swap
+  // in our real wallets within an hour.
+  const seed = validAddresses.length ? validAddresses : ['So11111111111111111111111111111111111111112'];
+
+  const body = {
+    webhookURL,
+    transactionTypes: ['SWAP'],
+    accountAddresses: seed,
+    webhookType:    'enhanced',
+    authHeader:     authHeader || '',
+  };
+
+  try {
+    const r = await fetch(`https://api.helius.xyz/v0/webhooks?api-key=${apiKey}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+      signal:  AbortSignal.timeout(20_000),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      return { ok: false, error: 'POST webhook failed: HTTP ' + r.status + ' ' + text.slice(0, 300) };
+    }
+    const created = await r.json();
+    return {
+      ok: true,
+      webhookID:    created.webhookID,
+      webhookURL:   created.webhookURL,
+      registered:   seed.length,
+      skipped:      (accountAddresses?.length ?? 0) - validAddresses.length,
+      transactionTypes: created.transactionTypes,
+    };
+  } catch (err) { return { ok: false, error: 'POST webhook err: ' + err.message }; }
+}
+
+/**
  * List all webhooks on the account — useful for setup/debugging.
  */
 export async function listHeliusWebhooks(apiKey) {
