@@ -7865,15 +7865,18 @@ app.get('/api/control-station', (req, res) => {
 // read req.body, so GET works fine.
 const _autoOptimizeHandler = async (req, res) => {
   setCors(res);
-  // Operator kill-switch — same env var that gates runSelfImproveLoop.
-  // Blocks direct browser-bar / dashboard hits to this endpoint when AI
-  // tuning is locked, so config can't drift through any path.
-  const tuneDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
-  if (tuneDisabled === '1' || tuneDisabled === 'true') {
+  // Auto-tuning LOCKED BY DEFAULT — only allow when AUTO_TUNE_ENABLED=1
+  // is explicitly set in Railway env. Closes every Claude config-mutation
+  // path so the bot can never drift configs autonomously again.
+  const explicitEnable = String(process.env.AUTO_TUNE_ENABLED || '').toLowerCase();
+  const legacyDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
+  const isOn = (explicitEnable === '1' || explicitEnable === 'true')
+            && legacyDisabled !== '1' && legacyDisabled !== 'true';
+  if (!isOn) {
     return res.status(423).json({
       ok: false,
       error: 'AI tuning locked',
-      detail: 'AUTO_TUNE_DISABLED=1 in Railway env. Unset it to allow Claude to mutate configs again.',
+      detail: 'Auto-tuner is locked by default. Set AUTO_TUNE_ENABLED=1 in Railway env to allow Claude config mutations.',
     });
   }
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
@@ -8521,23 +8524,25 @@ OUTPUT FORMAT (strict JSON, no markdown):
 const AGENT_SYSTEM_PROMPT = BOT_A_SYSTEM_PROMPT;
 app.post('/api/agent/autonomous', async (req, res) => {
   setCors(res);
-  // Operator kill-switch — when AUTO_TUNE_DISABLED is set, only allow the
-  // ANALYZE mode (read-only Claude analysis); block any mode that can
-  // apply config changes. This is the endpoint runSelfImproveLoop calls
-  // internally, so guarding here also belt-and-suspenders the scheduled tick.
-  const tuneDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
-  const tuneLocked = tuneDisabled === '1' || tuneDisabled === 'true';
+  // Auto-tuning LOCKED BY DEFAULT — read-only ANALYZE always allowed,
+  // autoApply only allowed when AUTO_TUNE_ENABLED=1 is explicitly set.
+  // This is the endpoint runSelfImproveLoop calls internally so guarding
+  // here belt-and-suspenders every config-mutation path.
+  const explicitEnable = String(process.env.AUTO_TUNE_ENABLED || '').toLowerCase();
+  const legacyDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
+  const tuneOn = (explicitEnable === '1' || explicitEnable === 'true')
+              && legacyDisabled !== '1' && legacyDisabled !== 'true';
 
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured' });
 
   const { mode = 'analyze', autoApply = false, sessionId = null } = req.body ?? {};
 
-  // Block autoApply when tuning is locked, regardless of mode
-  if (tuneLocked && autoApply) {
+  // Block autoApply by default — only allow when explicitly turned on
+  if (!tuneOn && autoApply) {
     return res.status(423).json({
       ok: false,
       error: 'AI tuning locked',
-      detail: 'AUTO_TUNE_DISABLED=1 — autoApply rejected. Pass autoApply=false to run analyze-only or unset the env var.',
+      detail: 'Auto-tuner is locked by default. autoApply rejected. Pass autoApply=false to run analyze-only, or set AUTO_TUNE_ENABLED=1 in Railway env to allow config mutations.',
     });
   }
   const sid = sessionId || ('sess_' + Date.now());
@@ -8864,13 +8869,16 @@ app.post('/api/agent/daily-review', async (req, res) => {
 let _selfImproveRunning = false;
 
 async function runSelfImproveLoop() {
-  // Operator kill-switch: set AUTO_TUNE_DISABLED=1 in Railway env to lock the
-  // current config and stop Claude from re-tightening knobs every 6h. Use
-  // when manually-tuned settings are working and the auto-tuner keeps drifting
-  // them. Manual triggers via /api/self-improve/run-now still respect this.
-  const tuneDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
-  if (tuneDisabled === '1' || tuneDisabled === 'true') {
-    console.log('[self-improve] AUTO_TUNE_DISABLED=1 — config locked, skipping');
+  // Auto-tuning is LOCKED BY DEFAULT (inverted polarity, 2026-04-29).
+  // Operator decision: bot must never mutate scoring configs autonomously.
+  // To re-enable, set AUTO_TUNE_ENABLED=1 in Railway env. The legacy
+  // AUTO_TUNE_DISABLED env var is also honored for backwards compat.
+  const explicitEnable  = String(process.env.AUTO_TUNE_ENABLED  || '').toLowerCase();
+  const legacyDisabled  = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
+  const isExplicitlyOn  = explicitEnable === '1' || explicitEnable === 'true';
+  const isLegacyOff     = legacyDisabled === '1' || legacyDisabled === 'true';
+  if (!isExplicitlyOn || isLegacyOff) {
+    console.log('[self-improve] Auto-tuner LOCKED by default — set AUTO_TUNE_ENABLED=1 to allow');
     return;
   }
   if (!_botActive) { console.log('[self-improve] Bot OFF — skipping'); return; }
