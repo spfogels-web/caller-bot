@@ -517,16 +517,19 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   const buys1h      = pair.txns?.h1?.buys  ?? 0;
   const sells1h     = pair.txns?.h1?.sells ?? 0;
   const vol24h      = pair.volume?.h24;
-  // Image URL + bonding metadata: prefer DexScreener's pair.info.imageUrl,
-  // then Helius DAS metadata, then pump.fun's API (catches fresh pump.fun
-  // coins that DexScreener hasn't crawled yet — by far the most common
-  // miss). Same pump.fun call also surfaces bonding curve progress for
-  // the Bonding section below.
+  // Image URL chain — same multi-source priority as the bot's call card so
+  // user-CA replies and bot-initiated calls render consistently:
+  //   1. DexScreener pair.info.imageUrl (when DS has indexed)
+  //   2. Helius DAS content.links.image (already fetched into heliusMeta)
+  //   3. pump.fun /coins/{mint} image_uri (fresh pump.fun coins)
+  //   4. Birdeye Premium /defi/token_overview logoURI (CDN-cached)
+  //   5. null → caller falls back to Pulse banner
+  // Removed the legacy https://dd.dexscreener.com/ds-data CDN URL fallback
+  // — it returns HTTP 301 and Telegram's photo fetcher drops the request,
+  // which was the bare-CA failure mode the operator kept seeing.
   let imageUrl = pair.info?.imageUrl || heliusMeta?.content?.links?.image || null;
   let pfData = null;
   try {
-    // Pump.fun migrated to v3 host — old frontend-api.pump.fun returns
-    // Cloudflare 1016. helius-listener.js has the matching constant.
     const pf = await fetch(`https://frontend-api-v3.pump.fun/coins/${ca}`, {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(5_000),
@@ -539,10 +542,21 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
       }
     }
   } catch { /* skip — coin may not be on pump.fun */ }
-  // Fourth fallback — DexScreener serves a generic token-icon CDN that often
-  // works even when pair.info.imageUrl is null. Last-ditch before going text-only.
-  if (!imageUrl) {
-    imageUrl = `https://dd.dexscreener.com/ds-data/tokens/solana/${ca}.png`;
+  // Fallback — Birdeye Premium logoURI (operator pays for Premium, this
+  // unlocks reliable CDN-cached logos for most SPL tokens).
+  if (!imageUrl && process.env.BIRDEYE_API_KEY) {
+    try {
+      const r = await fetch(
+        `https://public-api.birdeye.so/defi/token_overview?address=${encodeURIComponent(ca)}`,
+        { headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'accept': 'application/json', 'x-chain': 'solana' },
+          signal: AbortSignal.timeout(5_000) }
+      );
+      if (r.ok) {
+        const j = await r.json();
+        const logoURI = j?.data?.logoURI ?? j?.data?.logo ?? j?.data?.extensions?.logoURI;
+        if (logoURI) imageUrl = logoURI;
+      }
+    } catch { /* skip */ }
   }
   const websites    = pair.info?.websites || [];
   const socials     = pair.info?.socials  || [];

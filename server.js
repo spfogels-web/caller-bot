@@ -13336,37 +13336,50 @@ app.post('/webhook', async (req, res) => {
             chatId:    String(chatId),
             messageId: message.message_id,
           });
-          // Auto-reply (deduped per chat+CA per 5min). Prefer photo+caption
-          // when the token has an image — falls back to text-only otherwise.
+          // Auto-reply (deduped per chat+CA per 5min). Always tries to send
+          // a photo — falls through coin image → cached Pulse banner →
+          // BANNER_IMAGE_URL → plain text. Reads Telegram's body.ok field
+          // (not just HTTP status) since Telegram returns 200 with
+          // body.ok=false on photo rejections, which slipped through the
+          // old `if (!photoRes.ok)` gate.
           if (shouldReplyCard(String(chatId), ca)) {
             try {
-              if (imageUrl) {
-                const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    chat_id: chatId,
-                    photo: imageUrl,
-                    caption: caption.slice(0, 1020),  // Telegram caption cap
-                    parse_mode: 'HTML',
-                    reply_to_message_id: message.message_id,
-                    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-                  }),
-                  signal: AbortSignal.timeout(10_000),
-                });
-                if (!photoRes.ok) {
-                  // Photo URL was rejected — fall back to plain message
-                  await fetch(`${TELEGRAM_API}/sendMessage`, {
+              const photoCandidates = [
+                imageUrl,
+                _bannerFileId,
+                BANNER_IMAGE_URL,
+              ].filter(Boolean);
+              const safeCap = caption.slice(0, 1020);
+
+              let posted = false;
+              for (const src of photoCandidates) {
+                try {
+                  const photoRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                      chat_id: chatId, text: caption,
-                      parse_mode: 'HTML', disable_web_page_preview: true,
+                      chat_id: chatId,
+                      photo: src,
+                      caption: safeCap,
+                      parse_mode: 'HTML',
                       reply_to_message_id: message.message_id,
                       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
                     }),
-                    signal: AbortSignal.timeout(8_000),
+                    signal: AbortSignal.timeout(10_000),
                   });
+                  // Telegram returns 200 even on rejected photos — must check body.ok
+                  const body = await photoRes.json().catch(() => ({}));
+                  if (photoRes.ok && body.ok !== false) {
+                    posted = true;
+                    break;
+                  }
+                  console.warn(`[ca-card] photo rejected (src=${String(src).slice(0,40)}…): ${(body.description || body.error_message || photoRes.status)}`);
+                } catch (innerErr) {
+                  console.warn(`[ca-card] photo send err (src=${String(src).slice(0,40)}…): ${innerErr.message}`);
                 }
-              } else {
+              }
+
+              if (!posted) {
+                // All photo attempts failed — text-only fallback
                 await fetch(`${TELEGRAM_API}/sendMessage`, {
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -13377,6 +13390,7 @@ app.post('/webhook', async (req, res) => {
                   }),
                   signal: AbortSignal.timeout(8_000),
                 });
+                console.warn(`[ca-card] all 3 photo sources failed — sent text-only`);
               }
             } catch (err) { console.warn('[ca-card] reply send failed:', err.message); }
           }
