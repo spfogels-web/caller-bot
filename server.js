@@ -2158,6 +2158,15 @@ let _leaderboardBannerFileId = null;
 async function uploadBannerToTelegram() {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
   if (_bannerFileId) { console.log('[TG] Banner already cached'); return; }
+  // Operator wants the "Pulse Caller online" boot banner ONLY in Trench Calls,
+  // never in General. If TELEGRAM_TRENCH_THREAD_ID isn't set, skip the banner
+  // entirely instead of leaking into the main chat. The visible boot signal
+  // also gets cached _bannerFileId for the call-card image fallback chain,
+  // so we still need to fire it once when Trench is configured.
+  if (!_trenchThreadId) {
+    console.log('[TG] Boot banner skipped — TELEGRAM_TRENCH_THREAD_ID not set (would post to General; operator wants Trench-only)');
+    return;
+  }
 
   const BANNER_FILE = path.join(__dirname, 'banner.png');
   let fileExists = false;
@@ -2173,10 +2182,13 @@ async function uploadBannerToTelegram() {
       const formData  = new FormData();
       const blob      = new Blob([fileData], { type: 'image/png' });
       formData.append('chat_id', TELEGRAM_GROUP_CHAT_ID);
+      // Route boot banner to Trench Calls topic — set BEFORE photo so Telegram
+      // parses the thread routing before processing the multipart body.
+      // _trenchThreadId is guaranteed non-null here (early-return above).
+      formData.append('message_thread_id', String(_trenchThreadId));
       formData.append('photo', blob, 'banner.png');
       formData.append('caption', '⚡ Pulse Caller online — call bot active');
-      // Route boot banner to Trench Calls topic when configured
-      if (_trenchThreadId) formData.append('message_thread_id', String(_trenchThreadId));
+      console.log(`[TG] Uploading boot banner to Trench thread ${_trenchThreadId}`);
 
       const res  = await fetch(`${TELEGRAM_API}/sendPhoto`, {
         method: 'POST',
