@@ -989,8 +989,12 @@ export async function enrichCandidate(candidate) {
           // Also fill in missing basic data
           candidate.token      = candidate.token      ?? pair.baseToken?.symbol ?? null;
           candidate.tokenName  = candidate.tokenName  ?? pair.baseToken?.name ?? null;
+          candidate.buys5m     = candidate.buys5m     ?? pair.txns?.m5?.buys ?? null;
+          candidate.sells5m    = candidate.sells5m    ?? pair.txns?.m5?.sells ?? null;
           candidate.buys1h     = candidate.buys1h     ?? pair.txns?.h1?.buys ?? null;
           candidate.sells1h    = candidate.sells1h    ?? pair.txns?.h1?.sells ?? null;
+          candidate.priceChange5m  = candidate.priceChange5m  ?? pair.priceChange?.m5  ?? null;
+          candidate.priceChange1h  = candidate.priceChange1h  ?? pair.priceChange?.h1  ?? null;
           candidate.marketCap  = candidate.marketCap  ?? pair.marketCap ?? pair.fdv ?? null;
           candidate.liquidity  = candidate.liquidity  ?? pair.liquidity?.usd ?? null;
           if (pair.pairCreatedAt && candidate.pairAgeHours == null) {
@@ -1041,6 +1045,8 @@ export async function enrichCandidate(candidate) {
           .filter(p => p.chainId === 'solana')
           .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
         if (pair) {
+          candidate.buys5m     = candidate.buys5m     ?? pair.txns?.m5?.buys   ?? null;
+          candidate.sells5m    = candidate.sells5m    ?? pair.txns?.m5?.sells  ?? null;
           candidate.buys1h     = candidate.buys1h     ?? pair.txns?.h1?.buys   ?? null;
           candidate.sells1h    = candidate.sells1h    ?? pair.txns?.h1?.sells  ?? null;
           candidate.buys6h     = candidate.buys6h     ?? pair.txns?.h6?.buys   ?? null;

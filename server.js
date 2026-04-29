@@ -1439,6 +1439,17 @@ const SCORING_CONFIG_DEFAULTS = {
   //     under regime/cluster discount. Failsafe.
   clusterMinScoreToPost:      35,
   absoluteMinScoreToPost:     30,
+
+  // ── FALLEN-KNIFE GUARD ─────────────────────────────────────────────────
+  // When a coin is dropping sharply (1h pct change < fallenKnife1hDropPct),
+  // require buyer-return confirmation in the last 5 min before posting.
+  // Either price already turning up (5m pct >= fallenKnife5mReversalPct) OR
+  // buyers winning in last 5 min (buys5m / total5m >= fallenKnife5mBuyRatio).
+  // Stops "catching falling knives" — coins mid-dump that look OK on 1h
+  // aggregates but are still bleeding. KOL signals bypass.
+  fallenKnife1hDropPct:        -15,    // 1h drop threshold to trigger guard
+  fallenKnife5mReversalPct:      3,    // 5m price reversal to confirm bottom
+  fallenKnife5mBuyRatio:       0.60,   // alt: 5m buy-side share to confirm
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -4982,6 +4993,56 @@ async function processCandidate(candidate, isRescan = false) {
           logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${tier} → WATCHLIST`);
           console.log(`[auto-caller] 📊 Floor blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} (${isClusterSignal ? 'cluster' : marketRegime}) → WATCHLIST`);
           finalDecision = 'WATCHLIST';
+        }
+      }
+    }
+
+    // ── FALLEN-KNIFE GUARD: require buyer-return confirmation on dropping coins ──
+    // Last 5 calls were stuff like $WOULDNT 0.76x, $sem 1.12x, $SCAMTRUMP 1.02x
+    // — coins that were already mid-dump or at a dead-cat-bounce level when
+    // called. The bot was buying pre-reversal because score-time signals
+    // (volume velocity, buy pressure) looked OK in raw-aggregate but masked
+    // the price trajectory.
+    //
+    // Logic: if 1h price change is sharply negative AND the last 5 min hasn't
+    // confirmed a reversal (price still flat-down OR sells > buys in last 5
+    // min), force WATCHLIST. KOL signals bypass (curated wallet conviction).
+    //
+    // Tunable via SCORING_CONFIG:
+    //   fallenKnife1hDropPct   — drop threshold to TRIGGER the check (-15%)
+    //   fallenKnife5mReversalPct — 5m price required to confirm reversal (+3%)
+    //   fallenKnife5mBuyRatio  — 5m buy-share threshold to confirm reversal (0.60)
+    {
+      const c = enrichedCandidate;
+      const isKolBypass = c._smartMoney?.kind === 'kol';
+      if (finalDecision === 'AUTO_POST' && !isKolBypass) {
+        const dropTrigger    = SCORING_CONFIG.fallenKnife1hDropPct      ?? -15;
+        const reversalNeeded = SCORING_CONFIG.fallenKnife5mReversalPct  ?? 3;
+        const buyRatioReq    = SCORING_CONFIG.fallenKnife5mBuyRatio     ?? 0.60;
+
+        const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
+        const pct5m = Number(c.priceChange5m ?? c.pct_change_5m ?? 0);
+        const b5    = Number(c.buys5m  ?? 0);
+        const s5    = Number(c.sells5m ?? 0);
+        const ratio5m = (b5 + s5) > 0 ? b5 / (b5 + s5) : null;
+
+        const isFalling = pct1h < dropTrigger;
+        if (isFalling) {
+          // Need at least ONE reversal signal to allow the call
+          const priceTurning  = pct5m >= reversalNeeded;
+          const buyersWinning = ratio5m != null && ratio5m >= buyRatioReq;
+          const reversalConfirmed = priceTurning || buyersWinning;
+
+          if (!reversalConfirmed) {
+            logEvent('INFO', 'FALLEN_KNIFE_BLOCK',
+              `${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% 5m=${pct5m.toFixed(1)}% buys5m=${b5} sells5m=${s5} ratio=${ratio5m != null ? (ratio5m*100).toFixed(0)+'%' : 'n/a'} → WATCHLIST (no reversal)`);
+            console.log(`[auto-caller] 🔪 Fallen-knife block — $${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% 5m=${pct5m.toFixed(1)}% no buyer return → WATCHLIST`);
+            finalDecision = 'WATCHLIST';
+          } else {
+            logEvent('INFO', 'FALLEN_KNIFE_PASS',
+              `${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% reversal confirmed via ${priceTurning ? `5m=${pct5m.toFixed(1)}%` : `5m-buy-ratio ${(ratio5m*100).toFixed(0)}%`}`);
+            console.log(`[auto-caller] ↗ Reversal confirmed on dropping coin — $${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% but ${priceTurning ? '5m turning up' : 'buyers dominating 5m'}`);
+          }
         }
       }
     }
