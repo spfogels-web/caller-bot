@@ -2236,6 +2236,57 @@ async function uploadBannerToTelegram() {
   }
 }
 
+// Emergency text-only fallback — direct sendMessage with retries.
+// Used when sendCallAlertWithImage exhausts all photo paths. Splits very
+// long captions into chunks so Telegram's 4096-char limit doesn't drop
+// the whole message. Posts to Trench Calls topic when configured.
+async function _emergencyTextFallback(caption) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) {
+    console.warn('[TG-fallback] ❌ skipped — TG creds missing');
+    return;
+  }
+  // sendMessage allows up to 4096 chars (vs 1024 for caption), so most
+  // captions fit fine. Just trim defensively in case.
+  const text = caption.length > 4090 ? caption.slice(0, 4087) + '…' : caption;
+  try {
+    const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_withTrenchThread({
+        chat_id: TELEGRAM_GROUP_CHAT_ID,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      })),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (r.ok) {
+      console.log('[TG-fallback] ✓ text-only call posted');
+    } else {
+      const body = (await r.text()).slice(0, 300);
+      console.warn(`[TG-fallback] ❌ text fallback also failed: status=${r.status} body=${body}`);
+      // Last resort: try without HTML parse_mode in case formatting is the issue
+      try {
+        await fetch(`${TELEGRAM_API}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(_withTrenchThread({
+            chat_id: TELEGRAM_GROUP_CHAT_ID,
+            text: text.replace(/<[^>]+>/g, ''),  // strip HTML tags
+            disable_web_page_preview: true,
+          })),
+          signal: AbortSignal.timeout(10_000),
+        });
+        console.log('[TG-fallback] ✓ plain-text call posted (no HTML)');
+      } catch (err2) {
+        console.error(`[TG-fallback] ❌ FINAL FAILURE — call card never posted: ${err2.message}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[TG-fallback] ❌ network err: ${err.message}`);
+  }
+}
+
 async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageUrl = null) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
 
@@ -2281,25 +2332,28 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
       }
       console.log(`[TG] ✓ Photo+caption sent`);
     } else {
-      console.warn(`[TG] Photo send failed: ${JSON.stringify(photoData).slice(0, 400)}`);
+      // Build a verbose error log so we can see WHY Telegram rejected the
+      // photo. Common causes: coin image URL 404, banner URL 404, image too
+      // big, MIME wrong, rate limited, thread doesn't exist.
+      const errorDesc = photoData?.description || photoData?.error_message || JSON.stringify(photoData).slice(0, 300);
+      console.warn(`[TG] ❌ Photo send failed: status=${photoRes.status} description="${errorDesc}" usingCoinImage=${usingCoinImage} photoSrc=${String(photoSrc).slice(0,80)}`);
 
       // If the coin image URL was rejected by Telegram, retry with pulse banner
       if (usingCoinImage) {
-        console.warn(`[TG] Retrying with pulse banner fallback`);
+        console.warn(`[TG] ⤴ Retrying with pulse banner fallback`);
         await sendCallAlertWithImage(caption, fullDetailText, null);
         return;
       }
-      // Pulse banner also failed → text-only. Route to Trench Calls topic
-      // when configured so the fallback doesn't accidentally leak the call
-      // into General just because the image failed.
+      // Banner failed too. Force a TEXT-ONLY post via direct fetch so the
+      // call doesn't get silently dropped. We've seen sendTelegramGroupMessage
+      // fall through quietly when something weird happens upstream.
       if (_bannerFileId) { _bannerFileId = null; console.warn('[TG] banner file_id cleared'); }
-      const trenchOpts = _trenchThreadId ? { message_thread_id: _trenchThreadId } : {};
-      await sendTelegramGroupMessage(safeCaption, trenchOpts).catch(() => {});
+      console.warn(`[TG] ⚠ Photo path completely failed — forcing direct text-only fallback`);
+      await _emergencyTextFallback(safeCaption);
     }
   } catch (err) {
-    console.warn(`[TG] Photo error: ${err.message}`);
-    const trenchOpts = _trenchThreadId ? { message_thread_id: _trenchThreadId } : {};
-    await sendTelegramGroupMessage(safeCaption, trenchOpts).catch(() => {});
+    console.warn(`[TG] ❌ Photo exception: ${err.message} stack=${(err.stack||'').slice(0,200)}`);
+    await _emergencyTextFallback(safeCaption);
   }
 
   // ── FOLLOW-UP: Full detailed analysis ──────────────────────────────────
@@ -15778,39 +15832,22 @@ app.listen(PORT, async () => {
   setExitTelegramHook(async (msg) => {
     if (AI_CONFIG_OVERRIDES.pausePosting) return;
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
-    // Exit alerts (LP pull / dump / rug warnings) fire to BOTH topics — the
-    // Trench Calls topic so it threads with the original call, AND General
-    // so users see the warning in main chat without having to switch tabs.
-    const sends = [];
-    // Trench (only when env var is set; falls through to General otherwise)
-    if (_trenchThreadId) {
-      sends.push(fetch(`${TELEGRAM_API}/sendMessage`, {
+    // Exit alerts (LP pull / dump / rug warnings) fire to Trench Calls ONLY
+    // per operator. They thread with the original call card; General stays
+    // for chat / persona replies / milestones (which still dual-post).
+    try {
+      await fetch(`${TELEGRAM_API}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id:           TELEGRAM_GROUP_CHAT_ID,
-          text:              msg,
-          parse_mode:        'HTML',
+        body: JSON.stringify(_withTrenchThread({
+          chat_id: TELEGRAM_GROUP_CHAT_ID,
+          text: msg,
+          parse_mode: 'HTML',
           disable_web_page_preview: true,
-          message_thread_id: _trenchThreadId,
-        }),
+        })),
         signal: AbortSignal.timeout(10_000),
-      }));
-    }
-    // General (always — main chat heads-up)
-    sends.push(fetch(`${TELEGRAM_API}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_GROUP_CHAT_ID,
-        text: msg,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    }));
-    try { await Promise.allSettled(sends); }
-    catch (err) { console.warn('[exit-tg] send failed:', err.message); }
+      });
+    } catch (err) { console.warn('[exit-tg] send failed:', err.message); }
   });
 
   // ── HELIUS WEBHOOK WIRING ─────────────────────────────────────────────
