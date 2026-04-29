@@ -471,21 +471,32 @@ export async function runOutcomeTracker(dbInstance) {
           const mRow = dbInstance.prepare(
             `SELECT milestone_alerted, token, peak_multiple, market_cap_at_call, contract_address FROM calls WHERE id=?`
           ).get(call.id);
-          // Added 25x tier per AXIOSCAN-style multi-milestone flooding.
-          const currentTier = mRow?.peak_multiple >= 25 ? 25
-                            : mRow?.peak_multiple >= 10 ? 10
-                            : mRow?.peak_multiple >= 5  ? 5
-                            : mRow?.peak_multiple >= 2  ? 2
+          // Multi-tier milestone flooding — fires once per tier as the coin
+          // climbs. User wants notifications at every meaningful doubling/
+          // landmark so big winners get celebrated all the way up.
+          const peak = mRow?.peak_multiple ?? 0;
+          const currentTier = peak >= 100 ? 100
+                            : peak >=  50 ?  50
+                            : peak >=  25 ?  25
+                            : peak >=  15 ?  15
+                            : peak >=  10 ?  10
+                            : peak >=   5 ?   5
+                            : peak >=   4 ?   4
+                            : peak >=   2 ?   2
                             : 0;
           const lastTier = mRow?.milestone_alerted ?? 0;
           if (currentTier > lastTier) {
             dbInstance.prepare(`UPDATE calls SET milestone_alerted=? WHERE id=?`).run(currentTier, call.id);
             // Fire TG alert (best-effort — don't block the tracker loop)
             if (_telegramHook) {
-              const emoji = currentTier >= 25 ? '💎👑💎'
-                          : currentTier >= 10 ? '🚀🚀🚀'
-                          : currentTier >= 5  ? '🔥🔥'
-                          :                     '🎯';
+              const emoji = currentTier >= 100 ? '💎👑💎👑💎'
+                          : currentTier >=  50 ? '💎👑💎'
+                          : currentTier >=  25 ? '👑👑👑'
+                          : currentTier >=  15 ? '🚀🚀🚀🚀'
+                          : currentTier >=  10 ? '🚀🚀🚀'
+                          : currentTier >=   5 ? '🔥🔥'
+                          : currentTier >=   4 ? '🔥'
+                          :                      '🎯';
               const entryMc = mRow.market_cap_at_call || 0;
               const peakMc  = mRow.peak_multiple * entryMc;
               // AXIOSCAN-style: always include entry MC on every follow-up so

@@ -212,7 +212,7 @@ globalThis.fetch = async function(url, options) {
 // /api/usage endpoint registered after app initialization (see below)
 
 const BANNER_IMAGE_URL = process.env.BANNER_IMAGE_URL
-  ?? 'https://raw.githubusercontent.com/spfogles-web/caller-bot/main/banner.png';
+  ?? 'https://raw.githubusercontent.com/spfogels-web/caller-bot/main/banner.png';
 // PulseCaller branding — set BANNER_IMAGE_URL in Railway to your banner URL
 // Recommended: upload banner.png to your GitHub repo root and it auto-uses it
 
@@ -15461,19 +15461,39 @@ app.listen(PORT, async () => {
   setExitTelegramHook(async (msg) => {
     if (AI_CONFIG_OVERRIDES.pausePosting) return;
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
-    try {
-      await fetch(`${TELEGRAM_API}/sendMessage`, {
+    // Exit alerts (LP pull / dump / rug warnings) fire to BOTH topics — the
+    // Trench Calls topic so it threads with the original call, AND General
+    // so users see the warning in main chat without having to switch tabs.
+    const sends = [];
+    // Trench (only when env var is set; falls through to General otherwise)
+    if (_trenchThreadId) {
+      sends.push(fetch(`${TELEGRAM_API}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(_withTrenchThread({
-          chat_id: TELEGRAM_GROUP_CHAT_ID,
-          text: msg,
-          parse_mode: 'HTML',
+        body: JSON.stringify({
+          chat_id:           TELEGRAM_GROUP_CHAT_ID,
+          text:              msg,
+          parse_mode:        'HTML',
           disable_web_page_preview: true,
-        })),
+          message_thread_id: _trenchThreadId,
+        }),
         signal: AbortSignal.timeout(10_000),
-      });
-    } catch (err) { console.warn('[exit-tg] send failed:', err.message); }
+      }));
+    }
+    // General (always — main chat heads-up)
+    sends.push(fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_GROUP_CHAT_ID,
+        text: msg,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    }));
+    try { await Promise.allSettled(sends); }
+    catch (err) { console.warn('[exit-tg] send failed:', err.message); }
   });
 
   // ── HELIUS WEBHOOK WIRING ─────────────────────────────────────────────

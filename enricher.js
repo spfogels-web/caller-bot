@@ -997,10 +997,13 @@ export async function enrichCandidate(candidate) {
           candidate.priceChange1h  = candidate.priceChange1h  ?? pair.priceChange?.h1  ?? null;
           candidate.marketCap  = candidate.marketCap  ?? pair.marketCap ?? pair.fdv ?? null;
           candidate.liquidity  = candidate.liquidity  ?? pair.liquidity?.usd ?? null;
+          // Coin's own image — DexScreener attaches it to pair.info when the
+          // token has uploaded metadata. Used as the call card hero image.
+          candidate.imageUrl   = candidate.imageUrl   ?? pair.info?.imageUrl ?? null;
           if (pair.pairCreatedAt && candidate.pairAgeHours == null) {
             candidate.pairAgeHours = (Date.now() - pair.pairCreatedAt) / 3_600_000;
           }
-          console.log(`[enricher] Pre-flight DexScreener: got pairAddress ${pairAddress.slice(0,8)} + basic data`);
+          console.log(`[enricher] Pre-flight DexScreener: got pairAddress ${pairAddress.slice(0,8)} + basic data${candidate.imageUrl ? ' + image' : ''}`);
         }
       }
     } catch (e) { console.warn('[enricher] Pre-flight DexScreener failed:', e.message); }
@@ -1063,10 +1066,13 @@ export async function enrichCandidate(candidate) {
           candidate.priceChange1h  = candidate.priceChange1h  ?? pair.priceChange?.h1  ?? null;
           candidate.priceChange6h  = candidate.priceChange6h  ?? pair.priceChange?.h6  ?? null;
           candidate.priceChange24h = candidate.priceChange24h ?? pair.priceChange?.h24 ?? null;
+          // Coin's own image for the call card hero. DexScreener attaches it
+          // when the token has uploaded its metadata. Used in sendCallAlertWithImage.
+          candidate.imageUrl       = candidate.imageUrl       ?? pair.info?.imageUrl  ?? null;
           if (pair.pairCreatedAt && candidate.pairAgeHours == null) {
             candidate.pairAgeHours = (Date.now() - pair.pairCreatedAt) / 3_600_000;
           }
-          console.log(`[enricher:dexscreener] ✓ fallback — buys1h:${candidate.buys1h} sells1h:${candidate.sells1h} mcap:${candidate.marketCap}`);
+          console.log(`[enricher:dexscreener] ✓ fallback — buys1h:${candidate.buys1h} sells1h:${candidate.sells1h} mcap:${candidate.marketCap}${candidate.imageUrl ? ' image:✓' : ''}`);
         }
       }
     } catch (e) {
