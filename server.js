@@ -5590,18 +5590,20 @@ async function processCandidate(candidate, isRescan = false) {
       {
       // Use v8 caption builder that includes OpenAI decision layer
       const caption  = buildV8Caption(enrichedCandidate, verdict, scoreResult, openAIDecision);
-      // Coin image for the call — user wants the coin's own avatar so the
-      // post is visually distinct and confirmable (vs. the generic Pulse
-      // banner reserved for status/startup messages). Fall through:
-      //   1. DexScreener info.imageUrl (when pair metadata present)
-      //   2. DexScreener CDN URL (works for any SPL token with metadata,
-      //      including pump.fun pre-bond — the dashboard already pulls
-      //      from here reliably)
-      // sendCallAlertWithImage handles Telegram rejection gracefully and
-      // falls back to the Pulse banner only if both image sources fail.
-      const caForImg = enrichedCandidate.contractAddress;
-      const coinImg  = enrichedCandidate.imageUrl
-                    || (caForImg ? `https://dd.dexscreener.com/ds-data/tokens/solana/${caForImg}.png` : null);
+      // Coin image for the call card. Fall through:
+      //   1. enricher.js's enriched.imageUrl — populated from
+      //        a) DexScreener pair.info.imageUrl (when DS has indexed it), or
+      //        b) pump.fun image_uri (the IPFS URL pump.fun returns for the
+      //           coin's icon — works for fresh pump.fun coins that DS hasn't
+      //           indexed yet, which is most newborns)
+      //   2. null → sendCallAlertWithImage falls back to the Pulse banner
+      //
+      // Removed the dd.dexscreener.com CDN URL fallback that we used to have
+      // in step 2 — it returns HTTP 301 (redirect) for fresh coins, and
+      // Telegram's photo URL fetcher drops the request when the URL redirects
+      // instead of returning the image content directly. That was the silent
+      // failure mode where call cards were arriving as text-only.
+      const coinImg = enrichedCandidate.imageUrl ?? null;
 
       // ── CA beacon FIRST (Phanes, Sect Board, leaderboard trackers) ──────
       // Posted as a plain-text message with just the CA — mirrors the way
