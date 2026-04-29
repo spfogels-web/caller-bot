@@ -1428,33 +1428,18 @@ const SCORING_CONFIG_DEFAULTS = {
   scoreTrumpYoungMaxAgeHours:  2,    // "young" = age <= 2h
   scoreTrumpMaxMcap:       80000,    // gem-range cap
 
-  // ── CLUSTER / SMART-MONEY GUARDRAILS (RELAXED) ─────────────────────────
-  // RELAXED 2026-04-29 — operator reported less calls and less winners
-  // after the 35-floor went in. With the slimmed 500-wallet webhook,
-  // 3-wallet clusters are quality signals. Lowered to a thin failsafe
-  // (20) that still blocks pure score-10 garbage but lets meaningful
-  // signals through. absoluteMinScoreToPost stays as a hard cliff.
-  clusterMinScoreToPost:      20,    // was 35
-  absoluteMinScoreToPost:     20,    // was 30 — only blocks worst garbage
-
-  // ── FALLEN-KNIFE GUARD (DISABLED BY DEFAULT) ───────────────────────────
-  // DISABLED 2026-04-29 — operator wants 4/27 call cadence back. The guard
-  // was filtering legitimate dip-buy entries that historically produced
-  // 5x+ winners ($SCAM-class). Re-enable by setting the trigger threshold
-  // back to a real value (e.g. -15) via /api/config/scoring or env.
-  // Set to -100 = effectively never fires (no coin drops 100% in 1h
-  // without being a pure rug, which other guards handle).
-  fallenKnife1hDropPct:       -100,   // was -15; effectively disabled
-  fallenKnife5mReversalPct:      3,
-  fallenKnife5mBuyRatio:       0.60,
-
-  // ── LATE-PUMP HARD GATE (NEW) ──────────────────────────────────────────
-  // Real fix for the dust-call problem: $CHILLBULL was up 105% in 1h
-  // when called and dumped. Set a HARD ceiling — coins already up
-  // beyond latePump1hHardBlock% in 1h get force-WATCHLIST regardless of
-  // score. The late-pump penalty (already in the scorer) handles the
-  // softer ranges. KOL/cluster signals bypass.
-  latePump1hHardBlock:        80,    // pct change in 1h that triggers hard block
+  // ── ALL TODAY'S NEW GUARDS DISABLED — REVERT TO 4/27 12:54pm BASELINE ──
+  // Operator wants the bot's behavior matched to the 4/27 state when SCAM
+  // hit 972x. None of these guards existed at that time — they were all
+  // added today as we tried to filter dust calls, but the side-effect was
+  // killing legitimate alpha. Defaults set so that all guards are inactive.
+  // Each can be re-armed independently via /api/config/scoring if needed.
+  clusterMinScoreToPost:       0,    // 0 = no cluster floor (4/27 behavior)
+  absoluteMinScoreToPost:      0,    // 0 = no absolute floor
+  fallenKnife1hDropPct:     -999,    // -999 = guard never fires (only triggers on impossible drop)
+  fallenKnife5mReversalPct:    3,    // unused while guard is disabled
+  fallenKnife5mBuyRatio:    0.60,    // unused
+  latePump1hHardBlock:       999,    // 999% = effectively no hard block (4/27 had no such gate)
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -1487,8 +1472,13 @@ try {
       sweetSpotBonus:     0,    // user disabled: MCap range isn't a signal
       secondaryBonus:     0,    // user disabled: MCap range isn't a signal
       targetMultiplier:   5.0,  // NEW user-only tuning target
+      // 4/27 baseline restoration — disable today's new guards
+      clusterMinScoreToPost:    0,
+      absoluteMinScoreToPost:   0,
+      fallenKnife1hDropPct:  -999,
+      latePump1hHardBlock:    999,
     };
-    const MIGRATE_FORCE_VERSION = 'v6';   // bump to force re-migration (was v5)
+    const MIGRATE_FORCE_VERSION = 'v7';   // v7 = 4/27 baseline revert (was v6)
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -6487,6 +6477,117 @@ const _resetAiOverridesHandler = (req, res) => {
 app.post('/api/control-station/reset-ai-overrides', _resetAiOverridesHandler);
 app.get('/api/control-station/reset-ai-overrides',  _resetAiOverridesHandler);  // browser-bar trigger
 
+// FULL REVERT to 4/27 12:54pm baseline — when SCAM hit 972x.
+// One endpoint that does everything:
+//   1. Wipes ALL AI/Claude/auto_optimize entries from config_changes
+//   2. Reverts all knobs to pre-AI baseline values via applyConfigValue
+//   3. Clears restrictive AI_CONFIG_OVERRIDES (parallel persistence path)
+//   4. Resets today's new guards (cluster floor, fallen-knife, late-pump
+//      hard block) to disabled-mode defaults
+//   5. Persists everything
+//
+// Net effect: bot behaves like 4/27 12:54pm. None of today's added guards
+// fire, no stale AI overrides restrict, no Claude tightening lurking.
+//
+// Bug fixes (pump.fun v3 URL, dune _db, Helius cache) STAY — system was
+// broken without those, not part of any baseline. User-confirmed wins
+// (topic routing, single-post card, milestone tiers, exit dual-post,
+// bonding panel) STAY — explicit operator preferences.
+const _revertToBaselineHandler = async (req, res) => {
+  setCors(res);
+  const summary = {
+    started: new Date().toISOString(),
+    aiAuditWipe:    null,
+    aiOverrides:    null,
+    scoringGuards:  null,
+    persisted:      false,
+  };
+  try {
+    // Step 1+2: Wipe AI audit + revert knobs (reuse _wipeAiChangesHandler logic
+    // would create a circular ref; do the work directly)
+    const tryParse = (s) => { try { return JSON.parse(s); } catch { return s; } };
+    const rows = dbInstance.prepare(`
+      SELECT id, changed_at, category, source, knob_key, old_value, new_value
+      FROM config_changes ORDER BY id ASC
+    `).all();
+    const aiTouched = new Map();
+    for (const r of rows) {
+      const key = `${r.category}|${r.knob_key}`;
+      const isAi = r.source === 'claude' || r.source === 'auto_optimize';
+      const oldV = r.old_value != null ? tryParse(r.old_value) : null;
+      const newV = r.new_value != null ? tryParse(r.new_value) : null;
+      const entry = aiTouched.get(key) ?? { category: r.category, knob: r.knob_key, preFirstAiValue: null, lastOperatorAfterAI: null, hasOperatorAfter: false, hasAi: false };
+      if (isAi) {
+        if (!entry.hasAi) entry.preFirstAiValue = oldV;
+        entry.hasAi = true;
+      } else if (r.source === 'operator') {
+        if (entry.hasAi) { entry.lastOperatorAfterAI = newV; entry.hasOperatorAfter = true; }
+      }
+      aiTouched.set(key, entry);
+    }
+    let revertedKnobs = 0;
+    for (const entry of aiTouched.values()) {
+      if (!entry.hasAi) continue;
+      const target = entry.hasOperatorAfter ? entry.lastOperatorAfterAI : entry.preFirstAiValue;
+      try {
+        const ok = applyConfigValue(entry.category, entry.knob, target);
+        if (ok) revertedKnobs++;
+      } catch {}
+    }
+    const deleted = dbInstance.prepare(`DELETE FROM config_changes WHERE source IN ('claude','auto_optimize')`).run();
+    summary.aiAuditWipe = { revertedKnobs, deletedRows: deleted.changes };
+
+    // Step 3: Clear restrictive AI overrides
+    const RESTRICTIVE_KEYS = [
+      'maxPairAgeHoursOverride','minPairAgeMinutesOverride','minMarketCapOverride',
+      'maxScoreOverride','minScoreOverride','scoreFloorOverride',
+      'top10ConcentrationBlock','devWalletPctBlock','bundleRiskBlock',
+      'sniperCountBlock','top10HolderBlock','trapSeverityBlock',
+      'walletVelocityMultiplier','winnerWalletMultiplier','smartMoneyWalletMultiplier',
+      'sniperWalletMultiplier','eliteStructureMultiplier','survivorMinMcap',
+      'v5_explosiveAgeMaxMin','v5_explosiveMin5m','v5_postFinal','v5_postRug',
+    ];
+    const overridesRemoved = {};
+    for (const k of RESTRICTIVE_KEYS) {
+      if (k in AI_CONFIG_OVERRIDES) {
+        overridesRemoved[k] = AI_CONFIG_OVERRIDES[k];
+        delete AI_CONFIG_OVERRIDES[k];
+      }
+    }
+    persistAIConfig();
+    summary.aiOverrides = { removedCount: Object.keys(overridesRemoved).length, removed: overridesRemoved };
+
+    // Step 4: Reset today's new SCORING_CONFIG guards to disabled-mode defaults
+    const guardResets = {
+      clusterMinScoreToPost:    0,
+      absoluteMinScoreToPost:   0,
+      fallenKnife1hDropPct:  -999,
+      latePump1hHardBlock:    999,
+    };
+    const guardsBefore = {};
+    for (const [k, v] of Object.entries(guardResets)) {
+      guardsBefore[k] = SCORING_CONFIG[k];
+      SCORING_CONFIG[k] = v;
+    }
+    persistScoringConfig();
+    summary.scoringGuards = { before: guardsBefore, after: guardResets };
+
+    summary.persisted = true;
+    summary.message = '✅ Reverted to 4/27 12:54pm baseline. AI audit wiped, restrictive overrides cleared, today\'s new guards disabled. Bug fixes and user-confirmed UX changes preserved.';
+    summary.finished = new Date().toISOString();
+
+    logEvent('INFO', 'REVERT_TO_BASELINE', `Reverted ${revertedKnobs} knobs, cleared ${Object.keys(overridesRemoved).length} overrides, reset 4 guards`);
+    console.log('[revert-to-baseline] ✓', JSON.stringify(summary));
+    res.json({ ok: true, ...summary });
+  } catch (err) {
+    console.error('[revert-to-baseline] err:', err.message);
+    summary.error = err.message;
+    res.status(500).json({ ok: false, ...summary });
+  }
+};
+app.post('/api/control-station/revert-to-baseline', _revertToBaselineHandler);
+app.get('/api/control-station/revert-to-baseline',  _revertToBaselineHandler);  // browser-bar trigger
+
 app.post('/api/config/revert/:id', (req, res) => {
   setCors(res);
   try {
@@ -7661,6 +7762,17 @@ app.get('/api/control-station', (req, res) => {
 // read req.body, so GET works fine.
 const _autoOptimizeHandler = async (req, res) => {
   setCors(res);
+  // Operator kill-switch — same env var that gates runSelfImproveLoop.
+  // Blocks direct browser-bar / dashboard hits to this endpoint when AI
+  // tuning is locked, so config can't drift through any path.
+  const tuneDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
+  if (tuneDisabled === '1' || tuneDisabled === 'true') {
+    return res.status(423).json({
+      ok: false,
+      error: 'AI tuning locked',
+      detail: 'AUTO_TUNE_DISABLED=1 in Railway env. Unset it to allow Claude to mutate configs again.',
+    });
+  }
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY required' });
   try {
     // Gather LIFETIME performance data (every resolved call) so the AI sees
@@ -8306,9 +8418,25 @@ OUTPUT FORMAT (strict JSON, no markdown):
 const AGENT_SYSTEM_PROMPT = BOT_A_SYSTEM_PROMPT;
 app.post('/api/agent/autonomous', async (req, res) => {
   setCors(res);
+  // Operator kill-switch — when AUTO_TUNE_DISABLED is set, only allow the
+  // ANALYZE mode (read-only Claude analysis); block any mode that can
+  // apply config changes. This is the endpoint runSelfImproveLoop calls
+  // internally, so guarding here also belt-and-suspenders the scheduled tick.
+  const tuneDisabled = String(process.env.AUTO_TUNE_DISABLED || '').toLowerCase();
+  const tuneLocked = tuneDisabled === '1' || tuneDisabled === 'true';
+
   if (!CLAUDE_API_KEY) return res.status(503).json({ ok: false, error: 'CLAUDE_API_KEY not configured' });
 
   const { mode = 'analyze', autoApply = false, sessionId = null } = req.body ?? {};
+
+  // Block autoApply when tuning is locked, regardless of mode
+  if (tuneLocked && autoApply) {
+    return res.status(423).json({
+      ok: false,
+      error: 'AI tuning locked',
+      detail: 'AUTO_TUNE_DISABLED=1 — autoApply rejected. Pass autoApply=false to run analyze-only or unset the env var.',
+    });
+  }
   const sid = sessionId || ('sess_' + Date.now());
 
   // ── GUARDRAIL CHECKS ──────────────────────────────────────────────────────
