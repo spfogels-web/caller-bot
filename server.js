@@ -1428,28 +1428,33 @@ const SCORING_CONFIG_DEFAULTS = {
   scoreTrumpYoungMaxAgeHours:  2,    // "young" = age <= 2h
   scoreTrumpMaxMcap:       80000,    // gem-range cap
 
-  // ── CLUSTER / SMART-MONEY GUARDRAILS ───────────────────────────────────
-  // The webhook fires "cluster" events when ≥3 tracked wallets co-buy a coin
-  // in 10 min. With 10K+ wallets registered, that signal is too noisy to act
-  // on alone — a score-25 coin that 3 random WINNER wallets touched is not
-  // alpha. These two knobs gate cluster-driven posts:
-  //   - clusterMinScoreToPost: cluster signal alone won't override a low
-  //     score (35 is the relaxed bar — vs 45 NEUTRAL baseline)
-  //   - absoluteMinScoreToPost: hard floor below which NOTHING posts, even
-  //     under regime/cluster discount. Failsafe.
-  clusterMinScoreToPost:      35,
-  absoluteMinScoreToPost:     30,
+  // ── CLUSTER / SMART-MONEY GUARDRAILS (RELAXED) ─────────────────────────
+  // RELAXED 2026-04-29 — operator reported less calls and less winners
+  // after the 35-floor went in. With the slimmed 500-wallet webhook,
+  // 3-wallet clusters are quality signals. Lowered to a thin failsafe
+  // (20) that still blocks pure score-10 garbage but lets meaningful
+  // signals through. absoluteMinScoreToPost stays as a hard cliff.
+  clusterMinScoreToPost:      20,    // was 35
+  absoluteMinScoreToPost:     20,    // was 30 — only blocks worst garbage
 
-  // ── FALLEN-KNIFE GUARD ─────────────────────────────────────────────────
-  // When a coin is dropping sharply (1h pct change < fallenKnife1hDropPct),
-  // require buyer-return confirmation in the last 5 min before posting.
-  // Either price already turning up (5m pct >= fallenKnife5mReversalPct) OR
-  // buyers winning in last 5 min (buys5m / total5m >= fallenKnife5mBuyRatio).
-  // Stops "catching falling knives" — coins mid-dump that look OK on 1h
-  // aggregates but are still bleeding. KOL signals bypass.
-  fallenKnife1hDropPct:        -15,    // 1h drop threshold to trigger guard
-  fallenKnife5mReversalPct:      3,    // 5m price reversal to confirm bottom
-  fallenKnife5mBuyRatio:       0.60,   // alt: 5m buy-side share to confirm
+  // ── FALLEN-KNIFE GUARD (DISABLED BY DEFAULT) ───────────────────────────
+  // DISABLED 2026-04-29 — operator wants 4/27 call cadence back. The guard
+  // was filtering legitimate dip-buy entries that historically produced
+  // 5x+ winners ($SCAM-class). Re-enable by setting the trigger threshold
+  // back to a real value (e.g. -15) via /api/config/scoring or env.
+  // Set to -100 = effectively never fires (no coin drops 100% in 1h
+  // without being a pure rug, which other guards handle).
+  fallenKnife1hDropPct:       -100,   // was -15; effectively disabled
+  fallenKnife5mReversalPct:      3,
+  fallenKnife5mBuyRatio:       0.60,
+
+  // ── LATE-PUMP HARD GATE (NEW) ──────────────────────────────────────────
+  // Real fix for the dust-call problem: $CHILLBULL was up 105% in 1h
+  // when called and dumped. Set a HARD ceiling — coins already up
+  // beyond latePump1hHardBlock% in 1h get force-WATCHLIST regardless of
+  // score. The late-pump penalty (already in the scorer) handles the
+  // softer ranges. KOL/cluster signals bypass.
+  latePump1hHardBlock:        80,    // pct change in 1h that triggers hard block
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -5028,6 +5033,26 @@ async function processCandidate(candidate, isRescan = false) {
           console.log(`[auto-caller] 📊 Floor blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} (${isClusterSignal ? 'cluster' : marketRegime}) → WATCHLIST`);
           finalDecision = 'WATCHLIST';
         }
+      }
+    }
+
+    // ── LATE-PUMP HARD GATE: block coins already over-extended in 1h ─────
+    // $CHILLBULL was +105% in 1h when called and dumped. Coins this far up
+    // in a single hour are statistically over-extended — buyers run out
+    // before the next leg can form. Hard block above latePump1hHardBlock%
+    // regardless of score. KOL/cluster signals still bypass — KOL conviction
+    // is independent of price action, and cluster signals carry their own
+    // confirmation in the 3-wallet co-buy.
+    {
+      const c = enrichedCandidate;
+      const isWalletBypass = c._smartMoney?.kind === 'kol' || c._smartMoney?.kind === 'cluster';
+      const hardBlock = SCORING_CONFIG.latePump1hHardBlock ?? 80;
+      const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
+      if (finalDecision === 'AUTO_POST' && !isWalletBypass && pct1h >= hardBlock) {
+        logEvent('INFO', 'LATE_PUMP_HARD_BLOCK',
+          `${c.token ?? ca.slice(0,6)} 1h=+${pct1h.toFixed(1)}% ≥ ${hardBlock}% → WATCHLIST (over-extended)`);
+        console.log(`[auto-caller] 🚫 Late-pump hard block — $${c.token ?? ca.slice(0,6)} +${pct1h.toFixed(1)}% in 1h is over-extended → WATCHLIST`);
+        finalDecision = 'WATCHLIST';
       }
     }
 
