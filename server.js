@@ -2421,13 +2421,26 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
   const photoSrc = coinImageUrl || _bannerFileId || BANNER_IMAGE_URL;
   const usingCoinImage = !!coinImageUrl;
 
+  // Caption safety. Telegram caps photo captions at 1024 chars. If we
+  // truncate naive-style we can cut INSIDE an HTML tag (e.g. `<a href="…`)
+  // which makes Telegram reject the whole photo with "Bad Request: can't
+  // parse entities". When over the limit, rebuild the caption as plain
+  // text (strip HTML) — cleaner truncation, photo always sends. Short
+  // captions keep their HTML formatting.
   let safeCaption = caption;
+  let parseMode  = 'HTML';
   if (safeCaption.length > 1020) {
-    safeCaption = safeCaption.slice(0, 1017) + '…';
-    console.warn(`[TG] Caption truncated from ${caption.length} to 1020 chars`);
+    const stripped = safeCaption
+      .replace(/<a\s+[^>]*href="([^"]*)"[^>]*>([^<]*)<\/a>/gi, '$2 ($1)') // unwrap links
+      .replace(/<\/?[bi]>/gi, '')                                          // unbold/italic
+      .replace(/<[^>]+>/g, '')                                              // strip any remaining tags
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'); // unescape entities
+    safeCaption = stripped.length > 1020 ? stripped.slice(0, 1017) + '…' : stripped;
+    parseMode = null;  // plain text, no parsing
+    console.warn(`[TG] Caption stripped to plain text (was ${caption.length}, now ${safeCaption.length}) — HTML truncation would have broken entities`);
   }
 
-  console.log(`[TG] Sending ${usingCoinImage ? 'coin' : 'banner'}+caption (${safeCaption.length} chars)`);
+  console.log(`[TG] Sending ${usingCoinImage ? 'coin' : 'banner'}+caption (${safeCaption.length} chars, ${parseMode || 'plain'})`);
 
   let photoMessageId = null;
 
@@ -2439,7 +2452,7 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
         chat_id:    TELEGRAM_GROUP_CHAT_ID,
         photo:      photoSrc,
         caption:    safeCaption,
-        parse_mode: 'HTML',
+        ...(parseMode ? { parse_mode: parseMode } : {}),
       })),
       signal: AbortSignal.timeout(20_000),
     });
