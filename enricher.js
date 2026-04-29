@@ -533,8 +533,49 @@ async function enrichWithHelius(ca, pairAddress = null, candidate = null) {
  * FIXED: Query pair address first for swap transactions.
  * On Solana, new Raydium pairs' swap activity is on the pool address,
  * not the token's mint address. Old code queried the mint = 0 results.
+ *
+ * CREDIT-SAVE (2026-04): Helius bills /v0/addresses/{addr}/transactions at
+ * 100 credits per call vs 1 credit for vanilla RPC. With rescans firing 4
+ * times in the first 15 min after detection, the same CA was costing
+ * 500+ credits per candidate just for swap history. Module-level cache with
+ * 5-min TTL collapses repeat fetches into a single billed call. Live stats
+ * exposed via getHeliusTxCacheStats() for the dashboard health view.
  */
+const HELIUS_TX_CACHE_TTL_MS = 5 * 60 * 1000;
+const _heliusTxCache = new Map();           // key (pairAddress || ca) → { at, data }
+const _heliusTxCacheStats = { hits: 0, misses: 0, fetched: 0, cachedPair: 0, cachedCa: 0 };
+
+export function getHeliusTxCacheStats() {
+  const total = _heliusTxCacheStats.hits + _heliusTxCacheStats.misses;
+  return {
+    ..._heliusTxCacheStats,
+    total,
+    hitRatePct: total > 0 ? Math.round((_heliusTxCacheStats.hits / total) * 100) : 0,
+    cacheSize:  _heliusTxCache.size,
+    ttlMinutes: HELIUS_TX_CACHE_TTL_MS / 60_000,
+  };
+}
+
+// Periodic cleanup so the Map doesn't grow unbounded as new CAs enter the
+// system. Runs every minute and drops entries older than the TTL.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _heliusTxCache) {
+    if (now - v.at > HELIUS_TX_CACHE_TTL_MS) _heliusTxCache.delete(k);
+  }
+}, 60_000).unref?.();
+
 async function fetchHeliusTransactions(ca, pairAddress, key) {
+  const cacheKey = pairAddress || ca;
+  const now = Date.now();
+  const cached = _heliusTxCache.get(cacheKey);
+  if (cached && now - cached.at < HELIUS_TX_CACHE_TTL_MS) {
+    _heliusTxCacheStats.hits++;
+    console.log(`[enricher:helius] ⚡ cache hit ${cacheKey.slice(0,8)}… (saved 100 credits, age ${Math.round((now - cached.at)/1000)}s)`);
+    return cached.data;
+  }
+  _heliusTxCacheStats.misses++;
+
   // Try pair address first — this is where Raydium swap txns live
   if (pairAddress && pairAddress !== ca) {
     const result = await safeFetch(
@@ -543,9 +584,12 @@ async function fetchHeliusTransactions(ca, pairAddress, key) {
       'helius:tx:pair',
       HELIUS_TIMEOUT
     );
+    _heliusTxCacheStats.fetched++;
 
     if (result && Array.isArray(result) && result.length > 0) {
       console.log(`[enricher:helius] ✓ ${result.length} txns via pairAddress`);
+      _heliusTxCache.set(cacheKey, { at: now, data: result });
+      _heliusTxCacheStats.cachedPair++;
       return result;
     }
     console.log('[enricher:helius] pairAddress txns empty, trying token CA...');
@@ -558,9 +602,13 @@ async function fetchHeliusTransactions(ca, pairAddress, key) {
     'helius:tx:ca',
     HELIUS_TIMEOUT
   );
+  _heliusTxCacheStats.fetched++;
 
   if (result && Array.isArray(result)) {
     console.log(`[enricher:helius] ${result.length > 0 ? '✓' : '✗'} ${result.length} txns via tokenCA`);
+    // Cache positive AND empty results — empty cached saves a re-fetch on rescan
+    _heliusTxCache.set(cacheKey, { at: now, data: result });
+    _heliusTxCacheStats.cachedCa++;
   }
   return result;
 }

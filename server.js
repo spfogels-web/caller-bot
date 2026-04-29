@@ -49,7 +49,7 @@ import {
 
 // ─── Modules ──────────────────────────────────────────────────────────────────
 import { runScanner, fetchPairByAddress, normalizePair, getScannerWatchlistSnapshot } from './scanner.js';
-import { enrichCandidate, enrichCandidates }                                           from './enricher.js';
+import { enrichCandidate, enrichCandidates, getHeliusTxCacheStats }                    from './enricher.js';
 import { computeFullScore, formatScoreForClaude, getStage }                            from './scorer.js';
 import {
   initWatchlist, addToRetest, addToWatchlist, addToBlocklist,
@@ -13324,6 +13324,27 @@ const _solscanDiagHandler = async (req, res) => {
 };
 app.get('/api/diagnostics/solscan',  _solscanDiagHandler);
 app.post('/api/diagnostics/solscan', _solscanDiagHandler);
+
+// Helius Enhanced API tx cache stats — verify the credit-save cache is
+// actually deflecting calls. Healthy hit rate after warmup is 50-70%
+// (most CAs get rescanned 4× within the 5-min TTL). If hit rate stays
+// near 0% after an hour of normal traffic, the cache isn't behaving.
+const _heliusTxCacheHandler = (req, res) => {
+  setCors(res);
+  try {
+    const stats = getHeliusTxCacheStats();
+    res.json({
+      ok: true,
+      ...stats,
+      creditsSavedEstimate: stats.hits * 100,
+      monthlySavingsEstimate: stats.total > 0
+        ? Math.round((stats.hits / stats.total) * 100) + '% of Enhanced API burn deflected'
+        : 'no traffic yet',
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+};
+app.get('/api/diagnostics/helius-tx-cache',  _heliusTxCacheHandler);
+app.post('/api/diagnostics/helius-tx-cache', _heliusTxCacheHandler);
 
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
