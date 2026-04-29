@@ -6418,6 +6418,75 @@ app.get('/api/config/audit', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// Reset AI_CONFIG_OVERRIDES — clears the kv_store-persisted AI overrides
+// that lived OUTSIDE the config_changes audit log. The wipe-ai-changes
+// endpoint targets the audit log; this targets the parallel persistence
+// path. Removes the operator-known restrictive overrides (max pair age,
+// min mcap floor, tightened top10/dev blocks) that survived multiple
+// wipes because they predate or bypass the audit table.
+//
+// Operator confirmed live config still had:
+//   maxPairAgeHoursOverride=1, minMarketCapOverride=25000, top10=25pct,
+//   dev=3.5pct, etc. — much tighter than the 4/27 baseline. Result: less
+//   calls, less winners.
+//
+// Behavior: removes the listed restrictive keys, leaves user-curated keys
+// (gemTargetMin/Max, sweetSpot ranges, agent settings) intact. Returns the
+// before/after diff so operator can audit. Idempotent — safe to fire
+// multiple times.
+const _resetAiOverridesHandler = (req, res) => {
+  setCors(res);
+  try {
+    const before = { ...AI_CONFIG_OVERRIDES };
+    // Keys we want to clear so they fall back to scorer defaults / NULL behavior.
+    // Do NOT remove user-curated entries (gemTargetMin/Max, agent toggles).
+    const RESTRICTIVE_KEYS = [
+      'maxPairAgeHoursOverride',     // was 1h — kills coins older than 1h
+      'minPairAgeMinutesOverride',
+      'minMarketCapOverride',         // was 25000 — kills sub-25K entries
+      'maxScoreOverride',             // suspicious cap
+      'minScoreOverride',             // overrides minScoreToPost
+      'scoreFloorOverride',
+      'top10ConcentrationBlock',      // tightened to 25% — was 28% on 4/27
+      'devWalletPctBlock',            // tightened to 3.5% — was 4.5% on 4/27
+      'bundleRiskBlock',
+      'sniperCountBlock',
+      'top10HolderBlock',
+      'trapSeverityBlock',
+      'walletVelocityMultiplier',
+      'winnerWalletMultiplier',
+      'smartMoneyWalletMultiplier',
+      'sniperWalletMultiplier',
+      'eliteStructureMultiplier',
+      'survivorMinMcap',
+      'v5_explosiveAgeMaxMin',
+      'v5_explosiveMin5m',
+      'v5_postFinal',
+      'v5_postRug',
+    ];
+    const removed = {};
+    for (const k of RESTRICTIVE_KEYS) {
+      if (k in AI_CONFIG_OVERRIDES) {
+        removed[k] = AI_CONFIG_OVERRIDES[k];
+        delete AI_CONFIG_OVERRIDES[k];
+      }
+    }
+    persistAIConfig();
+    logEvent('INFO', 'AI_OVERRIDES_RESET', `Cleared ${Object.keys(removed).length} restrictive AI overrides`);
+    res.json({
+      ok: true,
+      removed,
+      removedCount: Object.keys(removed).length,
+      remainingOverrides: { ...AI_CONFIG_OVERRIDES },
+      message: 'Cleared the restrictive AI_CONFIG_OVERRIDES that survived the wipe-ai-changes path. Bot will now use scorer defaults (less filtering = more calls). User-curated keys (gemTargetMin/Max, agent settings) preserved.',
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.post('/api/control-station/reset-ai-overrides', _resetAiOverridesHandler);
+app.get('/api/control-station/reset-ai-overrides',  _resetAiOverridesHandler);  // browser-bar trigger
+
 app.post('/api/config/revert/:id', (req, res) => {
   setCors(res);
   try {
