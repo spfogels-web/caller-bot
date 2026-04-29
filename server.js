@@ -1440,6 +1440,18 @@ const SCORING_CONFIG_DEFAULTS = {
   fallenKnife5mReversalPct:    3,    // unused while guard is disabled
   fallenKnife5mBuyRatio:    0.60,    // unused
   latePump1hHardBlock:       999,    // 999% = effectively no hard block (4/27 had no such gate)
+
+  // ── POST-MIGRATION DUMP GUARD ──────────────────────────────────────────
+  // Operator's strategic insight: pump.fun migration is the #1 dump trap.
+  // Pre-bond → slow climb → migration spike → smart money exits → retail
+  // FOMOs the top → sharp dump. Block AUTO_POST when migrated coin is
+  // showing the dump pattern (recent spike + active selling) UNLESS a
+  // clear reversal is forming. KOL/cluster signals bypass.
+  postMigSpike1hPct:          50,    // 1h pct change to flag "just migrated"
+  postMigDumpPct:             -3,    // 5m pct change that flags active dumping
+  postMigBuyRatioMin:       0.45,    // 5m buyer share below this = sellers winning
+  postMigReversalPct:          3,    // 5m up sharp = reversal, allow call
+  postMigReversalRatio:     0.65,    // 5m buyer share = reversal, allow call
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -5179,6 +5191,66 @@ async function processCandidate(candidate, isRescan = false) {
           logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${tier} → WATCHLIST`);
           console.log(`[auto-caller] 📊 Floor blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} (${isClusterSignal ? 'cluster' : marketRegime}) → WATCHLIST`);
           finalDecision = 'WATCHLIST';
+        }
+      }
+    }
+
+    // ── POST-MIGRATION DUMP GUARD ─────────────────────────────────────────
+    // Operator insight: the migration event is the #1 dump trap on
+    // pump.fun coins. Sequence:
+    //   1. Pre-bond → slow climb (early buyers cheap)
+    //   2. Bonding → hype spike (FOMO peaks)
+    //   3. Migration → first real liquidity unlock (smart money EXITS)
+    //   4. Post-mig → retail FOMO + insiders trim → sharp dump
+    //
+    // Block the call when ALL three are true:
+    //   - Coin is in MIGRATED state (pump.fun graduated to Raydium)
+    //   - Recent vertical move (high 1h pct change — likely the migration spike)
+    //   - Active selling NOW (5m negative OR sellers winning the 5m order book)
+    // UNLESS we see a clear reversal forming (5m up sharp OR buyers
+    // dominating last 5m).
+    //
+    // KOL/cluster signals bypass — their post-migration buy IS the
+    // confirmation of stability we'd otherwise wait for.
+    //
+    // Tunable via SCORING_CONFIG (set via /api/config/scoring):
+    //   postMigSpike1hPct   — 1h move that flags "just migrated" (default +50%)
+    //   postMigDumpPct      — 5m drop that flags "dumping now" (default -3%)
+    //   postMigBuyRatioMin  — 5m buyer share below this = sellers winning (0.45)
+    //   postMigReversalPct  — 5m up that overrides the block (default +3%)
+    //   postMigReversalRatio— 5m buyer share that overrides (default 0.65)
+    {
+      const c = enrichedCandidate;
+      const isWalletBypass = c._smartMoney?.kind === 'kol' || c._smartMoney?.kind === 'cluster';
+      const isMigrated     = c.pumpFunMigrated === true || c.pumpFunStage === 'MIGRATED';
+
+      if (finalDecision === 'AUTO_POST' && isMigrated && !isWalletBypass) {
+        const spike1h    = SCORING_CONFIG.postMigSpike1hPct      ?? 50;
+        const dumpPct    = SCORING_CONFIG.postMigDumpPct         ?? -3;
+        const buyRatioMin= SCORING_CONFIG.postMigBuyRatioMin     ?? 0.45;
+        const revPct     = SCORING_CONFIG.postMigReversalPct     ?? 3;
+        const revRatio   = SCORING_CONFIG.postMigReversalRatio   ?? 0.65;
+
+        const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
+        const pct5m = Number(c.priceChange5m ?? c.pct_change_5m ?? 0);
+        const b5    = Number(c.buys5m  ?? 0);
+        const s5    = Number(c.sells5m ?? 0);
+        const ratio5m = (b5 + s5) > 0 ? b5 / (b5 + s5) : null;
+
+        const recentSpike     = pct1h >= spike1h;
+        const activelyDumping = pct5m <= dumpPct;
+        const sellerDominance = ratio5m != null && ratio5m < buyRatioMin;
+        const reversalSignal  = pct5m >= revPct || (ratio5m != null && ratio5m >= revRatio);
+
+        if (recentSpike && (activelyDumping || sellerDominance) && !reversalSignal) {
+          logEvent('INFO', 'POST_MIG_DUMP_BLOCK',
+            `${c.token ?? ca.slice(0,6)} migrated · 1h=+${pct1h.toFixed(1)}% 5m=${pct5m.toFixed(1)}% buys5m=${b5} sells5m=${s5} ratio=${ratio5m != null ? (ratio5m*100).toFixed(0)+'%' : 'n/a'} → migration-dump pattern, WATCHLIST`);
+          console.log(`[auto-caller] 🪂 Post-mig dump block — $${c.token ?? ca.slice(0,6)} 1h=+${pct1h.toFixed(1)}% 5m=${pct5m.toFixed(1)}% sellers winning → WATCHLIST`);
+          finalDecision = 'WATCHLIST';
+        } else if (recentSpike && reversalSignal) {
+          // Migrated coin with reversal signal — log so we can audit which calls survived
+          logEvent('INFO', 'POST_MIG_REVERSAL_PASS',
+            `${c.token ?? ca.slice(0,6)} migrated · post-spike reversal confirmed: 5m=${pct5m.toFixed(1)}% ratio=${ratio5m != null ? (ratio5m*100).toFixed(0)+'%' : 'n/a'}`);
         }
       }
     }
