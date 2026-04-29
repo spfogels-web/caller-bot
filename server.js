@@ -2236,6 +2236,57 @@ async function uploadBannerToTelegram() {
   }
 }
 
+// Multi-source coin image resolver. Tries the enricher's already-set
+// imageUrl first (DexScreener pair.info OR pump.fun image_uri). If absent
+// or pump.fun's IPFS gateway has been flaky for Telegram, falls back to
+// Birdeye's Premium /defi/token_overview which serves logos from a fast
+// CDN. Returns the first non-empty URL or null.
+//
+// Cache: per-CA, 30 min TTL — the same coin's image rarely changes within
+// a call's life, and we don't want to re-hit Birdeye on rescans.
+const _coinImageCache = new Map();   // ca → { at, url }
+const COIN_IMAGE_CACHE_TTL = 30 * 60_000;
+
+async function resolveCoinImage(candidate) {
+  const ca = candidate?.contractAddress;
+  if (!ca) return null;
+  const now = Date.now();
+  const cached = _coinImageCache.get(ca);
+  if (cached && now - cached.at < COIN_IMAGE_CACHE_TTL) return cached.url;
+
+  // Source 1 — already set by enricher (DexScreener pair.info OR pump.fun image_uri)
+  if (candidate.imageUrl) {
+    _coinImageCache.set(ca, { at: now, url: candidate.imageUrl });
+    return candidate.imageUrl;
+  }
+
+  // Source 2 — Birdeye Premium logo (CDN-cached, reliable for most SPL tokens)
+  const birdKey = process.env.BIRDEYE_API_KEY;
+  if (birdKey) {
+    try {
+      const r = await fetch(
+        `https://public-api.birdeye.so/defi/token_overview?address=${encodeURIComponent(ca)}`,
+        {
+          headers: { 'X-API-KEY': birdKey, 'accept': 'application/json', 'x-chain': 'solana' },
+          signal: AbortSignal.timeout(5_000),
+        }
+      );
+      if (r.ok) {
+        const j = await r.json();
+        const logoURI = j?.data?.logoURI ?? j?.data?.logo ?? j?.data?.extensions?.logoURI;
+        if (logoURI) {
+          _coinImageCache.set(ca, { at: now, url: logoURI });
+          return logoURI;
+        }
+      }
+    } catch (err) { /* swallow — let null fall through to banner */ }
+  }
+
+  // Cache the null result too (don't re-attempt for 30 min)
+  _coinImageCache.set(ca, { at: now, url: null });
+  return null;
+}
+
 // Emergency text-only fallback — direct sendMessage with retries.
 // Used when sendCallAlertWithImage exhausts all photo paths. Splits very
 // long captions into chunks so Telegram's 4096-char limit doesn't drop
@@ -5590,20 +5641,16 @@ async function processCandidate(candidate, isRescan = false) {
       {
       // Use v8 caption builder that includes OpenAI decision layer
       const caption  = buildV8Caption(enrichedCandidate, verdict, scoreResult, openAIDecision);
-      // Coin image for the call card. Fall through:
-      //   1. enricher.js's enriched.imageUrl — populated from
-      //        a) DexScreener pair.info.imageUrl (when DS has indexed it), or
-      //        b) pump.fun image_uri (the IPFS URL pump.fun returns for the
-      //           coin's icon — works for fresh pump.fun coins that DS hasn't
-      //           indexed yet, which is most newborns)
-      //   2. null → sendCallAlertWithImage falls back to the Pulse banner
-      //
-      // Removed the dd.dexscreener.com CDN URL fallback that we used to have
-      // in step 2 — it returns HTTP 301 (redirect) for fresh coins, and
-      // Telegram's photo URL fetcher drops the request when the URL redirects
-      // instead of returning the image content directly. That was the silent
-      // failure mode where call cards were arriving as text-only.
-      const coinImg = enrichedCandidate.imageUrl ?? null;
+      // Coin image for the call card. Multi-source resolver tries several
+      // CDNs in order until one returns a 200 image, so every call gets a
+      // visual identity even when individual sources fail. Fall through:
+      //   1. enriched.imageUrl (DexScreener pair.info.imageUrl OR pump.fun
+      //      image_uri — already pulled by enricher.js)
+      //   2. Birdeye token_overview logoURI (Premium endpoint, CDN-cached,
+      //      fast) — covers tokens that pump.fun's IPFS gateway can't
+      //      serve to Telegram quickly
+      //   3. null → sendCallAlertWithImage falls back to Pulse banner
+      const coinImg = await resolveCoinImage(enrichedCandidate);
 
       // ── CA beacon FIRST (Phanes, Sect Board, leaderboard trackers) ──────
       // Posted as a plain-text message with just the CA — mirrors the way
