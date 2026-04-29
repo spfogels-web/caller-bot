@@ -14125,6 +14125,119 @@ const _leaderboardBannerDiagHandler = async (req, res) => {
 app.get('/api/diagnostics/leaderboard-banner',  _leaderboardBannerDiagHandler);
 app.post('/api/diagnostics/leaderboard-banner', _leaderboardBannerDiagHandler);
 
+// Call-card photo diagnostic — simulate the exact call-card flow for a
+// specific CA, run resolveCoinImage AND attempt a photo send to admin DM.
+// Reports each source's result + the final Telegram response so we can
+// pinpoint why a real call dropped the image.
+//
+// Usage: /api/diagnostics/call-card?ca=<contract_address>
+const _callCardDiagHandler = async (req, res) => {
+  setCors(res);
+  const ca = (req.query?.ca || (req.body || {}).ca || '').trim();
+  if (!ca || ca.length < 32) {
+    return res.status(400).json({ ok: false, error: 'Pass a valid Solana CA via ?ca=...' });
+  }
+
+  const out = {
+    ca,
+    bannerFileIdCached: !!_bannerFileId,
+    bannerImageUrl:     BANNER_IMAGE_URL,
+    sources:            {},
+    sendTest:           null,
+  };
+
+  // Run each image source independently so we see which ones have it
+  const heliusKey = process.env.HELIUS_API_KEY;
+  if (heliusKey) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'imgdiag', method: 'getAsset', params: { id: ca } }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      const j = await r.json().catch(() => ({}));
+      out.sources.helius_das = {
+        status: r.status,
+        image:  j?.result?.content?.links?.image ?? j?.result?.content?.metadata?.image ?? null,
+        name:   j?.result?.content?.metadata?.name ?? null,
+      };
+    } catch (err) { out.sources.helius_das = { error: err.message }; }
+  }
+
+  const birdKey = process.env.BIRDEYE_API_KEY;
+  if (birdKey) {
+    try {
+      const r = await fetch(
+        `https://public-api.birdeye.so/defi/token_overview?address=${encodeURIComponent(ca)}`,
+        { headers: { 'X-API-KEY': birdKey, 'accept': 'application/json', 'x-chain': 'solana' },
+          signal: AbortSignal.timeout(8_000) }
+      );
+      const j = await r.json().catch(() => ({}));
+      out.sources.birdeye = {
+        status: r.status,
+        logoURI: j?.data?.logoURI ?? j?.data?.logo ?? j?.data?.extensions?.logoURI ?? null,
+        name:    j?.data?.name ?? null,
+      };
+    } catch (err) { out.sources.birdeye = { error: err.message }; }
+  }
+
+  if (ca.endsWith('pump')) {
+    try {
+      const r = await fetch(`https://frontend-api-v3.pump.fun/coins/${ca}`, {
+        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      const j = await r.json().catch(() => ({}));
+      out.sources.pumpfun = {
+        status: r.status,
+        image_uri: j?.image_uri ?? j?.image ?? null,
+        name:      j?.name ?? null,
+        complete:  j?.complete,
+      };
+    } catch (err) { out.sources.pumpfun = { error: err.message }; }
+  }
+
+  // Resolve via the same code path the call card uses
+  const fakeCandidate = { contractAddress: ca, imageUrl: null, token: 'DIAG' };
+  const resolvedUrl = await resolveCoinImage(fakeCandidate);
+  out.resolvedImage = resolvedUrl;
+
+  // Attempt the actual photo send to admin DM with the resolved URL
+  if (TELEGRAM_BOT_TOKEN && ADMIN_TELEGRAM_ID) {
+    const photoSrc = resolvedUrl || _bannerFileId || BANNER_IMAGE_URL;
+    out.sendTest = { photoSrcUsed: String(photoSrc).slice(0, 100) };
+    try {
+      const r = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: ADMIN_TELEGRAM_ID,
+          photo: photoSrc,
+          caption: `🩺 Call-card diag for ${ca.slice(0,8)}…`,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const j = await r.json().catch(() => ({}));
+      out.sendTest.status = r.status;
+      out.sendTest.ok = r.ok && j.ok !== false;
+      out.sendTest.bodyDescription = j?.description ?? j?.error_message ?? null;
+      out.sendTest.bodySnippet     = JSON.stringify(j).slice(0, 300);
+    } catch (err) {
+      out.sendTest.error = err.message;
+    }
+  }
+
+  // Summary
+  const got = (out.sources.helius_das?.image ? 'helius ' : '')
+            + (out.sources.birdeye?.logoURI  ? 'birdeye ' : '')
+            + (out.sources.pumpfun?.image_uri ? 'pumpfun ' : '');
+  out.summary = `Image sources hit: ${got || 'NONE'}. Resolved URL: ${resolvedUrl ? 'yes' : 'no'}. Photo send: ${out.sendTest?.ok ? '✅' : '❌'}`;
+  res.json(out);
+};
+app.get('/api/diagnostics/call-card',  _callCardDiagHandler);
+app.post('/api/diagnostics/call-card', _callCardDiagHandler);
+
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
