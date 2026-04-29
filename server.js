@@ -1452,6 +1452,15 @@ const SCORING_CONFIG_DEFAULTS = {
   postMigBuyRatioMin:       0.45,    // 5m buyer share below this = sellers winning
   postMigReversalPct:          3,    // 5m up sharp = reversal, allow call
   postMigReversalRatio:     0.65,    // 5m buyer share = reversal, allow call
+
+  // ── IGNITION PATTERN (slow build = real move) ──────────────────────────
+  // Operator's framework: "Slow build = real move. Fast spike = exit
+  // liquidity." Avoid first-spike, first-breakout, migration-hype patterns.
+  // Prefer consolidation, higher lows, re-accumulation.
+  // The vertical-spike block in processCandidate uses these thresholds.
+  verticalSpike5mPct:         30,    // 5m move ≥ this = vertical spike (block unless slow build)
+  slowBuildMin1hPct:           5,    // 1h pct change minimum for "slow build" context
+  slowBuildMax1hPct:          50,    // 1h pct change maximum (above this = vertical, not gradual)
 };
 let SCORING_CONFIG = { ...SCORING_CONFIG_DEFAULTS };
 try {
@@ -5190,6 +5199,53 @@ async function processCandidate(candidate, isRescan = false) {
           const tier = isClusterSignal ? `cluster-relaxed ${effectiveFloor}` : `${effectiveFloor} (${marketRegime})`;
           logEvent('INFO', 'REGIME_FLOOR', `${enrichedCandidate.token ?? ca.slice(0,6)} score=${scoreResult.score} < ${tier} → WATCHLIST`);
           console.log(`[auto-caller] 📊 Floor blocked — $${enrichedCandidate.token ?? ca.slice(0,6)} score ${scoreResult.score} < ${effectiveFloor} (${isClusterSignal ? 'cluster' : marketRegime}) → WATCHLIST`);
+          finalDecision = 'WATCHLIST';
+        }
+      }
+    }
+
+    // ── VERTICAL-SPIKE BLOCK ──────────────────────────────────────────────
+    // Operator's strategic framework: "Slow build = real move. Fast spike =
+    // exit liquidity." The bot needs to AVOID:
+    //   - First spike (one big candle, 1-2 wallets pumping)
+    //   - First breakout with no consolidation
+    //   - Vertical-only moves with no higher-lows structure
+    // and PREFER consolidation, higher lows, re-accumulation.
+    //
+    // This guard catches the vertical-spike trap by blocking calls where
+    // the coin moved too fast in the last 5 minutes AND hasn't shown any
+    // consolidation. Specifically:
+    //   - 5m pct change ≥ verticalSpike5mPct (default +30% — one giant candle)
+    //   - AND no slow-build context (1h didn't trend gradually before this)
+    //
+    // Bypass: KOL/cluster signals (their entry IS the conviction we'd
+    // otherwise wait for) and explicit "score-trump" override paths.
+    //
+    // Tunable via SCORING_CONFIG:
+    //   verticalSpike5mPct  — 5m move that flags vertical (default 30%)
+    //   slowBuildMin1hPct   — 1h pct that signals consolidation (default +5%)
+    //   slowBuildMax1hPct   — 1h pct ceiling for slow build (default +50%)
+    {
+      const c = enrichedCandidate;
+      const isWalletBypass = c._smartMoney?.kind === 'kol' || c._smartMoney?.kind === 'cluster';
+      const isScoreTrump   = !!c._scoreTrump;
+      if (finalDecision === 'AUTO_POST' && !isWalletBypass && !isScoreTrump) {
+        const spike5m = SCORING_CONFIG.verticalSpike5mPct ?? 30;
+        const buildMin = SCORING_CONFIG.slowBuildMin1hPct ?? 5;
+        const buildMax = SCORING_CONFIG.slowBuildMax1hPct ?? 50;
+        const pct5m = Number(c.priceChange5m ?? c.pct_change_5m ?? 0);
+        const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
+
+        const isVertical = pct5m >= spike5m;
+        // "Slow build" = 1h move is in a moderate positive zone (gradual
+        // accumulation), not a vertical move. If we have slow-build context
+        // a single 5m candle isn't necessarily a trap — it's the second leg.
+        const hasSlowBuildContext = pct1h >= buildMin && pct1h <= buildMax;
+
+        if (isVertical && !hasSlowBuildContext) {
+          logEvent('INFO', 'VERTICAL_SPIKE_BLOCK',
+            `${c.token ?? ca.slice(0,6)} 5m=+${pct5m.toFixed(1)}% 1h=+${pct1h.toFixed(1)}% — vertical spike without slow-build context, WATCHLIST`);
+          console.log(`[auto-caller] ⚡ Vertical-spike block — $${c.token ?? ca.slice(0,6)} 5m=+${pct5m.toFixed(1)}% pumped fast without consolidation → WATCHLIST`);
           finalDecision = 'WATCHLIST';
         }
       }
