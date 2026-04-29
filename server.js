@@ -13521,6 +13521,81 @@ const _birdeyeDiagHandler = async (req, res) => {
 app.get('/api/diagnostics/birdeye',  _birdeyeDiagHandler);
 app.post('/api/diagnostics/birdeye', _birdeyeDiagHandler);
 
+// Leaderboard banner diagnostic — operator reported the /lb banner stopped
+// rendering. Tests three things in order:
+//   1. Is LEADERBOARD_BANNER_URL reachable (HEAD check)?
+//   2. Is the cached _leaderboardBannerFileId stale (try sending it to admin DM)?
+//   3. Does a fresh URL upload work (force-reset the cache and retry)?
+// Reports the outcome of each step so we can pinpoint why the photo isn't
+// showing up. Sends the test result to ADMIN_TELEGRAM_ID via DM so you see
+// it without polluting the group.
+const _leaderboardBannerDiagHandler = async (req, res) => {
+  setCors(res);
+  const out = {
+    leaderboardBannerUrl:  LEADERBOARD_BANNER_URL,
+    cachedFileId:          _leaderboardBannerFileId
+                            ? _leaderboardBannerFileId.slice(0,16) + '…' + _leaderboardBannerFileId.slice(-6)
+                            : null,
+    adminDmReady:          !!ADMIN_TELEGRAM_ID,
+    tests:                 {},
+  };
+  // Step 1: HEAD check the URL
+  try {
+    const r = await fetch(LEADERBOARD_BANNER_URL, { method: 'HEAD', signal: AbortSignal.timeout(8_000) });
+    out.tests.url_head = {
+      status:        r.status,
+      ok:            r.ok,
+      contentType:   r.headers.get('content-type'),
+      contentLength: r.headers.get('content-length'),
+    };
+  } catch (err) { out.tests.url_head = { error: err.message }; }
+
+  // Step 2: Force-reset cache and try a fresh URL upload to admin DM
+  if (TELEGRAM_BOT_TOKEN && ADMIN_TELEGRAM_ID) {
+    const previousId = _leaderboardBannerFileId;
+    _leaderboardBannerFileId = null;
+    try {
+      const r = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: ADMIN_TELEGRAM_ID,
+          photo:   LEADERBOARD_BANNER_URL,
+          caption: '🩺 Leaderboard banner diagnostic test',
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const text = await r.text();
+      let body = null;
+      try { body = JSON.parse(text); } catch { body = text.slice(0, 250); }
+      out.tests.fresh_url_upload = {
+        status:      r.status,
+        ok:          r.ok,
+        bodySnippet: typeof body === 'string' ? body : JSON.stringify(body).slice(0, 250),
+      };
+      if (r.ok && body?.result?.photo?.length) {
+        const newId = body.result.photo[body.result.photo.length - 1].file_id;
+        _leaderboardBannerFileId = newId;
+        out.tests.fresh_url_upload.newFileIdPrefix = newId.slice(0,16);
+        out.advice = '✅ Fresh URL upload worked. file_id re-cached. Try /lb in your group now.';
+      } else {
+        // Restore previous cache if upload failed
+        _leaderboardBannerFileId = previousId;
+        out.advice = `❌ Telegram rejected the photo URL. Status ${r.status}. See bodySnippet for the exact reason — usually image too big, wrong MIME, or transient Telegram issue.`;
+      }
+    } catch (err) {
+      _leaderboardBannerFileId = previousId;
+      out.tests.fresh_url_upload = { error: err.message };
+      out.advice = '❌ Network error reaching Telegram. Try again in a minute.';
+    }
+  } else {
+    out.advice = 'Set ADMIN_TELEGRAM_ID env var so the diagnostic can DM the result to you.';
+  }
+  res.json(out);
+};
+app.get('/api/diagnostics/leaderboard-banner',  _leaderboardBannerDiagHandler);
+app.post('/api/diagnostics/leaderboard-banner', _leaderboardBannerDiagHandler);
+
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
