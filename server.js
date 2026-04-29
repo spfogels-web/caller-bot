@@ -2254,13 +2254,42 @@ async function resolveCoinImage(candidate) {
   const cached = _coinImageCache.get(ca);
   if (cached && now - cached.at < COIN_IMAGE_CACHE_TTL) return cached.url;
 
+  const tag = `[img] $${candidate.token ?? ca.slice(0,6)}`;
+
   // Source 1 — already set by enricher (DexScreener pair.info OR pump.fun image_uri)
   if (candidate.imageUrl) {
+    console.log(`${tag} ✓ enricher.imageUrl: ${String(candidate.imageUrl).slice(0,80)}`);
     _coinImageCache.set(ca, { at: now, url: candidate.imageUrl });
     return candidate.imageUrl;
   }
 
-  // Source 2 — Birdeye Premium logo (CDN-cached, reliable for most SPL tokens)
+  // Source 2 — Helius DAS getAsset (we already pay for this, super reliable
+  // for SPL tokens that have proper Metaplex metadata). Returns nested
+  // content.links.image OR content.json_uri's resolved image.
+  const heliusKey = process.env.HELIUS_API_KEY;
+  if (heliusKey) {
+    try {
+      const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'img', method: 'getAsset', params: { id: ca } }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const dasImg = j?.result?.content?.links?.image
+                    ?? j?.result?.content?.metadata?.image
+                    ?? null;
+        if (dasImg) {
+          console.log(`${tag} ✓ Helius DAS: ${String(dasImg).slice(0,80)}`);
+          _coinImageCache.set(ca, { at: now, url: dasImg });
+          return dasImg;
+        }
+      }
+    } catch (err) { console.warn(`${tag} ✗ Helius DAS err: ${err.message}`); }
+  }
+
+  // Source 3 — Birdeye Premium logo
   const birdKey = process.env.BIRDEYE_API_KEY;
   if (birdKey) {
     try {
@@ -2275,14 +2304,37 @@ async function resolveCoinImage(candidate) {
         const j = await r.json();
         const logoURI = j?.data?.logoURI ?? j?.data?.logo ?? j?.data?.extensions?.logoURI;
         if (logoURI) {
+          console.log(`${tag} ✓ Birdeye logoURI: ${String(logoURI).slice(0,80)}`);
           _coinImageCache.set(ca, { at: now, url: logoURI });
           return logoURI;
         }
       }
-    } catch (err) { /* swallow — let null fall through to banner */ }
+    } catch (err) { console.warn(`${tag} ✗ Birdeye err: ${err.message}`); }
   }
 
-  // Cache the null result too (don't re-attempt for 30 min)
+  // Source 4 — pump.fun direct (bypasses enricher cache miss). Even if the
+  // enricher's pf call failed silently earlier, hit it directly here as a
+  // last resort before falling through to the Pulse banner.
+  if (ca.endsWith('pump')) {
+    try {
+      const r = await fetch(`https://frontend-api-v3.pump.fun/coins/${ca}`, {
+        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const pfImg = d?.image_uri ?? d?.image ?? null;
+        if (pfImg) {
+          console.log(`${tag} ✓ Pump.fun direct: ${String(pfImg).slice(0,80)}`);
+          _coinImageCache.set(ca, { at: now, url: pfImg });
+          return pfImg;
+        }
+      }
+    } catch (err) { console.warn(`${tag} ✗ Pump.fun direct err: ${err.message}`); }
+  }
+
+  // No coin image found — caller falls through to Pulse banner
+  console.warn(`${tag} ⚠ ALL 4 image sources missed (enricher/Helius/Birdeye/pump.fun) — falling back to Pulse banner`);
   _coinImageCache.set(ca, { at: now, url: null });
   return null;
 }
