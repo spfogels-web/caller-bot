@@ -2175,6 +2175,8 @@ async function uploadBannerToTelegram() {
       formData.append('chat_id', TELEGRAM_GROUP_CHAT_ID);
       formData.append('photo', blob, 'banner.png');
       formData.append('caption', '⚡ Pulse Caller online — call bot active');
+      // Route boot banner to Trench Calls topic when configured
+      if (_trenchThreadId) formData.append('message_thread_id', String(_trenchThreadId));
 
       const res  = await fetch(`${TELEGRAM_API}/sendPhoto`, {
         method: 'POST',
@@ -2203,11 +2205,11 @@ async function uploadBannerToTelegram() {
       const res  = await fetch(`${TELEGRAM_API}/sendPhoto`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
+        body:    JSON.stringify(_withTrenchThread({
           chat_id: TELEGRAM_GROUP_CHAT_ID,
           photo:   BANNER_IMAGE_URL,
           caption: '⚡ Pulse Caller online',
-        }),
+        })),
         signal: AbortSignal.timeout(20_000),
       });
       const data = await res.json();
@@ -2280,13 +2282,17 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
         await sendCallAlertWithImage(caption, fullDetailText, null);
         return;
       }
-      // Pulse banner also failed → text-only
+      // Pulse banner also failed → text-only. Route to Trench Calls topic
+      // when configured so the fallback doesn't accidentally leak the call
+      // into General just because the image failed.
       if (_bannerFileId) { _bannerFileId = null; console.warn('[TG] banner file_id cleared'); }
-      await sendTelegramGroupMessage(safeCaption).catch(() => {});
+      const trenchOpts = _trenchThreadId ? { message_thread_id: _trenchThreadId } : {};
+      await sendTelegramGroupMessage(safeCaption, trenchOpts).catch(() => {});
     }
   } catch (err) {
     console.warn(`[TG] Photo error: ${err.message}`);
-    await sendTelegramGroupMessage(safeCaption).catch(() => {});
+    const trenchOpts = _trenchThreadId ? { message_thread_id: _trenchThreadId } : {};
+    await sendTelegramGroupMessage(safeCaption, trenchOpts).catch(() => {});
   }
 
   // ── FOLLOW-UP: Full detailed analysis ──────────────────────────────────
