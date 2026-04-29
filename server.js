@@ -1458,7 +1458,7 @@ const SCORING_CONFIG_DEFAULTS = {
   // liquidity." Avoid first-spike, first-breakout, migration-hype patterns.
   // Prefer consolidation, higher lows, re-accumulation.
   // The vertical-spike block in processCandidate uses these thresholds.
-  verticalSpike5mPct:         30,    // 5m move ≥ this = vertical spike (block unless slow build)
+  verticalSpike5mPct:         40,    // 5m move ≥ this = vertical spike (block unless slow build) — operator raised 30→40 for looser entry
   slowBuildMin1hPct:           5,    // 1h pct change minimum for "slow build" context
   slowBuildMax1hPct:          50,    // 1h pct change maximum (above this = vertical, not gradual)
 };
@@ -1498,8 +1498,10 @@ try {
       absoluteMinScoreToPost:   0,
       fallenKnife1hDropPct:  -999,
       latePump1hHardBlock:    999,
+      // Operator-tuned vertical-spike threshold (raised 30→40)
+      verticalSpike5mPct:      40,
     };
-    const MIGRATE_FORCE_VERSION = 'v7';   // v7 = 4/27 baseline revert (was v6)
+    const MIGRATE_FORCE_VERSION = 'v8';   // v8 = vertical-spike threshold 40 (was v7)
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
