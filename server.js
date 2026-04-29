@@ -13377,6 +13377,63 @@ const _heliusTxCacheHandler = (req, res) => {
 app.get('/api/diagnostics/helius-tx-cache',  _heliusTxCacheHandler);
 app.post('/api/diagnostics/helius-tx-cache', _heliusTxCacheHandler);
 
+// Birdeye Premium smoke test — confirms the BIRDEYE_API_KEY is valid AND
+// unlocks Premium endpoints we plan to use for the Helius migration:
+//   - /defi/v2/wallet/list_pnl       (wallet PnL enrichment)
+//   - /defi/txs/token                (swap history — replaces Helius Enhanced)
+//   - /defi/v2/tokens/holders        (top holder lookup)
+// Echoes only first/last chars of the key for safety.
+const _birdeyeDiagHandler = async (req, res) => {
+  setCors(res);
+  const key = process.env.BIRDEYE_API_KEY || '';
+  const out = {
+    keyPresent:  !!key,
+    keyLength:   key.length,
+    keyFirst6:   key ? key.slice(0, 6) : null,
+    keyLast4:    key ? key.slice(-4)  : null,
+    tests:       {},
+  };
+  if (!key) {
+    out.advice = 'Set BIRDEYE_API_KEY in Railway env';
+    return res.json(out);
+  }
+  // Wrapped SOL is a stable test address (existed since Solana mainnet day 1).
+  const TEST_TOKEN = 'So11111111111111111111111111111111111111112';
+  const probe = async (label, url) => {
+    try {
+      const r = await fetch(url, {
+        headers: { 'X-API-KEY': key, 'accept': 'application/json', 'x-chain': 'solana' },
+        signal:  AbortSignal.timeout(10_000),
+      });
+      const text = await r.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = text.slice(0, 200); }
+      out.tests[label] = {
+        status:      r.status,
+        ok:          r.ok,
+        bodySnippet: typeof body === 'string' ? body : JSON.stringify(body).slice(0, 250),
+      };
+    } catch (err) { out.tests[label] = { error: err.message }; }
+  };
+  await Promise.all([
+    // Token overview is on every plan — sanity check the key is even valid
+    probe('overview',   `https://public-api.birdeye.so/defi/token_overview?address=${TEST_TOKEN}`),
+    // Swap history — we want this to replace Helius Enhanced
+    probe('txs_token',  `https://public-api.birdeye.so/defi/txs/token?address=${TEST_TOKEN}&limit=10&offset=0&tx_type=swap`),
+    // Top holders (Premium tier per Birdeye docs)
+    probe('holders',    `https://public-api.birdeye.so/defi/v3/token/holder?address=${TEST_TOKEN}&limit=10&offset=0`),
+  ]);
+
+  // Aggregate verdict
+  const allOk = Object.values(out.tests).every(t => t.ok === true);
+  out.advice = allOk
+    ? '✅ All endpoints unlocked — Premium key is live, ready to migrate Helius Enhanced calls onto Birdeye.'
+    : '❌ At least one endpoint failed. Check status codes per test. 401/403 = key wrong or plan tier missing the endpoint.';
+  res.json(out);
+};
+app.get('/api/diagnostics/birdeye',  _birdeyeDiagHandler);
+app.post('/api/diagnostics/birdeye', _birdeyeDiagHandler);
+
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.

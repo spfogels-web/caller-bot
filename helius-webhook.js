@@ -33,11 +33,12 @@ export function setSwarmHook(fn)         { _onSwarmDetected = typeof fn === 'fun
 export function setEventHook(fn)         { _onWalletEvent   = typeof fn === 'function' ? fn : null; }
 export function setIsWalletTrackedFn(fn) { _isWalletTracked = typeof fn === 'function' ? fn : null; }
 
-// Raised from 3 → 5 after the 10K-wallet webhook list went live. With that
-// many addresses registered, 3-wallet co-buys are statistical noise rather
-// than alpha — was producing score-15 to score-25 calls that posted via
-// the cluster bypass. 5 buyers in 10 min is a real conviction signal.
-const SWARM_MIN_WALLETS = 5;
+// Restored to 3 after the webhook list was slimmed from 10K → 500 top-quality
+// wallets (WINNER + KOL + ALPHA tiers, ≥10 SOL). With a curated 500-wallet
+// list, 3 co-buys in 10 min IS real alpha — those are top performers, not
+// noise. Score-floor guard (clusterMinScoreToPost in server.js) still blocks
+// score-15/25 leakage even on 3-wallet clusters.
+const SWARM_MIN_WALLETS = 3;
 const SWARM_WINDOW_SEC  = 600;      // within 10 minutes
 const SWARM_MIN_SOL     = 0.5;      // each buy ≥ 0.5 SOL (filter dust)
 // Cooldown so a single hot coin doesn't fire 50 swarm signals back-to-back
