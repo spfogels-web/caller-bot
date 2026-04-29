@@ -127,6 +127,37 @@ function _withTrenchThread(body) {
     : body;
 }
 
+// Helius bills 1 credit per webhook delivery — pushing all 10K tracked
+// wallets to the webhook means every swap by every wallet drains the plan.
+// At ~30 swaps/day per active wallet × 10K wallets = ~300K credits/day from
+// webhook alone, blowing through the Developer plan's 333K daily budget.
+//
+// This helper returns the slimmed list of addresses we actually push to the
+// webhook — top WALLET_HOOK_MAX wallets ranked by quality (WINNER + KOL +
+// ALPHA tiers, our_win_count DESC, then score DESC, ≥10 SOL minimum).
+// The cluster threshold (≥5 wallets co-buying) is dense enough that 500
+// top winners still produce real cluster signals.
+//
+// Tunable via env: WEBHOOK_MAX_ADDRESSES (default 500), WEBHOOK_MIN_SOL
+// (default 10). Used by /api/helius/webhook/setup, /api/helius/webhook/create,
+// and the daily auto-sync cron — single source of truth for the address list.
+function getWebhookEligibleAddresses(dbInstance) {
+  const max    = Number(process.env.WEBHOOK_MAX_ADDRESSES) || 500;
+  const minSol = Number(process.env.WEBHOOK_MIN_SOL)        || 10;
+  const rows = dbInstance.prepare(`
+    SELECT address FROM tracked_wallets
+    WHERE is_blacklist = 0
+      AND (sol_balance IS NULL OR sol_balance >= ?)
+      AND category IN ('WINNER','KOL','ALPHA')
+    ORDER BY
+      our_win_count DESC,
+      score DESC NULLS LAST,
+      sol_balance DESC NULLS LAST
+    LIMIT ?
+  `).all(minSol, max);
+  return rows.map(r => r.address).filter(Boolean);
+}
+
 const TELEGRAM_API   = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL   = 'claude-sonnet-4-20250514';
@@ -14088,14 +14119,7 @@ const _heliusWebhookCreateHandler = async (req, res) => {
   // just push the latest address list (the auto-sync does this nightly anyway).
   if (process.env.HELIUS_WEBHOOK_ID) {
     try {
-      const rows = dbInstance.prepare(`
-        SELECT address FROM tracked_wallets
-        WHERE is_blacklist = 0 AND (sol_balance IS NULL OR sol_balance >= 1)
-          AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
-        ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
-        LIMIT 10000
-      `).all();
-      const addresses = rows.map(r => r.address).filter(Boolean);
+      const addresses = getWebhookEligibleAddresses(dbInstance);
       const result = await syncTrackedAddressesToHelius(process.env.HELIUS_WEBHOOK_ID, apiKey, addresses);
       return res.json({
         ok:        result.ok,
@@ -14128,15 +14152,9 @@ const _heliusWebhookCreateHandler = async (req, res) => {
     || `pulse-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
   try {
-    // Pull initial address list — top 10K by score, real categories only.
-    const rows = dbInstance.prepare(`
-      SELECT address FROM tracked_wallets
-      WHERE is_blacklist = 0 AND (sol_balance IS NULL OR sol_balance >= 1)
-        AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
-      ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
-      LIMIT 10000
-    `).all();
-    const addresses = rows.map(r => r.address).filter(Boolean);
+    // Pull initial address list — slimmed (top WINNERs / KOLs / ALPHAs only).
+    // Helius bills 1 credit per delivery so this list is intentionally tight.
+    const addresses = getWebhookEligibleAddresses(dbInstance);
     console.log(`[helius-wh] Create → ${webhookURL} with ${addresses.length} initial addresses`);
 
     const result = await createHeliusWebhook({
@@ -14190,10 +14208,11 @@ app.post('/api/helius/webhook/setup', async (req, res) => {
   if (!apiKey)    return res.status(400).json({ ok: false, error: 'HELIUS_ENHANCED_API_KEY (or HELIUS_API_KEY) missing' });
 
   try {
-    // Pull all tracked wallet addresses from DB
-    const rows = dbInstance.prepare('SELECT address FROM tracked_wallets').all();
-    const addresses = rows.map(r => r.address).filter(Boolean);
-    console.log(`[helius-wh] Setup → pushing ${addresses.length} addresses to webhook ${webhookId.slice(0,8)}...`);
+    // Pull the SLIMMED address list — top winners only, not all tracked.
+    // Helius bills 1 credit per delivery; pushing 10K wallets used to drain
+    // the Developer plan's daily budget on webhook deliveries alone.
+    const addresses = getWebhookEligibleAddresses(dbInstance);
+    console.log(`[helius-wh] Setup → pushing ${addresses.length} top-tier addresses to webhook ${webhookId.slice(0,8)}...`);
     const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
     if (result.ok) {
       console.log(`[helius-wh] Setup ✓ registered ${result.registered} addresses (${result.skipped} skipped as invalid)`);
@@ -15365,17 +15384,10 @@ app.listen(PORT, async () => {
       return;
     }
     try {
-      // Cap to top 10K wallets by score (Helius limit is 100K addresses, but
-      // smaller list = fewer wasted webhook deliveries on dust wallets).
-      const rows = dbInstance.prepare(`
-        SELECT address FROM tracked_wallets
-        WHERE is_blacklist = 0
-          AND (sol_balance IS NULL OR sol_balance >= 1)
-          AND category IN ('WINNER','SMART_MONEY','MOMENTUM','KOL','ALPHA')
-        ORDER BY score DESC NULLS LAST, our_win_count DESC, sol_balance DESC NULLS LAST
-        LIMIT 10000
-      `).all();
-      const addresses = rows.map(r => r.address).filter(Boolean);
+      // Slimmed list — top winners only. Helius bills 1 credit per webhook
+      // delivery so this is intentionally tight to fit within plan budgets.
+      // See getWebhookEligibleAddresses for the exact ranking + thresholds.
+      const addresses = getWebhookEligibleAddresses(dbInstance);
       console.log(`[helius-wh-sync] pushing ${addresses.length} top-tier wallets to webhook ${webhookId.slice(0,8)}...`);
       const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
       if (result.ok) {
@@ -15386,8 +15398,10 @@ app.listen(PORT, async () => {
       }
     } catch (err) { console.warn('[helius-wh-sync] err:', err.message); }
   };
-  // First run 1h after boot, then every 24h.
-  setTimeout(() => { _autoSyncWebhook().catch(() => {}); }, 60 * 60_000);
+  // First run 2 min after boot (so the slimmed address list propagates fast
+  // after a deploy), then every 24h. Operator can fire /api/helius/webhook/setup
+  // manually any time to force an immediate sync.
+  setTimeout(() => { _autoSyncWebhook().catch(() => {}); }, 2 * 60_000);
   setInterval(_autoSyncWebhook, 24 * 60 * 60_000);
 
   // SWARM HOOK — when ≥3 tracked wallets buy the same CA in 10 min, this
