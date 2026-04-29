@@ -13830,6 +13830,76 @@ app.post('/api/calls/manual-peak', express.json(), (req, res) => {
   const force = req.query.force === '1' || req.query.force === 'true';
   res.json(applyManualPeakOverride({ ca, peakMcap, peakMultiple, force }));
 });
+// One-shot admin reset for autotune params back to clean defaults.
+// Resets the 5 autotune-modified params + 2 known-malformed string values
+// that the validation layer can no longer prevent (legacy bad data from
+// before the fix shipped). Logs all changes to system event log.
+//
+// Usage: POST /api/admin/reset-autotune-defaults
+// Optional body: { keys: ["paramA","paramB"] } to reset only specific keys
+function resetAutotuneToDefaults(specificKeys = null) {
+  // Map of key → default value (matching the seed data in db.js migrations)
+  const DEFAULTS = {
+    'sweetSpotMin':            '8000',
+    'sweetSpotMax':            '25000',
+    'minScoreOverride':        '38',
+    'maxPairAgeHoursOverride': '4',
+    'v5_blockRug':             '66',
+    'walletIntelWeight':       '1.0',
+    'devWalletPctBlock':       '15',
+  };
+  const keysToReset = specificKeys && Array.isArray(specificKeys) && specificKeys.length
+    ? specificKeys.filter(k => DEFAULTS[k])
+    : Object.keys(DEFAULTS);
+
+  const changes = [];
+  for (const key of keysToReset) {
+    const newValue = DEFAULTS[key];
+    try {
+      const before = dbInstance.prepare(`SELECT current_value FROM autotune_params WHERE key=?`).get(key);
+      if (!before) { changes.push({ key, ok: false, error: 'param not in autotune_params' }); continue; }
+      dbInstance.prepare(`UPDATE autotune_params SET current_value=?, last_changed_at=datetime('now') WHERE key=?`).run(newValue, key);
+      // For V5 keys, also push to the live scorer config
+      if (key.startsWith('v5_')) {
+        try {
+          const v5Key = key.slice(3);
+          // Synchronous import workaround: just call the function directly
+          // by reading from the already-imported module if available
+          import('./scorer-dual.js').then(mod => {
+            if (typeof mod.setV5DecisionConfig === 'function') {
+              mod.setV5DecisionConfig({ [v5Key]: Number(newValue) });
+            }
+          }).catch(() => {});
+        } catch {}
+      }
+      // For activeMode-bound keys, also reset live state
+      if (key === 'maxMarketCapOverride') activeMode.maxMarketCap = Number(newValue);
+      if (key === 'minScoreOverride')     activeMode.minScore = Number(newValue);
+      if (key === 'maxPairAgeHoursOverride') activeMode.maxPairAgeHours = Number(newValue);
+      if (key === 'sweetSpotMin') AI_CONFIG_OVERRIDES.sweetSpotMin = Number(newValue);
+      if (key === 'sweetSpotMax') AI_CONFIG_OVERRIDES.sweetSpotMax = Number(newValue);
+      changes.push({ key, ok: true, before: before.current_value, after: newValue });
+      console.log(`[reset-autotune] ✓ ${key}: "${before.current_value}" → ${newValue}`);
+    } catch (err) {
+      changes.push({ key, ok: false, error: err.message });
+    }
+  }
+  if (changes.filter(c => c.ok).length > 0) {
+    logEvent('INFO', 'AUTOTUNE_RESET', `Manually reset ${changes.filter(c=>c.ok).length} params: ${changes.filter(c=>c.ok).map(c=>c.key).join(', ')}`);
+  }
+  return { ok: true, total: changes.length, applied: changes.filter(c=>c.ok).length, changes };
+}
+
+app.post('/api/admin/reset-autotune-defaults', express.json(), (req, res) => {
+  setCors(res);
+  const keys = (req.body || {}).keys;
+  res.json(resetAutotuneToDefaults(keys));
+});
+app.get('/api/admin/reset-autotune-defaults', (req, res) => {
+  setCors(res);
+  res.json(resetAutotuneToDefaults());
+});
+
 app.get('/api/calls/manual-peak', (req, res) => {
   setCors(res);
   const ca = req.query.ca;
