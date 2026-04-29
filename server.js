@@ -16212,19 +16212,60 @@ app.listen(PORT, async () => {
   setMilestoneTelegramHook(async (msg, meta = {}) => {
     if (AI_CONFIG_OVERRIDES.pausePosting) return;
     if (!TELEGRAM_BOT_TOKEN) return;
-    const sends = [];
 
-    // Milestone alerts (2x / 4x / 5x / 10x / 15x / 25x / 50x / 100x) fire to
-    // BOTH topics — Trench Calls so it threads with the original call card,
-    // and General so users get the celebration vibe in main chat without
-    // having to switch tabs. Mirrors the exit-alert dual-post pattern.
-    if (TELEGRAM_GROUP_CHAT_ID) {
-      // Trench (only when env var is set; falls through to General otherwise)
-      if (_trenchThreadId) {
-        sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg, { message_thread_id: _trenchThreadId }));
+    // Milestone alerts (2x / 4x / 5x / 10x / 15x / 25x / 50x / 100x) post
+    // to BOTH topics with the Pulse banner image — Trench Calls so it
+    // threads with the original call, General for main-chat celebration.
+    // Caption-capped at 1020 chars (Telegram limit). Falls back to text
+    // when photo path fails (banner cache miss + URL fetch fail = rare).
+    const safeCaption = msg.length > 1020 ? msg.slice(0, 1017) + '…' : msg;
+    const photoSrc    = _bannerFileId || BANNER_IMAGE_URL;
+
+    async function sendMilestonePhoto(threadId) {
+      const body = {
+        chat_id:    TELEGRAM_GROUP_CHAT_ID,
+        photo:      photoSrc,
+        caption:    safeCaption,
+        parse_mode: 'HTML',
+      };
+      if (threadId) body.message_thread_id = threadId;
+      try {
+        const r = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+          signal:  AbortSignal.timeout(15_000),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok !== false) {
+          // Cache file_id from the URL upload so subsequent milestones reuse it
+          if (!_bannerFileId && j.result?.photo?.length) {
+            _bannerFileId = j.result.photo[j.result.photo.length - 1].file_id;
+          }
+          return true;
+        }
+        console.warn(`[milestone-tg] photo failed status=${r.status} desc="${j.description ?? ''}" — falling back to text`);
+      } catch (err) {
+        console.warn(`[milestone-tg] photo err: ${err.message}`);
       }
-      // General (always — main chat celebration)
-      sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg));
+      // Photo failed — text fallback so milestone still fires
+      const textBody = { chat_id: TELEGRAM_GROUP_CHAT_ID, text: msg, parse_mode: 'HTML', disable_web_page_preview: true };
+      if (threadId) textBody.message_thread_id = threadId;
+      try {
+        await fetch(`${TELEGRAM_API}/sendMessage`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(textBody),
+          signal:  AbortSignal.timeout(10_000),
+        });
+        return true;
+      } catch { return false; }
+    }
+
+    const sends = [];
+    if (TELEGRAM_GROUP_CHAT_ID) {
+      if (_trenchThreadId) sends.push(sendMilestonePhoto(_trenchThreadId));
+      sends.push(sendMilestonePhoto(null));
     }
 
     // Free tier: first 2x unlocks the call (post the original + milestone).
