@@ -14238,6 +14238,121 @@ const _callCardDiagHandler = async (req, res) => {
 app.get('/api/diagnostics/call-card',  _callCardDiagHandler);
 app.post('/api/diagnostics/call-card', _callCardDiagHandler);
 
+// FULL production-equivalent test — sends a photo+caption to the actual
+// group + Trench thread, with a long HTML caption like a real call card.
+// Diagnoses the exact production failure mode (group vs DM, threading,
+// caption length, HTML parsing).
+const _callCardProdTestHandler = async (req, res) => {
+  setCors(res);
+  const ca = (req.query?.ca || (req.body || {}).ca || '').trim();
+  if (!ca || ca.length < 32) {
+    return res.status(400).json({ ok: false, error: 'Pass a valid Solana CA via ?ca=...' });
+  }
+  if (!TELEGRAM_GROUP_CHAT_ID) {
+    return res.status(503).json({ ok: false, error: 'TELEGRAM_GROUP_CHAT_ID not set' });
+  }
+
+  const fakeCandidate = { contractAddress: ca, imageUrl: null, token: 'PRODTEST' };
+  const resolvedUrl = await resolveCoinImage(fakeCandidate);
+  const photoSrc = resolvedUrl || _bannerFileId || BANNER_IMAGE_URL;
+
+  // Build a caption similar in length / structure to a real call card
+  const longCaption =
+    `⚡ <b>PULSE CALLER · Diag Test</b>\n\n` +
+    `<b>$DIAGTEST</b> | <i>simulating production call card</i>\n` +
+    `<code>${ca}</code>\n\n` +
+    `├ MC: <b>$18.5K</b> · Liq: <b>$12.7K</b> · Vol24h: <b>?</b>\n` +
+    `├ 1H: <b>+811%</b> · 24H: <b>?</b> · Buys/Sells 1H: <b>119/47</b>\n` +
+    `├ 🔒 Mint:✓ Freeze:✓ LP:~ · Top10: <b>30%</b> · Dev: <b>4.2%</b> · Holders: <b>?</b>\n` +
+    `├ 🧠 Score: <b>57/100</b> · Risk: <b>HIGH</b> · Setup: <b>EXTENDED_AVOID</b> · Structure: <b>CLEAN</b>\n` +
+    `└ 🎯 Confidence: <b>60%</b> · <b>MEDIUM</b>\n\n` +
+    `📈 <b>Targets:</b> SL <b>$13.9K</b> · TP1 <b>$36.9K</b> (2×) · TP2 <b>$92.3K</b> (5×) · TP3 <b>$184.7K</b> (10×)\n` +
+    `✅ <i>Strong buy ratio 72% with 119 buys in 1h</i>\n` +
+    `⚠️ <i>Parabolic +811% move on thin $12.7K liquidity</i>\n\n` +
+    `💬 <i>This coin already had its explosive move (+811% 1h) and is now overextended.</i>\n` +
+    `\n🔗 <a href="https://dexscreener.com/solana/${ca}">DEX</a> · <a href="https://pump.fun/${ca}">PF</a>`;
+
+  const out = {
+    ca,
+    photoSrcUsed: String(photoSrc).slice(0, 100),
+    captionLength: longCaption.length,
+    trenchThreadId: _trenchThreadId,
+    tests: {},
+  };
+
+  // Test 1: Send to group's Trench thread with long HTML caption (production)
+  try {
+    const body = {
+      chat_id:    TELEGRAM_GROUP_CHAT_ID,
+      photo:      photoSrc,
+      caption:    longCaption.slice(0, 1020),
+      parse_mode: 'HTML',
+    };
+    if (_trenchThreadId) body.message_thread_id = _trenchThreadId;
+    const r = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const j = await r.json().catch(() => ({}));
+    out.tests.production_full = {
+      status: r.status,
+      ok: r.ok && j.ok !== false,
+      description: j.description ?? j.error_message ?? null,
+      messageId: j.result?.message_id ?? null,
+    };
+  } catch (err) { out.tests.production_full = { error: err.message }; }
+
+  // Test 2: Same but to General topic (no thread)
+  try {
+    const r = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_GROUP_CHAT_ID,
+        photo: photoSrc,
+        caption: longCaption.slice(0, 1020),
+        parse_mode: 'HTML',
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const j = await r.json().catch(() => ({}));
+    out.tests.general_long_caption = {
+      status: r.status,
+      ok: r.ok && j.ok !== false,
+      description: j.description ?? j.error_message ?? null,
+    };
+  } catch (err) { out.tests.general_long_caption = { error: err.message }; }
+
+  // Test 3: Trench thread with NO caption (isolate caption issues)
+  try {
+    const body = { chat_id: TELEGRAM_GROUP_CHAT_ID, photo: photoSrc };
+    if (_trenchThreadId) body.message_thread_id = _trenchThreadId;
+    const r = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const j = await r.json().catch(() => ({}));
+    out.tests.trench_no_caption = {
+      status: r.status,
+      ok: r.ok && j.ok !== false,
+      description: j.description ?? j.error_message ?? null,
+    };
+  } catch (err) { out.tests.trench_no_caption = { error: err.message }; }
+
+  // Auto-summary
+  const allOk = Object.values(out.tests).every(t => t.ok === true);
+  out.summary = allOk
+    ? '✅ All 3 production-shape tests passed — image SHOULD work on real calls. If real calls still fail, something else is intercepting.'
+    : `❌ At least one variant failed. Check description per test to see which one breaks (caption / thread / both).`;
+  res.json(out);
+};
+app.get('/api/diagnostics/call-card-prodtest',  _callCardProdTestHandler);
+app.post('/api/diagnostics/call-card-prodtest', _callCardProdTestHandler);
+
 // Probe Anthropic with the current Railway env CLAUDE_API_KEY and report
 // the exact response. Tells you whether the key is wrong, the workspace
 // has no credits, or Railway is still using a cached value.
