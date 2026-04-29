@@ -2706,7 +2706,7 @@ function buildSLTPBlock(candidate) {
 }
 
 function buildCallAlertCaption(candidate, verdict, scoreResult) {
-  const { risk='?', setup_type='?' } = verdict;
+  const { risk='?', setup_type='?', bull_case=[], red_flags=[] } = verdict;
   const score = scoreResult?.score ?? verdict.score ?? 0;
   const grade = scoreResult?.structureGrade ?? '?';
 
@@ -2728,11 +2728,10 @@ function buildCallAlertCaption(candidate, verdict, scoreResult) {
   const entryMcap = kFmt(candidate.marketCap);
   const vol24     = kFmt(candidate.volume24h);
   const age       = ageFmt(candidate.pairAgeHours);
+  const liq       = kFmt(candidate.liquidity);
 
   const mintOk   = candidate.mintAuthority   === 0 ? '✓' : candidate.mintAuthority   === 1 ? '⚠' : '?';
   const freezeOk = candidate.freezeAuthority === 0 ? '✓' : candidate.freezeAuthority === 1 ? '⚠' : '?';
-  // LP status glyph — granular over the old binary lpLocked field.
-  // 🔥 burned · 🔒 locked (long/short) · ⏳ locked-soon · ⚠ unlocked · ~ bonding-curve / unknown
   const lpStatus = candidate.lpSecurityStatus;
   const lpOk =
       lpStatus === 'BURNED'                               ? '🔥'
@@ -2749,21 +2748,34 @@ function buildCallAlertCaption(candidate, verdict, scoreResult) {
   const devPct  = candidate.devWalletPct   != null ? candidate.devWalletPct.toFixed(1)   + '%' : '?';
   const holders = candidate.holders?.toLocaleString() ?? '?';
 
-  // Dev rap sheet — if we have fingerprint, show launches/wins
-  const fp = scoreResult?.devFingerprint;
-  const devRap = fp && fp.total_launches > 0
-    ? `Tokens: ${fp.total_launches} | Wins: ${fp.wins ?? 0}${fp.grade && fp.grade !== 'NEUTRAL' ? ` · ${fp.grade}` : ''}`
-    : '—';
-
   const tokenLabel = candidate.token
     || candidate.tokenName
     || (candidate.contractAddress ? candidate.contractAddress.slice(0, 4).toUpperCase() : '?');
   const nameLabel  = candidate.tokenName && candidate.tokenName !== candidate.token
     ? candidate.tokenName : '';
 
-  // Compact verdict (1-2 lines, strip to ~140 chars)
+  // Compact verdict — drop to 100 chars to leave room for trade levels.
   const vText = (verdict.verdict || '').replace(/\s+/g, ' ').trim();
-  const vSnip = vText.length > 140 ? vText.slice(0, 137) + '…' : vText;
+  const vSnip = vText.length > 100 ? vText.slice(0, 97) + '…' : vText;
+
+  // Top reason + watchout — single most important from each list, trimmed.
+  const trim = (s, n) => {
+    if (!s) return null;
+    const cleaned = String(s).replace(/\s+/g, ' ').trim();
+    return cleaned.length > n ? cleaned.slice(0, n - 1) + '…' : cleaned;
+  };
+  const topReason  = trim(bull_case[0],  85);
+  const topWatch   = trim(red_flags[0],  75);
+
+  // Trade levels — compact one-liner. MCap-based targets (matches dashboard
+  // SLTP block exactly: SL=0.75x, TP1=2x, TP2=5x, TP3=10x).
+  let tradeLine = '';
+  const mc = Number(candidate.marketCap);
+  if (Number.isFinite(mc) && mc > 0) {
+    tradeLine =
+      `📈 <b>Targets:</b> SL <b>${kFmt(mc*0.75)}</b> · TP1 <b>${kFmt(mc*2)}</b> (2×) · ` +
+      `TP2 <b>${kFmt(mc*5)}</b> (5×) · TP3 <b>${kFmt(mc*10)}</b> (10×)\n`;
+  }
 
   // Links line
   const linkParts = [];
@@ -2773,17 +2785,21 @@ function buildCallAlertCaption(candidate, verdict, scoreResult) {
   linkParts.push(`<a href="https://dexscreener.com/solana/${candidate.contractAddress}">DEX</a>`);
   linkParts.push(`<a href="https://pump.fun/${candidate.contractAddress}">PF</a>`);
 
+  // Build the caption — packs market data, security, score, trade levels,
+  // top reason, and top watchout into one ≤1024-char block. Drops the
+  // separate threaded follow-up (which was redundant noise per operator).
   return (
     `⚡ <b>PULSE CALLER</b> · Entry: ${entryMcap}\n\n` +
     `<b>$${escapeHtml(tokenLabel)}</b>${nameLabel ? ` | <i>${escapeHtml(nameLabel)}</i>` : ''}\n` +
     `<code>${escapeHtml(candidate.contractAddress ?? '—')}</code>\n\n` +
-    `├ MC: <b>${entryMcap}</b> · Vol24h: <b>${vol24}</b> · Age: <b>${age}</b>\n` +
+    `├ MC: <b>${entryMcap}</b> · Liq: <b>${liq}</b> · Vol24h: <b>${vol24}</b> · Age: <b>${age}</b>\n` +
     `├ 1H: <b>${pct(candidate.priceChange1h)}</b> · 24H: <b>${pct(candidate.priceChange24h)}</b> · Buys/Sells 1H: <b>${candidate.buys1h ?? '?'}/${candidate.sells1h ?? '?'}</b>\n` +
     `├ 🔒 Mint:${mintOk} Freeze:${freezeOk} LP:${lpOk} · Top10: <b>${top10}</b> · Dev: <b>${devPct}</b> · Holders: <b>${holders}</b>\n` +
-    `├ 👤 Dev: ${devRap}\n` +
-    `├ 🧠 Score: <b>${score}/100</b> · Risk: <b>${risk}</b> · Setup: <b>${setup_type}</b>\n` +
-    (scoreResult?.confidence ? `├ 🎯 Confidence: <b>${Math.round(scoreResult.confidence.pct)}%</b> · <b>${scoreResult.confidence.label}</b>\n` : '') +
-    `└ 🏛 Structure: <b>${grade}</b>\n` +
+    `├ 🧠 Score: <b>${score}/100</b> · Risk: <b>${risk}</b> · Setup: <b>${setup_type}</b> · Structure: <b>${grade}</b>\n` +
+    (scoreResult?.confidence ? `└ 🎯 Confidence: <b>${Math.round(scoreResult.confidence.pct)}%</b> · <b>${scoreResult.confidence.label}</b>\n` : '└\n') +
+    `\n${tradeLine}` +
+    (topReason ? `✅ <i>${escapeHtml(topReason)}</i>\n` : '') +
+    (topWatch  ? `⚠️ <i>${escapeHtml(topWatch)}</i>\n`  : '') +
     (vSnip ? `\n💬 <i>${escapeHtml(vSnip)}</i>\n` : '') +
     `\n🔗 ${linkParts.join(' · ')}`
   );
@@ -5566,20 +5582,12 @@ async function processCandidate(candidate, isRescan = false) {
         logEvent('INFO', 'POST_PAUSED', `${enrichedCandidate.token} score=${scoreResult.score}`);
       } else {
         fnl('posted');
-        // Build the full detailed analysis (Foundation Signals, sub-scores,
-        // market data, holders, risk, launch intel, etc.) and send it as a
-        // reply to the photo+caption — so the user gets BOTH the compact
-        // call card AND the deep-dive report on every post.
-        let fullDetailMessage = null;
-        try {
-          fullDetailMessage = buildCallAlertMessage(enrichedCandidate, verdict ?? {}, scoreResult, similarity, ftResult);
-          // Append SL/TP block + Trade Levels (already part of the full message in some paths)
-          const sltpBlock = buildSLTPBlock(enrichedCandidate);
-          if (sltpBlock) fullDetailMessage += sltpBlock;
-        } catch (err) {
-          console.warn(`[TG] full-message build failed: ${err.message}`);
-        }
-        await sendCallAlertWithImage(caption, fullDetailMessage, coinImg);
+        // Single-post call card. The threaded full-detail follow-up was
+        // dropped per operator feedback — it duplicated info already in the
+        // photo caption. The new buildCallAlertCaption packs trade levels +
+        // top reason + top watchout into the 1024-char caption, so users get
+        // the full picture in one bubble instead of two.
+        await sendCallAlertWithImage(caption, null, coinImg);
       }
 
       // ── Archive this call permanently (AUTO_POST) ─────────────────────────
