@@ -15619,11 +15619,16 @@ app.listen(PORT, async () => {
     if (!TELEGRAM_BOT_TOKEN) return;
     const sends = [];
 
-    // Milestone alerts (2x / 5x / 10x) intentionally route to General, NOT
-    // Trench Calls — operator wants milestones visible in main chat for
-    // celebration / momentum vibes; the trade signals + exit warnings are
-    // the noisy stuff that gets corralled into the dedicated topic.
+    // Milestone alerts (2x / 4x / 5x / 10x / 15x / 25x / 50x / 100x) fire to
+    // BOTH topics — Trench Calls so it threads with the original call card,
+    // and General so users get the celebration vibe in main chat without
+    // having to switch tabs. Mirrors the exit-alert dual-post pattern.
     if (TELEGRAM_GROUP_CHAT_ID) {
+      // Trench (only when env var is set; falls through to General otherwise)
+      if (_trenchThreadId) {
+        sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg, { message_thread_id: _trenchThreadId }));
+      }
+      // General (always — main chat celebration)
       sends.push(sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, msg));
     }
 
