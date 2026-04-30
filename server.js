@@ -7984,11 +7984,12 @@ app.get('/api/tuning/april-27-snapshot', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// POST restore Apr 26-27 values for every drifted param. Logs every change to
+// Restore Apr 26-27 values for every drifted param. Logs every change to
 // tuning_audit with reason 'RESTORE_APR_27' so future audits can see what we
 // rolled back to. Refuses to run unless ?confirm=1 query param is set so
-// nobody triggers it accidentally.
-app.post('/api/tuning/restore-april-27', (req, res) => {
+// nobody triggers it accidentally. Accepts GET as well as POST so the
+// browser bar works (matches the self-improve/run-now pattern).
+const _restoreApr27Handler = (req, res) => {
   setCors(res);
   if (req.query.confirm !== '1') {
     return res.status(400).json({
@@ -8039,7 +8040,10 @@ app.post('/api/tuning/restore-april-27', (req, res) => {
 
     res.json({ ok: true, appliedCount: applied.length, skippedCount: skipped.length, applied, skipped });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
-});
+};
+app.post('/api/tuning/restore-april-27', _restoreApr27Handler);
+app.get('/api/tuning/restore-april-27',  _restoreApr27Handler);  // browser-bar use
+
 
 // POST apply a tuning change
 app.post('/api/tuning/apply', express.json(), (req, res) => {
