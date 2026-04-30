@@ -8044,28 +8044,20 @@ const _restoreApr27Handler = (req, res) => {
 app.post('/api/tuning/restore-april-27', _restoreApr27Handler);
 app.get('/api/tuning/restore-april-27',  _restoreApr27Handler);  // browser-bar use
 
-// Focused restore — only the 9 changes that were active at 12:54pm Apr 27
-// (when SCAM 972x posted). The full restore-april-27 above includes 36
-// additional changes that the auto-tuner made AFTER the SCAM win — those
-// were the over-corrections that led to the dust calls. This endpoint
-// restores ONLY the pre-12:54pm-Apr-27 winning state.
-//
-// Filter: changes between Apr 26 00:00 UTC and Apr 27 12:54 UTC, latest
-// value per param (in case the same param was tuned multiple times).
+// Focused restore — pre-12:54pm Apr 27 changes (SCAM-winning config).
+// Routes prefixed params like [overrides]/[tuning]/[scoring] to the right
+// config tables (SCORING_CONFIG, TUNING_CONFIG, AI_CONFIG_OVERRIDES) since
+// most knobs aren't in autotune_params. Filters out OPENAI-* / SELF-IMPROVE
+// entries (those are reasoning logs, not actual config).
 const _restoreApr27At1254Handler = (req, res) => {
   setCors(res);
   if (req.query.confirm !== '1') {
     return res.status(400).json({
       ok: false,
-      error: 'Refusing without confirm — pass ?confirm=1 to apply just the 9 pre-12:54pm Apr 27 changes (SCAM 972x winning config).',
+      error: 'Refusing without confirm — pass ?confirm=1 to apply pre-12:54pm Apr 27 changes (SCAM 972x winning config).',
     });
   }
   try {
-    // Pull only changes between Apr 26 00:00 and Apr 27 12:54 UTC. SCAM hit
-    // at 12:54 ET which is 16:54 UTC, but the audit timestamps in the
-    // snapshot are already in UTC and the latest pre-SCAM AI batch was at
-    // 01:41:38 UTC. Use 16:54 UTC as the cutoff so we capture every change
-    // that happened before SCAM posted regardless of timezone confusion.
     const rows = dbInstance.prepare(`
       SELECT t.param, t.new_value, t.created_at
         FROM tuning_audit t
@@ -8080,35 +8072,115 @@ const _restoreApr27At1254Handler = (req, res) => {
     `).all();
 
     if (!rows.length) {
-      return res.status(404).json({
-        ok: false,
-        error: 'No tuning_audit entries found in the pre-12:54pm Apr 27 window.',
-      });
+      return res.status(404).json({ ok: false, error: 'No tuning_audit entries found in the pre-12:54pm Apr 27 window.' });
     }
+
+    // Inline router — same behavior as wipe-ai-changes' applyConfigValue.
+    // Routes a (category, knobKey, value) to the right live config table.
+    const applyConfigValue = (category, knobKey, value) => {
+      const cat = String(category || '').toUpperCase();
+      if (cat === 'SCORING' && (knobKey in SCORING_CONFIG)) {
+        SCORING_CONFIG[knobKey] = value;
+        return 'scoring';
+      }
+      if (cat === 'OVERRIDES' || cat === 'AI') {
+        AI_CONFIG_OVERRIDES[knobKey] = value;
+        return 'overrides';
+      }
+      if (cat === 'TUNING' && TUNING_CONFIG && typeof TUNING_CONFIG === 'object') {
+        for (const section of Object.keys(TUNING_CONFIG)) {
+          if (TUNING_CONFIG[section] && knobKey in TUNING_CONFIG[section]) {
+            TUNING_CONFIG[section][knobKey] = value;
+            return `tuning.${section}`;
+          }
+        }
+      }
+      return null;
+    };
+
+    // Coerce the audit value (always stored as string) back to its proper type
+    const coerceValue = (raw) => {
+      if (raw == null) return null;
+      const s = String(raw).trim();
+      if (s === '') return null;
+      // Try JSON parse first (handles numbers, booleans, JSON objects)
+      try { return JSON.parse(s); } catch { /* not JSON */ }
+      // Strip trailing units like "h", "pct" — keep the value as is, useful
+      // for things like "block_above_28pct" which should stay strings
+      return s;
+    };
+
+    // Skip-list — these are reasoning/log entries, not config knobs
+    const SKIP_PARAMS = new Set(['[OPENAI-LEARNING]', '[OPENAI-LESSON]', '[OPENAI-BLIND-SPOT]', '[SELF-IMPROVE]']);
 
     const applied = [];
     const skipped = [];
-    const upd = dbInstance.prepare(`UPDATE autotune_params SET current_value = ?, last_changed_at = datetime('now') WHERE key = ?`);
-    const log = dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?, ?, ?, ?, 'APPLIED')`);
+    const autotuneUpd = dbInstance.prepare(`UPDATE autotune_params SET current_value = ?, last_changed_at = datetime('now') WHERE key = ?`);
+    const auditLog    = dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?, ?, ?, ?, 'APPLIED')`);
+    const configChange = dbInstance.prepare(`INSERT INTO config_changes (category, source, knob_key, old_value, new_value, reason) VALUES (?, 'operator', ?, ?, ?, ?)`);
+
     for (const r of rows) {
+      const rawParam = String(r.param || '').trim();
+      if (SKIP_PARAMS.has(rawParam)) {
+        skipped.push({ param: rawParam, reason: 'reasoning log entry — not config' });
+        continue;
+      }
+
+      const newVal = coerceValue(r.new_value);
+
+      // Parse prefix like "[overrides] knobKey" into (category, knob).
+      // Bare names (no prefix) go through the autotune_params path.
+      const m = rawParam.match(/^\[(\w+)\]\s+(.+)$/);
+      if (m) {
+        const category = m[1];   // overrides | tuning | scoring
+        const knobKey  = m[2];
+        const where    = applyConfigValue(category, knobKey, newVal);
+        if (where) {
+          // Mirror to config_changes so the AI Tuning Audit + future revert paths see it
+          try { configChange.run(category.toUpperCase(), knobKey, JSON.stringify(null), JSON.stringify(newVal), 'RESTORE_APR_27_AT_12_54_PM — operator restored SCAM-winning config'); } catch {}
+          applied.push({ param: rawParam, category, knob: knobKey, value: newVal, appliedTo: where, changedAt: r.created_at });
+        } else {
+          skipped.push({ param: rawParam, reason: `no matching live config slot for ${category}/${knobKey}` });
+        }
+        continue;
+      }
+
+      // Bare param — try autotune_params first
       try {
-        const cur = dbInstance.prepare(`SELECT current_value FROM autotune_params WHERE key = ?`).get(r.param);
-        if (!cur) { skipped.push({ param: r.param, reason: 'param not in autotune_params (legacy/non-tunable)' }); continue; }
-        if (String(cur.current_value) === String(r.new_value)) { skipped.push({ param: r.param, reason: 'already at SCAM-winning value' }); continue; }
-        upd.run(r.new_value, r.param);
-        log.run(r.param, cur.current_value, r.new_value, 'RESTORE_APR_27_AT_12_54_PM — operator restored just the 9 pre-SCAM changes (excludes the auto-tuner over-corrections from Apr 27 evening)');
-        applied.push({ param: r.param, from: cur.current_value, to: r.new_value, changedAt: r.created_at });
+        const cur = dbInstance.prepare(`SELECT current_value FROM autotune_params WHERE key = ?`).get(rawParam);
+        if (cur) {
+          if (String(cur.current_value) === String(r.new_value)) {
+            skipped.push({ param: rawParam, reason: 'already at SCAM-winning value' });
+            continue;
+          }
+          autotuneUpd.run(r.new_value, rawParam);
+          auditLog.run(rawParam, cur.current_value, r.new_value, 'RESTORE_APR_27_AT_12_54_PM — operator restored SCAM-winning config');
+          applied.push({ param: rawParam, from: cur.current_value, to: r.new_value, appliedTo: 'autotune_params', changedAt: r.created_at });
+        } else {
+          // Fallback — try the live configs by treating it as TUNING/SCORING
+          let where = applyConfigValue('SCORING', rawParam, newVal);
+          if (!where) where = applyConfigValue('TUNING', rawParam, newVal);
+          if (where) {
+            applied.push({ param: rawParam, value: newVal, appliedTo: where, changedAt: r.created_at });
+          } else {
+            skipped.push({ param: rawParam, reason: 'param not found in any config table' });
+          }
+        }
       } catch (err) {
-        skipped.push({ param: r.param, reason: err.message });
+        skipped.push({ param: rawParam, reason: err.message });
       }
     }
 
-    // Live-reload V5 thresholds from autotune_params (no restart needed)
-    try {
-      if (typeof syncV5ConfigFromDb === 'function') syncV5ConfigFromDb();
-    } catch {}
+    // Persist all touched config tables so changes survive restart
+    try { persistScoringConfig(); } catch {}
+    try { persistExtendedConfig('scanner'); } catch {}
+    try { persistExtendedConfig('wallets'); } catch {}
+    try { persistExtendedConfig('prelaunch'); } catch {}
+    try { persistExtendedConfig('outcomes'); } catch {}
+    try { persistAIConfig(); } catch {}
+    try { if (typeof syncV5ConfigFromDb === 'function') syncV5ConfigFromDb(); } catch {}
 
-    logEvent('INFO', 'RESTORE_APR_27_1254', `${applied.length} params restored to pre-12:54pm Apr 27 state`);
+    logEvent('INFO', 'RESTORE_APR_27_1254', `${applied.length} params restored to pre-12:54pm Apr 27 state, ${skipped.length} skipped`);
     res.json({
       ok: true,
       cutoffUsed: '2026-04-27 16:54:00 UTC (= 12:54pm ET when SCAM 972x posted)',
@@ -8116,9 +8188,9 @@ const _restoreApr27At1254Handler = (req, res) => {
       skippedCount: skipped.length,
       applied,
       skipped,
-      message: 'Restored to the SCAM-winning config snapshot. The 36 auto-tuner over-corrections from Apr 27 evening are NOT applied.',
+      message: 'Restored to the SCAM-winning config snapshot. The 36 auto-tuner over-corrections from Apr 27 evening are NOT applied. All configs persisted.',
     });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  } catch (err) { res.status(500).json({ ok: false, error: err.message, stack: (err.stack || '').slice(0, 500) }); }
 };
 app.post('/api/tuning/restore-april-27-at-1254pm', _restoreApr27At1254Handler);
 app.get('/api/tuning/restore-april-27-at-1254pm',  _restoreApr27At1254Handler);  // browser-bar use
