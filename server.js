@@ -5379,6 +5379,9 @@ async function processCandidate(candidate, isRescan = false) {
     {
       const c = enrichedCandidate;
       const sm = c._smartMoney;
+      const postMigGuardEnabled = ['1','true','yes','on'].includes(
+        String(process.env.POST_MIG_DUMP_GUARD_ENABLED || '').toLowerCase()
+      );
       const clusterQualityRequired = ['1','true','yes','on'].includes(
         String(process.env.CLUSTER_QUALITY_REQUIRED || '').toLowerCase()
       );
@@ -5386,7 +5389,7 @@ async function processCandidate(candidate, isRescan = false) {
         || (sm?.kind === 'cluster' && (!clusterQualityRequired || sm?.qualityVerified === true));
       const isMigrated     = c.pumpFunMigrated === true || c.pumpFunStage === 'MIGRATED';
 
-      if (finalDecision === 'AUTO_POST' && isMigrated && !isWalletBypass) {
+      if (postMigGuardEnabled && finalDecision === 'AUTO_POST' && isMigrated && !isWalletBypass) {
         const spike1h    = SCORING_CONFIG.postMigSpike1hPct      ?? 50;
         const dumpPct    = SCORING_CONFIG.postMigDumpPct         ?? -3;
         const buyRatioMin= SCORING_CONFIG.postMigBuyRatioMin     ?? 0.45;
@@ -16504,15 +16507,17 @@ app.listen(PORT, async () => {
   {
     const isOn = (name) => ['1','true','yes','on'].includes(String(process.env[name] || '').toLowerCase());
     const verticalSpikeOn       = isOn('VERTICAL_SPIKE_BLOCK_ENABLED');
+    const postMigOn             = isOn('POST_MIG_DUMP_GUARD_ENABLED');
     const deadCoinOn            = isOn('DEAD_COIN_GATE_ENABLED');
     const clusterQualityOn      = isOn('CLUSTER_QUALITY_REQUIRED');
     const ic = (on) => on ? '✓' : '⚠';
     const sw = (on) => on ? 'ACTIVE' : 'DISABLED';
     console.log(`[startup] ${ic(verticalSpikeOn)} Vertical-spike block ${sw(verticalSpikeOn)} (VERTICAL_SPIKE_BLOCK_ENABLED)`);
+    console.log(`[startup] ${ic(postMigOn)} Post-migration dump guard ${sw(postMigOn)} (POST_MIG_DUMP_GUARD_ENABLED)`);
     console.log(`[startup] ${ic(deadCoinOn)} Dead-coin gate ${sw(deadCoinOn)} (DEAD_COIN_GATE_ENABLED) — postSpike score adjustment still applies regardless`);
     console.log(`[startup] ${ic(clusterQualityOn)} Cluster quality requirement ${sw(clusterQualityOn)} (CLUSTER_QUALITY_REQUIRED) — when off, any 3-wallet cluster bypasses guards`);
-    if (!verticalSpikeOn && !deadCoinOn && !clusterQualityOn) {
-      console.log(`[startup] 📈 Apr-27-baseline guards — all 3 kill switches OFF (max call volume mode)`);
+    if (!verticalSpikeOn && !postMigOn && !deadCoinOn && !clusterQualityOn) {
+      console.log(`[startup] 📈 Apr-27-baseline guards — all 4 kill switches OFF (max call volume mode)`);
     }
   }
 
