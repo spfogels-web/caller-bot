@@ -5309,22 +5309,28 @@ async function processCandidate(candidate, isRescan = false) {
     // launch; the guard couldn't distinguish exit-liquidity from genuine
     // breakout). Set VERTICAL_SPIKE_BLOCK_ENABLED=1 in Railway env to
     // re-enable.
+    //
+    // Cluster bypass: when CLUSTER_QUALITY_REQUIRED env var is set, the
+    // cluster must have ≥2 KNOWN_PROFITABLE wallets to bypass; otherwise
+    // any cluster bypasses (Apr-27 behavior).
+    //
+    // Score-trump bypass: trump bypasses unconditionally now (Apr-27
+    // behavior). The 5m≥80% narrowing was killed per operator request to
+    // stop blocking SCAM-style moonshots — those move ≥80% in 5m by
+    // definition and were getting filtered.
     {
       const c = enrichedCandidate;
       const verticalSpikeEnabled = ['1','true','yes','on'].includes(
         String(process.env.VERTICAL_SPIKE_BLOCK_ENABLED || '').toLowerCase()
       );
-      // Cluster bypass now requires qualityVerified (≥2 KNOWN_PROFITABLE
-      // wallets in the swarm). Sybil clusters of 3 disposable wallets no
-      // longer bypass this guard.
+      const clusterQualityRequired = ['1','true','yes','on'].includes(
+        String(process.env.CLUSTER_QUALITY_REQUIRED || '').toLowerCase()
+      );
       const sm = c._smartMoney;
-      const isWalletBypass = sm?.kind === 'kol' || (sm?.kind === 'cluster' && sm?.qualityVerified === true);
+      const isWalletBypass = sm?.kind === 'kol'
+        || (sm?.kind === 'cluster' && (!clusterQualityRequired || sm?.qualityVerified === true));
       const isScoreTrump   = !!c._scoreTrump;
-      // Score-trump bypass is narrowed: a coin pumping ≥80% in a single
-      // 5m candle is a vertical exit-liquidity move regardless of how
-      // young/cheap it is. Require slow-build context even for trumped coins.
-      const isExtremeSpike = Number(c.priceChange5m ?? c.pct_change_5m ?? 0) >= 80;
-      if (verticalSpikeEnabled && finalDecision === 'AUTO_POST' && !isWalletBypass && !(isScoreTrump && !isExtremeSpike)) {
+      if (verticalSpikeEnabled && finalDecision === 'AUTO_POST' && !isWalletBypass && !isScoreTrump) {
         const spike5m = SCORING_CONFIG.verticalSpike5mPct ?? 30;
         const buildMin = SCORING_CONFIG.slowBuildMin1hPct ?? 5;
         const buildMax = SCORING_CONFIG.slowBuildMax1hPct ?? 50;
@@ -5373,7 +5379,11 @@ async function processCandidate(candidate, isRescan = false) {
     {
       const c = enrichedCandidate;
       const sm = c._smartMoney;
-      const isWalletBypass = sm?.kind === 'kol' || (sm?.kind === 'cluster' && sm?.qualityVerified === true);
+      const clusterQualityRequired = ['1','true','yes','on'].includes(
+        String(process.env.CLUSTER_QUALITY_REQUIRED || '').toLowerCase()
+      );
+      const isWalletBypass = sm?.kind === 'kol'
+        || (sm?.kind === 'cluster' && (!clusterQualityRequired || sm?.qualityVerified === true));
       const isMigrated     = c.pumpFunMigrated === true || c.pumpFunStage === 'MIGRATED';
 
       if (finalDecision === 'AUTO_POST' && isMigrated && !isWalletBypass) {
@@ -5424,7 +5434,11 @@ async function processCandidate(candidate, isRescan = false) {
     {
       const c = enrichedCandidate;
       const sm = c._smartMoney;
-      const isWalletBypass = sm?.kind === 'kol' || (sm?.kind === 'cluster' && sm?.qualityVerified === true);
+      const clusterQualityRequired = ['1','true','yes','on'].includes(
+        String(process.env.CLUSTER_QUALITY_REQUIRED || '').toLowerCase()
+      );
+      const isWalletBypass = sm?.kind === 'kol'
+        || (sm?.kind === 'cluster' && (!clusterQualityRequired || sm?.qualityVerified === true));
       const hardBlock = SCORING_CONFIG.latePump1hHardBlock ?? 80;
       const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
       if (finalDecision === 'AUTO_POST' && !isWalletBypass && pct1h >= hardBlock) {
@@ -5447,11 +5461,20 @@ async function processCandidate(candidate, isRescan = false) {
     // Sub-70% drops are NOT gated here — postSpike's score adjustment
     // (-25 to +15 to demand) lets the score floor handle them naturally.
     // KOL signals bypass.
+    //
+    // KILL SWITCH: DEAD_COIN_GATE_ENABLED env var. Defaults OFF because
+    // the operator wants Apr-27-style call volume back. The postSpike
+    // SCORE adjustment still applies (dead coins still take -25 to demand),
+    // but the GATE no longer hard-blocks. Set DEAD_COIN_GATE_ENABLED=1 to
+    // re-enable.
     {
       const c = enrichedCandidate;
+      const deadCoinGateEnabled = ['1','true','yes','on'].includes(
+        String(process.env.DEAD_COIN_GATE_ENABLED || '').toLowerCase()
+      );
       const isKolBypass = c._smartMoney?.kind === 'kol';
       const postSpike   = scoreResult?.parts?._v5?.postSpike;
-      if (finalDecision === 'AUTO_POST' && !isKolBypass && postSpike?.deadCoin) {
+      if (deadCoinGateEnabled && finalDecision === 'AUTO_POST' && !isKolBypass && postSpike?.deadCoin) {
         const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
         logEvent('INFO', 'DEAD_COIN_BLOCK',
           `${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% tier=${postSpike.dropTier} → WATCHLIST (${postSpike.signals?.[0] ?? 'dead-coin flag set'})`);
@@ -16474,14 +16497,22 @@ app.listen(PORT, async () => {
   console.log('[startup] ✓ Learning loop active — outcome tracking + missed winner detection');
 
   // ── Guard status banner ───────────────────────────────────────────────────
+  // Each guard added since Apr 27 has an env-var kill switch. By default they
+  // are OFF (matching Apr-27-baseline behavior — when the bot caught
+  // SCAM 972x, AGI 26x, ClosedAI 23x etc.). Set the corresponding env var to
+  // 1/true/yes/on in Railway to re-arm a specific guard.
   {
-    const verticalSpikeOn = ['1','true','yes','on'].includes(
-      String(process.env.VERTICAL_SPIKE_BLOCK_ENABLED || '').toLowerCase()
-    );
-    if (!verticalSpikeOn) {
-      console.log('[startup] ⚠ Vertical-spike block DISABLED (VERTICAL_SPIKE_BLOCK_ENABLED not set) — fast-launch coins will NOT be filtered by the 5m≥45% gate. This was killed to stop missing SCAM-style moonshots.');
-    } else {
-      console.log('[startup] ✓ Vertical-spike block ACTIVE — 5m≥' + (SCORING_CONFIG.verticalSpike5mPct ?? 45) + '% with no slow-build context will be sent to WATCHLIST');
+    const isOn = (name) => ['1','true','yes','on'].includes(String(process.env[name] || '').toLowerCase());
+    const verticalSpikeOn       = isOn('VERTICAL_SPIKE_BLOCK_ENABLED');
+    const deadCoinOn            = isOn('DEAD_COIN_GATE_ENABLED');
+    const clusterQualityOn      = isOn('CLUSTER_QUALITY_REQUIRED');
+    const ic = (on) => on ? '✓' : '⚠';
+    const sw = (on) => on ? 'ACTIVE' : 'DISABLED';
+    console.log(`[startup] ${ic(verticalSpikeOn)} Vertical-spike block ${sw(verticalSpikeOn)} (VERTICAL_SPIKE_BLOCK_ENABLED)`);
+    console.log(`[startup] ${ic(deadCoinOn)} Dead-coin gate ${sw(deadCoinOn)} (DEAD_COIN_GATE_ENABLED) — postSpike score adjustment still applies regardless`);
+    console.log(`[startup] ${ic(clusterQualityOn)} Cluster quality requirement ${sw(clusterQualityOn)} (CLUSTER_QUALITY_REQUIRED) — when off, any 3-wallet cluster bypasses guards`);
+    if (!verticalSpikeOn && !deadCoinOn && !clusterQualityOn) {
+      console.log(`[startup] 📈 Apr-27-baseline guards — all 3 kill switches OFF (max call volume mode)`);
     }
   }
 
