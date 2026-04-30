@@ -1436,9 +1436,8 @@ const SCORING_CONFIG_DEFAULTS = {
   // Each can be re-armed independently via /api/config/scoring if needed.
   clusterMinScoreToPost:       0,    // 0 = no cluster floor (4/27 behavior)
   absoluteMinScoreToPost:      0,    // 0 = no absolute floor
-  fallenKnife1hDropPct:     -999,    // -999 = guard never fires (only triggers on impossible drop)
-  fallenKnife5mReversalPct:    3,    // unused while guard is disabled
-  fallenKnife5mBuyRatio:    0.60,    // unused
+  // Fallen-knife guard removed — superseded by V5 postSpike module which
+  // grades pullbacks 20/40/55/70% and flags dead coins. See computePostSpikeBehavior.
   latePump1hHardBlock:       999,    // 999% = effectively no hard block (4/27 had no such gate)
 
   // ── POST-MIGRATION DUMP GUARD ──────────────────────────────────────────
@@ -1496,12 +1495,11 @@ try {
       // 4/27 baseline restoration — disable today's new guards
       clusterMinScoreToPost:    0,
       absoluteMinScoreToPost:   0,
-      fallenKnife1hDropPct:  -999,
       latePump1hHardBlock:    999,
       // Operator-tuned vertical-spike threshold (raised 30→40→45)
       verticalSpike5mPct:      45,
     };
-    const MIGRATE_FORCE_VERSION = 'v9';   // v9 = vertical-spike threshold 45 (was v8 at 40)
+    const MIGRATE_FORCE_VERSION = 'v10';  // v10 = fallen-knife removed in favor of V5 postSpike module
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -5346,53 +5344,28 @@ async function processCandidate(candidate, isRescan = false) {
       }
     }
 
-    // ── FALLEN-KNIFE GUARD: require buyer-return confirmation on dropping coins ──
-    // Last 5 calls were stuff like $WOULDNT 0.76x, $sem 1.12x, $SCAMTRUMP 1.02x
-    // — coins that were already mid-dump or at a dead-cat-bounce level when
-    // called. The bot was buying pre-reversal because score-time signals
-    // (volume velocity, buy pressure) looked OK in raw-aggregate but masked
-    // the price trajectory.
+    // ── DEAD-COIN GATE (post-spike behavior) ─────────────────────────────
+    // Replaces the old binary fallen-knife guard with the operator's graded
+    // post-spike behavior framework. Block AUTO_POST only when the V5
+    // postSpike module flagged the coin as DEAD:
+    //   - 1h drop ≥70%, OR
+    //   - 1h drop 60-70% AND volume <30% of 6h baseline AND no recovery
+    // The "narrative reclaim" downgrade lets coins with heavy buyer return
+    // (vol ≥1.5x baseline + 5m buys winning) bypass the dead flag.
     //
-    // Logic: if 1h price change is sharply negative AND the last 5 min hasn't
-    // confirmed a reversal (price still flat-down OR sells > buys in last 5
-    // min), force WATCHLIST. KOL signals bypass (curated wallet conviction).
-    //
-    // Tunable via SCORING_CONFIG:
-    //   fallenKnife1hDropPct   — drop threshold to TRIGGER the check (-15%)
-    //   fallenKnife5mReversalPct — 5m price required to confirm reversal (+3%)
-    //   fallenKnife5mBuyRatio  — 5m buy-share threshold to confirm reversal (0.60)
+    // Sub-70% drops are NOT gated here — postSpike's score adjustment
+    // (-25 to +15 to demand) lets the score floor handle them naturally.
+    // KOL signals bypass.
     {
       const c = enrichedCandidate;
       const isKolBypass = c._smartMoney?.kind === 'kol';
-      if (finalDecision === 'AUTO_POST' && !isKolBypass) {
-        const dropTrigger    = SCORING_CONFIG.fallenKnife1hDropPct      ?? -15;
-        const reversalNeeded = SCORING_CONFIG.fallenKnife5mReversalPct  ?? 3;
-        const buyRatioReq    = SCORING_CONFIG.fallenKnife5mBuyRatio     ?? 0.60;
-
+      const postSpike   = scoreResult?.parts?._v5?.postSpike;
+      if (finalDecision === 'AUTO_POST' && !isKolBypass && postSpike?.deadCoin) {
         const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
-        const pct5m = Number(c.priceChange5m ?? c.pct_change_5m ?? 0);
-        const b5    = Number(c.buys5m  ?? 0);
-        const s5    = Number(c.sells5m ?? 0);
-        const ratio5m = (b5 + s5) > 0 ? b5 / (b5 + s5) : null;
-
-        const isFalling = pct1h < dropTrigger;
-        if (isFalling) {
-          // Need at least ONE reversal signal to allow the call
-          const priceTurning  = pct5m >= reversalNeeded;
-          const buyersWinning = ratio5m != null && ratio5m >= buyRatioReq;
-          const reversalConfirmed = priceTurning || buyersWinning;
-
-          if (!reversalConfirmed) {
-            logEvent('INFO', 'FALLEN_KNIFE_BLOCK',
-              `${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% 5m=${pct5m.toFixed(1)}% buys5m=${b5} sells5m=${s5} ratio=${ratio5m != null ? (ratio5m*100).toFixed(0)+'%' : 'n/a'} → WATCHLIST (no reversal)`);
-            console.log(`[auto-caller] 🔪 Fallen-knife block — $${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% 5m=${pct5m.toFixed(1)}% no buyer return → WATCHLIST`);
-            finalDecision = 'WATCHLIST';
-          } else {
-            logEvent('INFO', 'FALLEN_KNIFE_PASS',
-              `${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% reversal confirmed via ${priceTurning ? `5m=${pct5m.toFixed(1)}%` : `5m-buy-ratio ${(ratio5m*100).toFixed(0)}%`}`);
-            console.log(`[auto-caller] ↗ Reversal confirmed on dropping coin — $${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% but ${priceTurning ? '5m turning up' : 'buyers dominating 5m'}`);
-          }
-        }
+        logEvent('INFO', 'DEAD_COIN_BLOCK',
+          `${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% tier=${postSpike.dropTier} → WATCHLIST (${postSpike.signals?.[0] ?? 'dead-coin flag set'})`);
+        console.log(`[auto-caller] ☠️ Dead-coin block — $${c.token ?? ca.slice(0,6)} 1h=${pct1h.toFixed(1)}% ${postSpike.dropTier} → WATCHLIST`);
+        finalDecision = 'WATCHLIST';
       }
     }
 
@@ -6859,7 +6832,6 @@ const _revertToBaselineHandler = async (req, res) => {
     const guardResets = {
       clusterMinScoreToPost:    0,
       absoluteMinScoreToPost:   0,
-      fallenKnife1hDropPct:  -999,
       latePump1hHardBlock:    999,
     };
     const guardsBefore = {};

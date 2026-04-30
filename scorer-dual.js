@@ -1921,6 +1921,132 @@ export function computeBuyingConfirmation(metrics, history = [], rugRisk = 0) {
   return { score: Math.round(score), type: pattern, signals, bullishCount };
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// POST-SPIKE BEHAVIOR SCORE
+//
+// Operator framework: "Strong coins don't just pump — they hold structure
+// after the first pullback." Grades pullback magnitude as a demand modifier:
+//
+//   20-40% drop  → +15 (ideal re-entry zone, often 3-10x runners)
+//   40-55% drop  → +8  (conditional — only credited if recovery confirms)
+//   55-70% drop  → -10 (danger zone, most coins fail here)
+//   70%+ drop    → -25 + deadCoin flag (likely dev exit / liquidity drain)
+//   <20% or +    → 0   (this isn't a pullback play)
+//
+// Plus modifiers:
+//   +10 recovery bonus — volume holding 1h baseline AND buys winning 5m ≥55%
+//   +5  higher-low bonus — prior history snapshot showed deeper drop
+//
+// Dead-coin flag is set when:
+//   - drop ≥70% (any volume condition), OR
+//   - drop 60-70% AND volume <30% of 6h baseline AND no recovery
+// Server-layer gate forces WATCHLIST when deadCoin=true.
+// ═════════════════════════════════════════════════════════════════════════════
+export function computePostSpikeBehavior(metrics, history = []) {
+  const m = metrics;
+  const drop1h = m.priceChange1h ?? 0;
+
+  // Only relevant when there's a meaningful negative move
+  if (drop1h >= 0) {
+    return { score: 0, dropTier: 'NONE', deadCoin: false, recoveryActive: false, signals: [] };
+  }
+
+  const dropPct = Math.abs(drop1h);
+  const signals = [];
+  let dropTier = 'NONE';
+  let baseScore = 0;
+  let conditionalNeedsRecovery = false;
+  let deadCoin = false;
+
+  if (dropPct >= 70) {
+    dropTier = 'AVOID';
+    baseScore = -25;
+    deadCoin = true;
+    signals.push(`1h ${drop1h.toFixed(0)}% — likely dead (dev exit / liquidity drain)`);
+  } else if (dropPct >= 55) {
+    dropTier = 'DANGER';
+    baseScore = -10;
+    signals.push(`1h ${drop1h.toFixed(0)}% — danger zone, most coins fail here`);
+  } else if (dropPct >= 40) {
+    dropTier = 'CAUTION';
+    baseScore = 8;
+    conditionalNeedsRecovery = true;  // only credited if recovery confirms
+    signals.push(`1h ${drop1h.toFixed(0)}% — caution tier, needs recovery confirmation`);
+  } else if (dropPct >= 20) {
+    dropTier = 'STRONG';
+    baseScore = 15;
+    signals.push(`1h ${drop1h.toFixed(0)}% — ideal re-entry zone`);
+  } else {
+    return { score: 0, dropTier: 'SHALLOW', deadCoin: false, recoveryActive: false, signals: [] };
+  }
+
+  // ── Recovery detection: volume holding + buys winning last 5m ─────────
+  const volBaseline = (m.volume1h != null && m.volume6h != null && m.volume6h > 0)
+    ? m.volume1h / Math.max(1, m.volume6h / 6)
+    : null;
+  const volBuilding = volBaseline != null && volBaseline >= 1.0;  // 1h vol >= avg hourly
+  const b5 = Number(m.buys5m  ?? 0);
+  const s5 = Number(m.sells5m ?? 0);
+  const buyRatio5m = (b5 + s5) > 0 ? b5 / (b5 + s5) : null;
+  const buysWinning5m = buyRatio5m != null && buyRatio5m >= 0.55;
+  const recoveryActive = volBuilding && buysWinning5m;
+
+  let recoveryBonus = 0;
+  if (recoveryActive) {
+    recoveryBonus = 10;
+    signals.push(`Recovery: vol ${volBaseline.toFixed(1)}x baseline + 5m buys ${b5}/${b5+s5} (${(buyRatio5m*100).toFixed(0)}%)`);
+  }
+
+  // (b) logic: 40-55% tier withholds +8 unless recovery confirms
+  if (conditionalNeedsRecovery && !recoveryActive) {
+    baseScore = 0;
+    signals.push(`Caution tier: no recovery yet — withholding +8 credit`);
+  }
+
+  // ── Dead-coin refinement ──────────────────────────────────────────────
+  // 60-70% drop with volume dead and no recovery = also dead
+  if (!deadCoin && dropPct >= 60 && !recoveryActive) {
+    if (volBaseline != null && volBaseline < 0.3) {
+      deadCoin = true;
+      signals.push(`Drop ${drop1h.toFixed(0)}% + volume ${volBaseline.toFixed(1)}x baseline → coin likely done`);
+    }
+  }
+  // 70%+ drop but volume STILL active + recovery = downgrade dead flag (rare narrative reclaim)
+  if (deadCoin && dropPct < 80 && recoveryActive && volBaseline != null && volBaseline >= 1.5) {
+    deadCoin = false;
+    signals.push(`70%+ drop but heavy buyer return — narrative reclaim possible, not auto-dead`);
+  }
+
+  // ── Higher-low detection from history ─────────────────────────────────
+  // If a previous snapshot showed a deeper drop than current, the coin has
+  // recovered some structure — strength signal worth +5.
+  let higherLowBonus = 0;
+  if (Array.isArray(history) && history.length >= 1) {
+    const deepestPrior = history.reduce((min, h) => {
+      const hPct = h.priceChange1h ?? h.pct_change_1h ?? 0;
+      return hPct < min ? hPct : min;
+    }, 0);
+    // Current drop is shallower (less negative) than a previous drop = higher low
+    if (deepestPrior < drop1h - 5) {  // require ≥5pp improvement to count
+      higherLowBonus = 5;
+      signals.push(`Higher low: prev drop ${deepestPrior.toFixed(0)}% → current ${drop1h.toFixed(0)}%`);
+    }
+  }
+
+  const totalScore = baseScore + recoveryBonus + higherLowBonus;
+
+  return {
+    score: totalScore,
+    dropTier,
+    deadCoin,
+    recoveryActive,
+    baseScore,
+    recoveryBonus,
+    higherLowBonus,
+    signals,
+  };
+}
+
 // ── Top-level v5 pipeline ──────────────────────────────────────────────────
 export function scoreCoinV5(candidate, metricsIn = null) {
   const m = metricsIn || calculateBehaviorMetrics(candidate);
@@ -1931,10 +2057,11 @@ export function scoreCoinV5(candidate, metricsIn = null) {
   const wallet   = computeWalletQualityScore(m);
   const demand   = computeDemandQualityScore(m);
 
-  // Compute buying confirmation BEFORE final call so we can apply its
-  // adjustments to the score components.
+  // Compute buying confirmation + post-spike behavior BEFORE final call so
+  // we can apply their adjustments to the score components.
   const history = candidate?._history || candidate?.history || [];
   const buyingConfirmation = computeBuyingConfirmation(m, history, rugRisk.score);
+  const postSpike          = computePostSpikeBehavior(m, history);
 
   // ── BUYING CONFIRMATION ADJUSTMENTS ─────────────────────────────────
   // When confirmation pattern detected, reduce knife/distribution penalty
@@ -1952,6 +2079,14 @@ export function scoreCoinV5(candidate, metricsIn = null) {
     // Moderate confirmation: smaller bonus
     momentumAdj = Math.min(100, momentum.score + 5);
     demandAdj   = Math.min(100, demand.score + 5);
+  }
+
+  // ── POST-SPIKE BEHAVIOR ADJUSTMENT ──────────────────────────────────
+  // Operator framework: pullback magnitude is a graded signal, not binary.
+  // Adds to demand quality (+15 ideal pullback, -25 likely-dead) so coins
+  // holding structure after a drop get credit and dump-traps get penalized.
+  if (postSpike.score !== 0) {
+    demandAdj = Math.max(0, Math.min(100, demandAdj + postSpike.score));
   }
 
   const W = V5_WEIGHTS.finalCall;
@@ -2009,6 +2144,7 @@ export function scoreCoinV5(candidate, metricsIn = null) {
     triggers,           // { call, kill }
     context,            // "Previously quiet, now showing X"
     buyingConfirmation, // { score, type: FAST_BUILD|SLOW_BUILD|RECLAIM|NONE, signals[], bullishCount }
+    postSpike,          // { score, dropTier, deadCoin, recoveryActive, signals[] }
   };
 }
 
@@ -2463,6 +2599,7 @@ export function runDualModel(candidate, discoveryWeights = null) {
       triggers:     v5.triggers,
       context:      v5.context,
       buyingConfirmation: v5.buyingConfirmation,
+      postSpike:          v5.postSpike,
       ageMinutes,
     },
   };
