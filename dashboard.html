@@ -3726,6 +3726,17 @@ body::before {
         </div>
       </div>
 
+      <!-- ═══ HALL OF FAME — Pulse's biggest winners (top 20 by peak X) ═══ -->
+      <div class="card" style="margin-bottom:12px;border:1px solid rgba(255,215,64,0.35);background:linear-gradient(180deg,rgba(255,215,64,0.05) 0%,rgba(0,0,0,0) 60%)">
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span>🏆 HALL OF FAME — Top 20 calls by peak multiple</span>
+          <button onclick="loadHallOfFame()" style="background:rgba(255,215,64,0.1);border:1px solid rgba(255,215,64,0.35);color:var(--gold);border-radius:5px;padding:5px 12px;font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer;letter-spacing:1px">↻ REFRESH</button>
+        </div>
+        <div class="card-body" id="hallOfFameList">
+          <div class="spinner"><div class="spin-dot" style="background:var(--gold)"></div><div class="spin-dot" style="background:var(--green)"></div></div>
+        </div>
+      </div>
+
       <!-- Score calibration -->
       <div class="card" style="margin-bottom:12px">
         <div class="card-header">🎯 SCORE CALIBRATION — Does higher score = better outcome?</div>
@@ -8527,6 +8538,8 @@ async function loadAnalytics(){
   }
   if(learning)renderLearningStats(learning);
   if(stats?.scores)renderHeatmap(stats.scores);
+  // Hall of Fame loads independently — it queries the calls table directly.
+  loadHallOfFame();
 }
 
 function renderCalibration(data){
@@ -8663,6 +8676,116 @@ function renderMissedWinnersDetailed(data){
       </div>
     </div>`;
   }).join('');
+}
+
+// ─── Hall of Fame ────────────────────────────────────────────────────────
+// Pulse's biggest winners — top 20 calls by peak_multiple. Each row collapsed
+// by default; click to expand for full call context (Claude verdict, structure
+// grade, wallet intel, exit/entry mcap, time-to-peak, etc.).
+async function loadHallOfFame() {
+  const el = document.getElementById('hallOfFameList');
+  if (!el) return;
+  try {
+    const data = await apiFetch('/api/hall-of-fame?limit=20');
+    renderHallOfFame(data?.rows || []);
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><div>Failed to load</div><div class="empty-hint">' + esc(err?.message || '') + '</div></div>';
+  }
+}
+
+function toggleHofRow(id) {
+  const detail = document.getElementById('hofDetail-' + id);
+  const arrow  = document.getElementById('hofArrow-'  + id);
+  if (!detail) return;
+  const open = detail.style.display !== 'none';
+  detail.style.display = open ? 'none' : 'block';
+  if (arrow) arrow.textContent = open ? '▸' : '▾';
+}
+
+function renderHallOfFame(rows) {
+  const el = document.getElementById('hallOfFameList');
+  if (!el) return;
+  if (!rows?.length) {
+    el.innerHTML = '<div class="empty-state"><div class="empty-icon">🏆</div><div>No Hall of Fame entries yet</div><div class="empty-hint">Calls graduate here once peak_multiple is recorded and outcome is WIN</div></div>';
+    return;
+  }
+  const fmtMcap = m => m == null ? '—' : (m >= 1_000_000 ? '$' + (m/1_000_000).toFixed(2) + 'M' : m >= 1000 ? '$' + (m/1000).toFixed(1) + 'K' : '$' + Math.round(m));
+  const fmtPctSafe = v => v == null ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(1) + '%';
+  const fmtTime = mins => mins == null ? '—' : mins < 60 ? Math.round(mins) + 'm' : (mins/60).toFixed(1) + 'h';
+
+  el.innerHTML = rows.map((r, idx) => {
+    const ca   = r.contract_address || '';
+    const tok  = r.token || (ca ? ca.slice(0,6) + '…' : '?');
+    const mult = Number(r.peak_multiple || 0);
+    const rank = idx + 1;
+    const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '#' + rank;
+    const mc = mult >= 50 ? 'var(--gold)' : mult >= 10 ? 'var(--green)' : mult >= 5 ? 'var(--cyan)' : 'var(--text1)';
+    const setup = (r.setup_type_at_call || r.claude_setup_type || '').replace(/_/g, ' ');
+    const calledAt = r.called_at ? new Date(r.called_at).toLocaleDateString() : '';
+    const verdict = r.claude_verdict ? r.claude_verdict.slice(0, 280) : '';
+
+    return `<div style="border-bottom:1px solid rgba(255,215,64,0.1)">
+      <div onclick="toggleHofRow(${r.id})" style="padding:12px 14px;cursor:pointer;transition:background 0.15s;display:flex;align-items:center;gap:12px" onmouseenter="this.style.background='rgba(255,215,64,0.05)'" onmouseleave="this.style.background='transparent'">
+        <span id="hofArrow-${r.id}" style="font-family:var(--mono);font-size:11px;color:var(--text3);width:12px">▸</span>
+        <div style="font-family:Orbitron,var(--mono);font-size:13px;font-weight:900;color:${rank <= 3 ? 'var(--gold)' : 'var(--text2)'};width:36px;text-align:center">${medal}</div>
+        <img src="https://dd.dexscreener.com/ds-data/tokens/solana/${esc(ca)}.png" onerror="this.style.display='none'" style="width:32px;height:32px;border-radius:50%;border:2px solid ${mc};object-fit:cover;box-shadow:0 0 8px ${mc}44;flex-shrink:0">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-family:var(--mono);font-size:13px;font-weight:700;color:var(--text1)">$${esc(tok)}</span>
+            ${setup ? '<span style="font-family:var(--mono);font-size:8px;color:var(--text3);text-transform:uppercase;letter-spacing:1px">'+esc(setup)+'</span>' : ''}
+          </div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:2px">
+            Entry <b style="color:var(--cyan)">${fmtMcap(r.market_cap_at_call)}</b> → Peak <b style="color:${mc}">${fmtMcap(r.peak_mcap)}</b>
+            ${r.time_to_peak_minutes != null ? ' · Time to peak <b>'+fmtTime(r.time_to_peak_minutes)+'</b>' : ''}
+            ${calledAt ? ' · ' + calledAt : ''}
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-family:Orbitron,var(--mono);font-size:24px;font-weight:900;color:${mc};text-shadow:0 0 12px ${mc}66;line-height:1">${mult.toFixed(1)}×</div>
+          <div style="font-family:var(--mono);font-size:7px;color:var(--text3);margin-top:2px">PEAK</div>
+        </div>
+      </div>
+
+      <div id="hofDetail-${r.id}" style="display:none;padding:14px 18px 18px 62px;background:rgba(255,215,64,0.03);border-top:1px solid rgba(255,215,64,0.08)">
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px">
+          ${kvTile('SCORE AT CALL',     r.score_at_call != null ? r.score_at_call : '—')}
+          ${kvTile('CLAUDE SCORE',      r.claude_score  != null ? r.claude_score  : '—')}
+          ${kvTile('CLAUDE RISK',       r.claude_risk   || '—', r.claude_risk === 'HIGH' || r.claude_risk === 'EXTREME' ? 'var(--red)' : r.claude_risk === 'LOW' ? 'var(--green)' : 'var(--gold)')}
+          ${kvTile('STRUCTURE',         r.structure_grade_at_call || '—')}
+          ${kvTile('REGIME',            r.regime_at_call || '—')}
+          ${kvTile('SOURCE',            r.bot_source || '—')}
+          ${kvTile('HOLDERS',           r.holders ?? '—')}
+          ${kvTile('TOP10 %',           r.top10_holder_pct != null ? r.top10_holder_pct.toFixed(1) + '%' : '—')}
+          ${kvTile('DEV %',             r.dev_wallet_pct  != null ? r.dev_wallet_pct.toFixed(1)  + '%' : '—', (r.dev_wallet_pct ?? 0) > 10 ? 'var(--red)' : 'var(--text1)')}
+          ${kvTile('BUNDLE',            r.bundle_risk     || '—', r.bundle_risk === 'SEVERE' || r.bundle_risk === 'HIGH' ? 'var(--red)' : 'var(--text1)')}
+          ${kvTile('SNIPERS',           r.sniper_wallet_count ?? '—')}
+          ${kvTile('BUY/SELL 1H',       r.buy_sell_ratio_1h != null ? (r.buy_sell_ratio_1h*100).toFixed(0) + '%' : '—')}
+          ${kvTile('VOL VELOCITY',      r.volume_velocity != null ? Number(r.volume_velocity).toFixed(2) : '—')}
+          ${kvTile('1H @ CALL',         fmtPctSafe(r.pct_change_1h))}
+          ${kvTile('6H @ CALL',         fmtPctSafe(r.pct_change_6h))}
+          ${kvTile('24H @ CALL',        fmtPctSafe(r.pct_change_24h))}
+        </div>
+
+        ${verdict ? '<div style="margin-bottom:12px;padding:10px 12px;background:rgba(0,0,0,0.3);border-left:3px solid var(--purple);border-radius:0 4px 4px 0"><div style="font-family:var(--mono);font-size:8px;color:var(--purple);letter-spacing:1.5px;margin-bottom:4px">🤖 CLAUDE VERDICT AT CALL</div><div style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.5;font-style:italic">"' + esc(verdict) + '"</div></div>' : ''}
+
+        ${r.openai_verdict ? '<div style="margin-bottom:12px;padding:10px 12px;background:rgba(0,0,0,0.3);border-left:3px solid var(--green);border-radius:0 4px 4px 0"><div style="font-family:var(--mono);font-size:8px;color:var(--green);letter-spacing:1.5px;margin-bottom:4px">🧠 GPT-4o VERDICT — '+esc(r.openai_decision || '')+(r.openai_conviction ? ' · '+esc(r.openai_conviction) : '')+'</div><div style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.5;font-style:italic">"' + esc(r.openai_verdict.slice(0,280)) + '"</div></div>' : ''}
+
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${ca ? '<a href="https://dexscreener.com/solana/'+esc(ca)+'" target="_blank" style="font-family:var(--mono);font-size:8px;color:var(--green);text-decoration:none;padding:4px 8px;background:rgba(0,230,118,0.1);border:1px solid rgba(0,230,118,0.25);border-radius:3px">DSC↗</a>' : ''}
+          ${ca ? '<a href="https://pump.fun/'+esc(ca)+'" target="_blank" style="font-family:var(--mono);font-size:8px;color:var(--orange);text-decoration:none;padding:4px 8px;background:rgba(255,109,0,0.1);border:1px solid rgba(255,109,0,0.25);border-radius:3px">PUMP↗</a>' : ''}
+          ${ca ? '<a href="https://solscan.io/token/'+esc(ca)+'" target="_blank" style="font-family:var(--mono);font-size:8px;color:var(--cyan);text-decoration:none;padding:4px 8px;background:rgba(24,255,255,0.08);border:1px solid rgba(24,255,255,0.25);border-radius:3px">SOLSCAN↗</a>' : ''}
+          ${ca ? '<button onclick="navigator.clipboard.writeText(\''+esc(ca)+'\')" style="font-family:var(--mono);font-size:8px;color:var(--text2);background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);border-radius:3px;padding:4px 8px;cursor:pointer">COPY CA</button>' : ''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Small helper for HoF detail tiles. col defaults to text1.
+function kvTile(label, value, col) {
+  col = col || 'var(--text1)';
+  return '<div style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.06);border-radius:4px;padding:8px 10px"><div style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1.5px;margin-bottom:3px">' + esc(label) + '</div><div style="font-family:var(--mono);font-size:11px;font-weight:700;color:' + col + '">' + esc(String(value)) + '</div></div>';
 }
 
 function renderLossAutopsyDetail(losses) {

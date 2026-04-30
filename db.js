@@ -1863,6 +1863,36 @@ export function getAllCalls({ limit = 50, offset = 0 } = {}) {
   return { rows, total };
 }
 
+// Hall of Fame — top N calls ranked by peak_multiple. Joins candidate-side
+// metadata so the expandable detail view has the full context (Claude verdict,
+// setup type, structure grade, wallet intel, etc.) without a second round-trip.
+// Filters: must have a peak_multiple recorded and be classified WIN.
+export function getHallOfFame({ limit = 20 } = {}) {
+  return db.prepare(`
+    SELECT c.id, c.token, c.contract_address, c.called_at, c.posted_at,
+           c.score_at_call, c.market_cap_at_call, c.price_at_call,
+           c.peak_multiple, c.peak_mcap, c.peak_at, c.time_to_peak_minutes,
+           c.outcome, c.regime_at_call, c.setup_type_at_call,
+           c.structure_grade_at_call, c.risk_at_call,
+           c.pct_change_1h, c.pct_change_6h, c.pct_change_24h,
+           c.bot_source,
+           ca.holders, ca.top10_holder_pct, ca.dev_wallet_pct,
+           ca.bundle_risk, ca.bubble_map_risk,
+           ca.mint_authority, ca.freeze_authority, ca.lp_locked,
+           ca.wallet_intel_score, ca.cluster_risk,
+           ca.claude_verdict, ca.claude_risk, ca.claude_setup_type, ca.claude_score,
+           ca.openai_decision, ca.openai_conviction, ca.openai_verdict,
+           ca.launch_quality_score, ca.buy_sell_ratio_1h, ca.volume_velocity,
+           ca.sniper_wallet_count, ca.composite_score, ca.narrative_tags
+      FROM calls c
+      LEFT JOIN candidates ca ON c.candidate_id = ca.id
+     WHERE c.peak_multiple IS NOT NULL
+       AND c.outcome = 'WIN'
+     ORDER BY c.peak_multiple DESC, c.posted_at DESC
+     LIMIT ?
+  `).all(limit);
+}
+
 export function getTopIgnored({ limit = 10 } = {}) {
   return db.prepare(`SELECT * FROM candidates WHERE final_decision = 'IGNORE' AND claude_score IS NOT NULL ORDER BY claude_score DESC LIMIT ?`).all(limit);
 }

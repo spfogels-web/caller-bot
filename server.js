@@ -36,7 +36,7 @@ import {
   createUserAlert, getUserAlerts, getPendingAlerts, fireAlert as fireUserAlert, cancelUserAlert,
   getCallsLeaderboard,
   insertWalletEvent, getRecentBuyersForCA, getWalletRecentEvents, getWalletEventStats,
-  getCandidates, getCandidateById, getAllCalls,
+  getCandidates, getCandidateById, getAllCalls, getHallOfFame,
   getSystemLog, getScoreDistribution, getDecisionBreakdown,
   getTopIgnoredFull, getPendingCalls,
   insertScannerFeed, getScannerFeed,
@@ -12470,6 +12470,17 @@ app.get('/api/calls', (req, res) => {
     const limit  = Math.min(Number(req.query.limit  ?? 50), 200);
     const offset = Number(req.query.offset ?? 0);
     res.json({ ok: true, ...getAllCalls({ limit, offset }) });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Hall of Fame — top N winners by peak_multiple. Powers the Hall of Fame
+// card on the Analytics tab. Default 20, capped at 50.
+app.get('/api/hall-of-fame', (req, res) => {
+  setCors(res);
+  try {
+    const limit = Math.min(Number(req.query.limit ?? 20), 50);
+    const rows  = getHallOfFame({ limit });
+    res.json({ ok: true, count: rows.length, rows });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
