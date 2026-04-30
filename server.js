@@ -14428,6 +14428,108 @@ const _birdeyeDiagHandler = async (req, res) => {
 app.get('/api/diagnostics/birdeye',  _birdeyeDiagHandler);
 app.post('/api/diagnostics/birdeye', _birdeyeDiagHandler);
 
+// Birdeye-vs-outcomes diagnostic — answers "did our winners come from the
+// data-thin path (birdeyeOk=false at first scan) or the data-rich path?"
+// Joins calls → candidates on candidate_id and buckets by birdeye_ok.
+// Optional ?since=YYYY-MM-DD to filter (defaults to all time).
+const _birdeyeOutcomesDiagHandler = (req, res) => {
+  setCors(res);
+  try {
+    const since = req.query.since && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
+      ? req.query.since
+      : null;
+    const sinceClause = since ? `AND c.called_at >= '${since}'` : '';
+
+    // Outcome counts + avg/max peak per birdeye_ok bucket
+    const buckets = dbInstance.prepare(`
+      SELECT
+        COALESCE(ca.birdeye_ok, 0) AS birdeye_ok,
+        COUNT(*) AS total,
+        SUM(CASE WHEN c.outcome='WIN'     THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN c.outcome='LOSS'    THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN c.outcome='NEUTRAL' THEN 1 ELSE 0 END) AS neutral,
+        SUM(CASE WHEN c.outcome IS NULL OR c.outcome='PENDING' THEN 1 ELSE 0 END) AS pending,
+        ROUND(AVG(c.peak_multiple), 2) AS avg_peak,
+        ROUND(MAX(c.peak_multiple), 2) AS max_peak,
+        ROUND(AVG(CASE WHEN c.outcome='WIN' THEN c.peak_multiple END), 2) AS avg_peak_wins
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE 1=1 ${sinceClause}
+      GROUP BY COALESCE(ca.birdeye_ok, 0)
+      ORDER BY birdeye_ok DESC
+    `).all();
+
+    // Top 15 winners with birdeye_ok=0 at scan
+    const topFalseWins = dbInstance.prepare(`
+      SELECT c.token, c.contract_address, c.called_at,
+             ROUND(c.peak_multiple, 2) AS peak_multiple,
+             ROUND(c.market_cap_at_call, 0) AS mcap_at_call,
+             c.score_at_call,
+             ca.birdeye_ok, ca.helius_ok
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE COALESCE(ca.birdeye_ok, 0) = 0
+        AND c.peak_multiple IS NOT NULL
+        ${sinceClause}
+      ORDER BY c.peak_multiple DESC
+      LIMIT 15
+    `).all();
+
+    // Top 15 winners with birdeye_ok=1 at scan (for comparison)
+    const topTrueWins = dbInstance.prepare(`
+      SELECT c.token, c.contract_address, c.called_at,
+             ROUND(c.peak_multiple, 2) AS peak_multiple,
+             ROUND(c.market_cap_at_call, 0) AS mcap_at_call,
+             c.score_at_call,
+             ca.birdeye_ok, ca.helius_ok
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE COALESCE(ca.birdeye_ok, 0) = 1
+        AND c.peak_multiple IS NOT NULL
+        ${sinceClause}
+      ORDER BY c.peak_multiple DESC
+      LIMIT 15
+    `).all();
+
+    // Build a one-line verdict so the operator doesn't have to read the table
+    const t = buckets.find(b => b.birdeye_ok === 1) || { wins: 0, total: 0, avg_peak_wins: 0 };
+    const f = buckets.find(b => b.birdeye_ok === 0) || { wins: 0, total: 0, avg_peak_wins: 0 };
+    const totalWins = (t.wins || 0) + (f.wins || 0);
+    const winShareTrue  = totalWins ? Math.round((t.wins || 0) / totalWins * 100) : 0;
+    const winShareFalse = totalWins ? Math.round((f.wins || 0) / totalWins * 100) : 0;
+
+    let verdict = 'No resolved wins yet.';
+    if (totalWins > 0) {
+      if (winShareFalse > winShareTrue + 15) {
+        verdict = `Wins are dominated by birdeyeOk=FALSE at scan (${winShareFalse}% vs ${winShareTrue}%). Premium upgrade is changing your signal mix — Birdeye theory CONFIRMED.`;
+      } else if (winShareTrue > winShareFalse + 15) {
+        verdict = `Wins are dominated by birdeyeOk=TRUE at scan (${winShareTrue}% vs ${winShareFalse}%). Birdeye theory REJECTED — winners came from the data-rich path.`;
+      } else {
+        verdict = `Wins are split roughly evenly (true=${winShareTrue}% / false=${winShareFalse}%). Birdeye coverage doesn't strongly predict outcome.`;
+      }
+    }
+
+    res.json({
+      ok: true,
+      since: since || 'all-time',
+      verdict,
+      summary: {
+        wins_when_birdeye_true:  t.wins || 0,
+        wins_when_birdeye_false: f.wins || 0,
+        avg_peak_x_when_birdeye_true:  t.avg_peak_wins || 0,
+        avg_peak_x_when_birdeye_false: f.avg_peak_wins || 0,
+      },
+      buckets,
+      top_winners_birdeye_false: topFalseWins,
+      top_winners_birdeye_true:  topTrueWins,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.get('/api/diagnostics/birdeye-vs-outcomes',  _birdeyeOutcomesDiagHandler);
+app.post('/api/diagnostics/birdeye-vs-outcomes', _birdeyeOutcomesDiagHandler);
+
 // Leaderboard banner diagnostic — operator reported the /lb banner stopped
 // rendering. Tests three things in order:
 //   1. Is LEADERBOARD_BANNER_URL reachable (HEAD check)?
