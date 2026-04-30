@@ -7895,6 +7895,116 @@ app.get('/api/tuning/config', (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// ── April 26-27 Snapshot: what the auto-tuner set during the winning days ────
+// Operator question: "Can we go back to that?" — yes. Pull every applied change
+// from tuning_audit dated Apr 26-27 (the days that produced SCAM 972x, SLURS
+// 30x, TRUMP 28x, AGI 26x, ClosedAI 23x, NiggaCoin 22x, Dunald 22x). For each
+// param show the LATEST value the tuner had at end of Apr 27 — that's the
+// state the bot was in when the moonshots landed.
+app.get('/api/tuning/april-27-snapshot', (req, res) => {
+  setCors(res);
+  try {
+    // Latest value per param within the Apr 26-27 window. SQLite uses a
+    // window function via rowid trick: take MAX(created_at) per param.
+    const rows = dbInstance.prepare(`
+      SELECT t.param, t.old_value, t.new_value, t.reason, t.status, t.created_at
+        FROM tuning_audit t
+        JOIN (
+          SELECT param, MAX(created_at) AS maxc
+            FROM tuning_audit
+           WHERE created_at >= '2026-04-26 00:00:00'
+             AND created_at <= '2026-04-27 23:59:59'
+             AND status IN ('APPLIED','AUTO_APPLIED')
+           GROUP BY param
+        ) m ON m.param = t.param AND m.maxc = t.created_at
+       ORDER BY t.created_at ASC
+    `).all();
+
+    // Also pull current value of each of those params so the operator can
+    // see what actually drifted vs what's still intact.
+    const currentByKey = {};
+    try {
+      const cur = dbInstance.prepare(`SELECT key, current_value FROM autotune_params`).all();
+      for (const r of cur) currentByKey[r.key] = r.current_value;
+    } catch {}
+
+    const diffs = rows.map(r => ({
+      param:        r.param,
+      apr27_value:  r.new_value,
+      pre_apr27:    r.old_value,
+      current:      currentByKey[r.param] ?? '(not in autotune_params)',
+      reason:       r.reason,
+      changed_at:   r.created_at,
+      drift:        currentByKey[r.param] != null && String(currentByKey[r.param]) !== String(r.new_value),
+    }));
+
+    res.json({
+      ok: true,
+      window: 'Apr 26 00:00 → Apr 27 23:59 UTC',
+      changeCount: rows.length,
+      driftCount: diffs.filter(d => d.drift).length,
+      params: diffs,
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// POST restore Apr 26-27 values for every drifted param. Logs every change to
+// tuning_audit with reason 'RESTORE_APR_27' so future audits can see what we
+// rolled back to. Refuses to run unless ?confirm=1 query param is set so
+// nobody triggers it accidentally.
+app.post('/api/tuning/restore-april-27', (req, res) => {
+  setCors(res);
+  if (req.query.confirm !== '1') {
+    return res.status(400).json({
+      ok: false,
+      error: 'Refusing without confirm — pass ?confirm=1 to apply. GET /api/tuning/april-27-snapshot first to preview which params will change.',
+    });
+  }
+  try {
+    const rows = dbInstance.prepare(`
+      SELECT t.param, t.new_value, t.created_at
+        FROM tuning_audit t
+        JOIN (
+          SELECT param, MAX(created_at) AS maxc
+            FROM tuning_audit
+           WHERE created_at >= '2026-04-26 00:00:00'
+             AND created_at <= '2026-04-27 23:59:59'
+             AND status IN ('APPLIED','AUTO_APPLIED')
+           GROUP BY param
+        ) m ON m.param = t.param AND m.maxc = t.created_at
+    `).all();
+
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'No tuning_audit entries found for Apr 26-27 — nothing to restore.' });
+    }
+
+    const applied = [];
+    const skipped = [];
+    const upd = dbInstance.prepare(`UPDATE autotune_params SET current_value = ?, last_changed_at = datetime('now') WHERE key = ?`);
+    const log = dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?, ?, ?, ?, 'APPLIED')`);
+    for (const r of rows) {
+      try {
+        const cur = dbInstance.prepare(`SELECT current_value FROM autotune_params WHERE key = ?`).get(r.param);
+        if (!cur) { skipped.push({ param: r.param, reason: 'param not in autotune_params (legacy/non-tunable)' }); continue; }
+        if (String(cur.current_value) === String(r.new_value)) { skipped.push({ param: r.param, reason: 'already at apr-27 value' }); continue; }
+        upd.run(r.new_value, r.param);
+        log.run(r.param, cur.current_value, r.new_value, 'RESTORE_APR_27 — operator restored values from the winning days (SCAM 972x cluster)');
+        applied.push({ param: r.param, from: cur.current_value, to: r.new_value });
+      } catch (err) {
+        skipped.push({ param: r.param, reason: err.message });
+      }
+    }
+
+    // Reload V5 thresholds from autotune_params so changes take effect on
+    // the very next candidate evaluation (no restart needed).
+    try {
+      if (typeof syncV5ConfigFromDb === 'function') syncV5ConfigFromDb();
+    } catch {}
+
+    res.json({ ok: true, appliedCount: applied.length, skippedCount: skipped.length, applied, skipped });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // POST apply a tuning change
 app.post('/api/tuning/apply', express.json(), (req, res) => {
   setCors(res);
