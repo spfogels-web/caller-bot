@@ -346,7 +346,7 @@ Required output format:
 // Read live scoring config from kv_store each run so dashboard edits
 // take effect on the very next outcome check — no restart needed.
 function getScoringConfig(dbInstance) {
-  const defaults = { winPeakMultiple: 1.5, neutralDrawdownPct: 10 };
+  const defaults = { winPeakMultiple: 1.3, neutralDrawdownPct: 10 };
   try {
     const row = dbInstance.prepare(`SELECT value FROM kv_store WHERE key='scoring_config'`).get();
     if (row?.value) return { ...defaults, ...JSON.parse(row.value) };
@@ -356,7 +356,7 @@ function getScoringConfig(dbInstance) {
 
 export async function runOutcomeTracker(dbInstance) {
   const cfg = getScoringConfig(dbInstance);
-  const WIN_PEAK  = Number(cfg.winPeakMultiple)    || 1.5;
+  const WIN_PEAK  = Number(cfg.winPeakMultiple)    || 1.3;
   const NEUT_PCT  = Number(cfg.neutralDrawdownPct) || 10;
   let unresolvedCalls;
   try {
@@ -383,8 +383,9 @@ export async function runOutcomeTracker(dbInstance) {
 
   for (const call of unresolvedCalls) {
     try {
-      // If we already have a stored peak ≥1.5x and it's not marked WIN, fix it immediately
-      // without needing to fetch current price (token might be dead on DexScreener)
+      // If we already have a stored peak ≥WIN_PEAK and it's not marked WIN,
+      // fix it immediately without needing to fetch current price (token
+      // might be dead on DexScreener)
       if (call.peak_multiple != null && call.peak_multiple >= WIN_PEAK && call.outcome !== 'WIN') {
         const ca = call.contract_address ?? call.contractAddress;
         dbInstance.prepare(`UPDATE calls SET outcome='WIN', auto_resolved=1, auto_resolved_at=datetime('now'), outcome_source='AUTO', outcome_set_at=datetime('now') WHERE id=?`).run(call.id);

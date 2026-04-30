@@ -1395,10 +1395,10 @@ const SCORING_CONFIG_DEFAULTS = {
   // multiplier here (e.g. 5 = "tune the system to find 5x coins"). Auto-
   // optimizer reads this and tunes everything else (foundation weights,
   // thresholds, bonuses) to maximize the number of coins that hit this
-  // target. winPeakMultiple stays a fallback WIN bar — anything ≥2.5x
+  // target. winPeakMultiple stays a fallback WIN bar — anything ≥1.3x
   // counts as a win even if it didn't reach the target.
   targetMultiplier:      5.0,   // USER-ONLY. Tuning goal for the whole system.
-  winPeakMultiple:       2.5,   // Fallback WIN threshold — ≥2.5x = WIN, <2.5x = LOSS.
+  winPeakMultiple:       1.3,   // Fallback WIN threshold — ≥1.3x = WIN, <1.3x = LOSS.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
   minLiquidityForPost:  1500,   // AXIOSCAN-MODE — $1.5K min liquidity (was $3K). Many 10x moonshots start with thin liquidity and grow it.
@@ -1480,14 +1480,14 @@ try {
       consensusOverrideScore:60,
       devFingerprintCap:      6,
     };
-    // Force-migrate: win threshold reshaped to 2.0 — user's mandate is
-    // "winning coins minimum 2x to 100x, sweet spot 3-5x, anything more is
-    // bonus." So 2x is the floor. Anything under 2x = LOSS, 2x+ = WIN.
-    // The 3-5x sweet-spot target is communicated to Claude in the prompt;
-    // the scorer finds coins with that profile via pre-breakout + early-
-    // entry + winner-wallet bonuses already shipped.
+    // Force-migrate: win threshold dropped to 1.3x per operator. The 3-5x
+    // sweet-spot target is still communicated to Claude in the prompt and
+    // remains the system's tuning goal via targetMultiplier — this just
+    // lowers the bar for what counts as a "winning call" in the scoreboard
+    // and learning loop. The scorer finds coins with the sweet-spot profile
+    // via pre-breakout + early-entry + winner-wallet bonuses already shipped.
     const MIGRATE_FORCE = {
-      winPeakMultiple:    2.5,  // fallback WIN threshold, was 2.0
+      winPeakMultiple:    1.3,  // fallback WIN threshold, lowered from 2.5 → 1.3
       neutralDrawdownPct: 10,
       sweetSpotBonus:     0,    // user disabled: MCap range isn't a signal
       secondaryBonus:     0,    // user disabled: MCap range isn't a signal
@@ -1499,7 +1499,7 @@ try {
       // Operator-tuned vertical-spike threshold (raised 30→40→45)
       verticalSpike5mPct:      45,
     };
-    const MIGRATE_FORCE_VERSION = 'v10';  // v10 = fallen-knife removed in favor of V5 postSpike module
+    const MIGRATE_FORCE_VERSION = 'v11';  // v11 = winPeakMultiple lowered to 1.3x; v10 = fallen-knife removed
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -1532,15 +1532,22 @@ try {
       } catch {}
     }
 
-    // ── Re-resolve existing calls against the new win threshold ──────────
-    // After winPeakMultiple drops, historical calls labeled NEUTRAL or LOSS
-    // may now qualify as WIN (and vice versa). Run once; flag in kv_store.
+    // ── Re-resolve historical outcomes against the new win threshold ─────
+    // When winPeakMultiple changes, every record in calls / audit_archive /
+    // calls_archive / coin_fingerprints needs its outcome re-flipped or the
+    // dashboard cards (Overview, Calls, Analytics) will disagree across views
+    // and the AI's training data (coin_fingerprints) will stay stuck on the
+    // old threshold. Flag key is versioned so each new threshold re-runs once.
     try {
-      const resolveFlagKey = 'migrated_resolve_calls_v_1_28';
+      const winTarget = SCORING_CONFIG.winPeakMultiple ?? 1.3;
+      // Slug the threshold into the flag key so any future threshold change
+      // (1.3 → 1.2, 1.3 → 1.5, etc.) automatically re-runs the migration.
+      const targetSlug = String(winTarget).replace(/[^0-9]/g, '_');
+      const resolveFlagKey = `migrated_resolve_calls_v_${targetSlug}`;
       const alreadyResolved = dbInstance.prepare(`SELECT value FROM kv_store WHERE key=?`).get(resolveFlagKey)?.value === '1';
       if (!alreadyResolved) {
-        const winTarget = SCORING_CONFIG.winPeakMultiple ?? 1.28;
-        const upRes = dbInstance.prepare(`
+        // calls — primary table the dashboard reads from
+        const callsRes = dbInstance.prepare(`
           UPDATE calls SET
             outcome          = CASE WHEN peak_multiple >= ? THEN 'WIN' ELSE 'LOSS' END,
             auto_resolved_at = datetime('now'),
@@ -1548,7 +1555,42 @@ try {
           WHERE outcome != 'PENDING'
             AND peak_multiple IS NOT NULL
         `).run(winTarget);
-        console.log(`[config:migrate] Re-resolved ${upRes.changes} calls against winPeakMultiple=${winTarget}`);
+
+        // audit_archive — long-term history table for analytics tab
+        let auditChanges = 0;
+        try {
+          const auditRes = dbInstance.prepare(`
+            UPDATE audit_archive SET
+              outcome           = CASE WHEN peak_multiple >= ? THEN 'WIN' ELSE 'LOSS' END,
+              outcome_locked_at = datetime('now')
+            WHERE peak_multiple IS NOT NULL
+          `).run(winTarget);
+          auditChanges = auditRes.changes;
+        } catch (e) { console.warn('[config:migrate] audit_archive re-resolve skipped:', e.message); }
+
+        // calls_archive — backup table from scoreboard resets
+        let archiveChanges = 0;
+        try {
+          const archiveRes = dbInstance.prepare(`
+            UPDATE calls_archive SET
+              outcome = CASE WHEN peak_multiple >= ? THEN 'WIN' ELSE 'LOSS' END
+            WHERE peak_multiple IS NOT NULL
+          `).run(winTarget);
+          archiveChanges = archiveRes.changes;
+        } catch (e) { console.warn('[config:migrate] calls_archive re-resolve skipped:', e.message); }
+
+        // coin_fingerprints — pattern matching training data (feeds the AI)
+        let fpChanges = 0;
+        try {
+          const fpRes = dbInstance.prepare(`
+            UPDATE coin_fingerprints SET
+              outcome = CASE WHEN peak_multiple >= ? THEN 'WIN' ELSE 'LOSS' END
+            WHERE peak_multiple IS NOT NULL
+          `).run(winTarget);
+          fpChanges = fpRes.changes;
+        } catch (e) { console.warn('[config:migrate] coin_fingerprints re-resolve skipped:', e.message); }
+
+        console.log(`[config:migrate] Re-resolved against winPeakMultiple=${winTarget}: calls=${callsRes.changes} audit_archive=${auditChanges} calls_archive=${archiveChanges} coin_fingerprints=${fpChanges}`);
         try { dbInstance.prepare(`INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, '1')`).run(resolveFlagKey); } catch {}
       }
     } catch (err) {
