@@ -14530,6 +14530,109 @@ const _birdeyeOutcomesDiagHandler = (req, res) => {
 app.get('/api/diagnostics/birdeye-vs-outcomes',  _birdeyeOutcomesDiagHandler);
 app.post('/api/diagnostics/birdeye-vs-outcomes', _birdeyeOutcomesDiagHandler);
 
+// Source-vs-outcomes diagnostic — groups wins by entry path (bot_source)
+// to answer "which lane is producing the moonshots?". Also slices by score
+// band so we can see whether low-score (≤30) wins are concentrated in a
+// specific bypass path (KOL / smart-money / cluster / fast-lane).
+//   ?since=YYYY-MM-DD  optional time filter
+//   ?minPeak=N         only count wins ≥ N (default 1.5)
+const _sourceOutcomesDiagHandler = (req, res) => {
+  setCors(res);
+  try {
+    const since = req.query.since && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
+      ? req.query.since
+      : null;
+    const minPeak = Number(req.query.minPeak ?? 1.5);
+    const sinceClause = since ? `AND c.called_at >= '${since}'` : '';
+
+    // Per-source breakdown (uses calls.bot_source — falls back to candidate's bot_source)
+    const bySource = dbInstance.prepare(`
+      SELECT
+        COALESCE(c.bot_source, ca.bot_source, 'UNKNOWN') AS source,
+        COUNT(*)                                              AS calls,
+        SUM(CASE WHEN c.outcome='WIN'  THEN 1 ELSE 0 END)     AS wins,
+        SUM(CASE WHEN c.outcome='LOSS' THEN 1 ELSE 0 END)     AS losses,
+        ROUND(AVG(CASE WHEN c.outcome='WIN' THEN c.peak_multiple END), 2) AS avg_peak_wins,
+        ROUND(MAX(c.peak_multiple), 2)                                    AS max_peak,
+        SUM(CASE WHEN c.peak_multiple >= 10  THEN 1 ELSE 0 END) AS n_10x,
+        SUM(CASE WHEN c.peak_multiple >= 25  THEN 1 ELSE 0 END) AS n_25x,
+        SUM(CASE WHEN c.peak_multiple >= 100 THEN 1 ELSE 0 END) AS n_100x
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE 1=1 ${sinceClause}
+      GROUP BY COALESCE(c.bot_source, ca.bot_source, 'UNKNOWN')
+      ORDER BY wins DESC, calls DESC
+    `).all().map(r => ({
+      ...r,
+      win_rate_pct: r.calls > 0 ? Math.round((r.wins / r.calls) * 100) : 0,
+    }));
+
+    // Score-band × source heatmap — answers "are score-25 wins concentrated
+    // in a particular path?". Buckets: ≤30, 31-50, 51-70, 71+.
+    const scoreBands = dbInstance.prepare(`
+      SELECT
+        COALESCE(c.bot_source, ca.bot_source, 'UNKNOWN') AS source,
+        CASE
+          WHEN c.score_at_call IS NULL THEN 'unknown'
+          WHEN c.score_at_call <= 30 THEN '0_to_30'
+          WHEN c.score_at_call <= 50 THEN '31_to_50'
+          WHEN c.score_at_call <= 70 THEN '51_to_70'
+          ELSE '71_plus'
+        END AS score_band,
+        COUNT(*) AS calls,
+        SUM(CASE WHEN c.outcome='WIN' THEN 1 ELSE 0 END)         AS wins,
+        SUM(CASE WHEN c.peak_multiple >= 10 THEN 1 ELSE 0 END)   AS n_10x,
+        ROUND(AVG(CASE WHEN c.outcome='WIN' THEN c.peak_multiple END), 2) AS avg_peak_wins
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE 1=1 ${sinceClause}
+      GROUP BY source, score_band
+      ORDER BY source, score_band
+    `).all();
+
+    // Top 25 winners with source attached
+    const topWinners = dbInstance.prepare(`
+      SELECT c.token,
+             ROUND(c.peak_multiple, 2)        AS peak,
+             ROUND(c.market_cap_at_call, 0)   AS mcap_at_call,
+             c.score_at_call                  AS score,
+             COALESCE(c.bot_source, ca.bot_source, 'UNKNOWN') AS source,
+             ca.cluster_risk,
+             ca.setup_type AS candidate_setup_type,
+             c.called_at
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE c.peak_multiple IS NOT NULL
+        AND c.peak_multiple >= ?
+        ${sinceClause}
+      ORDER BY c.peak_multiple DESC
+      LIMIT 25
+    `).all(minPeak);
+
+    // One-line verdict — which source has the highest win-share by count
+    const totalWins = bySource.reduce((s, r) => s + (r.wins || 0), 0);
+    const sortedByWins = [...bySource].sort((a, b) => (b.wins || 0) - (a.wins || 0));
+    const top = sortedByWins[0];
+    const verdict = totalWins > 0 && top
+      ? `Top win source: ${top.source} (${top.wins} wins, ${top.win_rate_pct}% WR, avg ${top.avg_peak_wins ?? '—'}x). ${Math.round((top.wins/totalWins)*100)}% of all wins came through this lane.`
+      : 'No resolved wins yet.';
+
+    res.json({
+      ok: true,
+      since: since || 'all-time',
+      min_peak_for_top_winners: minPeak,
+      verdict,
+      by_source: bySource,
+      score_band_x_source: scoreBands,
+      top_winners: topWinners,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.get('/api/diagnostics/source-vs-outcomes',  _sourceOutcomesDiagHandler);
+app.post('/api/diagnostics/source-vs-outcomes', _sourceOutcomesDiagHandler);
+
 // Leaderboard banner diagnostic — operator reported the /lb banner stopped
 // rendering. Tests three things in order:
 //   1. Is LEADERBOARD_BANNER_URL reachable (HEAD check)?
