@@ -5302,8 +5302,18 @@ async function processCandidate(candidate, isRescan = false) {
     //   verticalSpike5mPct  — 5m move that flags vertical (default 30%)
     //   slowBuildMin1hPct   — 1h pct that signals consolidation (default +5%)
     //   slowBuildMax1hPct   — 1h pct ceiling for slow build (default +50%)
+    //
+    // KILL SWITCH: VERTICAL_SPIKE_BLOCK_ENABLED env var. Defaults OFF
+    // because the guard was killing SCAM-style 100x+ vertical launches
+    // (the coin moves vertically because that's what real moonshots DO at
+    // launch; the guard couldn't distinguish exit-liquidity from genuine
+    // breakout). Set VERTICAL_SPIKE_BLOCK_ENABLED=1 in Railway env to
+    // re-enable.
     {
       const c = enrichedCandidate;
+      const verticalSpikeEnabled = ['1','true','yes','on'].includes(
+        String(process.env.VERTICAL_SPIKE_BLOCK_ENABLED || '').toLowerCase()
+      );
       // Cluster bypass now requires qualityVerified (≥2 KNOWN_PROFITABLE
       // wallets in the swarm). Sybil clusters of 3 disposable wallets no
       // longer bypass this guard.
@@ -5314,7 +5324,7 @@ async function processCandidate(candidate, isRescan = false) {
       // 5m candle is a vertical exit-liquidity move regardless of how
       // young/cheap it is. Require slow-build context even for trumped coins.
       const isExtremeSpike = Number(c.priceChange5m ?? c.pct_change_5m ?? 0) >= 80;
-      if (finalDecision === 'AUTO_POST' && !isWalletBypass && !(isScoreTrump && !isExtremeSpike)) {
+      if (verticalSpikeEnabled && finalDecision === 'AUTO_POST' && !isWalletBypass && !(isScoreTrump && !isExtremeSpike)) {
         const spike5m = SCORING_CONFIG.verticalSpike5mPct ?? 30;
         const buildMin = SCORING_CONFIG.slowBuildMin1hPct ?? 5;
         const buildMax = SCORING_CONFIG.slowBuildMax1hPct ?? 50;
@@ -16462,6 +16472,18 @@ app.listen(PORT, async () => {
   // ── v8.0: Start Learning Loop ─────────────────────────────────────────────
   learningLoopHandles = startLearningLoop(dbInstance, CLAUDE_API_KEY);
   console.log('[startup] ✓ Learning loop active — outcome tracking + missed winner detection');
+
+  // ── Guard status banner ───────────────────────────────────────────────────
+  {
+    const verticalSpikeOn = ['1','true','yes','on'].includes(
+      String(process.env.VERTICAL_SPIKE_BLOCK_ENABLED || '').toLowerCase()
+    );
+    if (!verticalSpikeOn) {
+      console.log('[startup] ⚠ Vertical-spike block DISABLED (VERTICAL_SPIKE_BLOCK_ENABLED not set) — fast-launch coins will NOT be filtered by the 5m≥45% gate. This was killed to stop missing SCAM-style moonshots.');
+    } else {
+      console.log('[startup] ✓ Vertical-spike block ACTIVE — 5m≥' + (SCORING_CONFIG.verticalSpike5mPct ?? 45) + '% with no slow-build context will be sent to WATCHLIST');
+    }
+  }
 
   // ── Periodic walletDb reload (5 min) ──────────────────────────────────────
   // The outcome tracker promotes self-trained wallets to category=WINNER when
