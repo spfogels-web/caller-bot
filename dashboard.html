@@ -8685,11 +8685,23 @@ function renderMissedWinnersDetailed(data){
 async function loadHallOfFame() {
   const el = document.getElementById('hallOfFameList');
   if (!el) return;
+  // Direct fetch (not apiFetch) so we can distinguish:
+  //   - endpoint missing (404)     → backend not deployed yet
+  //   - empty response (200, [])   → no resolved WIN calls yet
+  //   - network error              → connection issue
   try {
-    const data = await apiFetch('/api/hall-of-fame?limit=20');
-    renderHallOfFame(data?.rows || []);
+    const r = await fetch('/api/hall-of-fame?limit=20', { signal: AbortSignal.timeout(15000) });
+    if (r.status === 404) {
+      el.innerHTML = '<div class="empty-state"><div class="empty-icon">🔄</div><div>Endpoint not yet deployed</div><div class="empty-hint">Backend redeploy in progress — try refreshing in 1-2 minutes</div></div>';
+      return;
+    }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    if (!data?.ok) throw new Error(data?.error || 'Server returned ok:false');
+    renderHallOfFame(data.rows || []);
   } catch (err) {
-    el.innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><div>Failed to load</div><div class="empty-hint">' + esc(err?.message || '') + '</div></div>';
+    console.error('[hall-of-fame] fetch failed:', err?.message);
+    el.innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><div>Failed to load</div><div class="empty-hint">' + esc(err?.message || 'unknown error') + '</div></div>';
   }
 }
 
