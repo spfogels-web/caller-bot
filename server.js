@@ -8044,6 +8044,85 @@ const _restoreApr27Handler = (req, res) => {
 app.post('/api/tuning/restore-april-27', _restoreApr27Handler);
 app.get('/api/tuning/restore-april-27',  _restoreApr27Handler);  // browser-bar use
 
+// Focused restore — only the 9 changes that were active at 12:54pm Apr 27
+// (when SCAM 972x posted). The full restore-april-27 above includes 36
+// additional changes that the auto-tuner made AFTER the SCAM win — those
+// were the over-corrections that led to the dust calls. This endpoint
+// restores ONLY the pre-12:54pm-Apr-27 winning state.
+//
+// Filter: changes between Apr 26 00:00 UTC and Apr 27 12:54 UTC, latest
+// value per param (in case the same param was tuned multiple times).
+const _restoreApr27At1254Handler = (req, res) => {
+  setCors(res);
+  if (req.query.confirm !== '1') {
+    return res.status(400).json({
+      ok: false,
+      error: 'Refusing without confirm — pass ?confirm=1 to apply just the 9 pre-12:54pm Apr 27 changes (SCAM 972x winning config).',
+    });
+  }
+  try {
+    // Pull only changes between Apr 26 00:00 and Apr 27 12:54 UTC. SCAM hit
+    // at 12:54 ET which is 16:54 UTC, but the audit timestamps in the
+    // snapshot are already in UTC and the latest pre-SCAM AI batch was at
+    // 01:41:38 UTC. Use 16:54 UTC as the cutoff so we capture every change
+    // that happened before SCAM posted regardless of timezone confusion.
+    const rows = dbInstance.prepare(`
+      SELECT t.param, t.new_value, t.created_at
+        FROM tuning_audit t
+        JOIN (
+          SELECT param, MAX(created_at) AS maxc
+            FROM tuning_audit
+           WHERE created_at >= '2026-04-26 00:00:00'
+             AND created_at <= '2026-04-27 16:54:00'
+             AND status IN ('APPLIED','AUTO_APPLIED')
+           GROUP BY param
+        ) m ON m.param = t.param AND m.maxc = t.created_at
+    `).all();
+
+    if (!rows.length) {
+      return res.status(404).json({
+        ok: false,
+        error: 'No tuning_audit entries found in the pre-12:54pm Apr 27 window.',
+      });
+    }
+
+    const applied = [];
+    const skipped = [];
+    const upd = dbInstance.prepare(`UPDATE autotune_params SET current_value = ?, last_changed_at = datetime('now') WHERE key = ?`);
+    const log = dbInstance.prepare(`INSERT INTO tuning_audit (param, old_value, new_value, reason, status) VALUES (?, ?, ?, ?, 'APPLIED')`);
+    for (const r of rows) {
+      try {
+        const cur = dbInstance.prepare(`SELECT current_value FROM autotune_params WHERE key = ?`).get(r.param);
+        if (!cur) { skipped.push({ param: r.param, reason: 'param not in autotune_params (legacy/non-tunable)' }); continue; }
+        if (String(cur.current_value) === String(r.new_value)) { skipped.push({ param: r.param, reason: 'already at SCAM-winning value' }); continue; }
+        upd.run(r.new_value, r.param);
+        log.run(r.param, cur.current_value, r.new_value, 'RESTORE_APR_27_AT_12_54_PM — operator restored just the 9 pre-SCAM changes (excludes the auto-tuner over-corrections from Apr 27 evening)');
+        applied.push({ param: r.param, from: cur.current_value, to: r.new_value, changedAt: r.created_at });
+      } catch (err) {
+        skipped.push({ param: r.param, reason: err.message });
+      }
+    }
+
+    // Live-reload V5 thresholds from autotune_params (no restart needed)
+    try {
+      if (typeof syncV5ConfigFromDb === 'function') syncV5ConfigFromDb();
+    } catch {}
+
+    logEvent('INFO', 'RESTORE_APR_27_1254', `${applied.length} params restored to pre-12:54pm Apr 27 state`);
+    res.json({
+      ok: true,
+      cutoffUsed: '2026-04-27 16:54:00 UTC (= 12:54pm ET when SCAM 972x posted)',
+      appliedCount: applied.length,
+      skippedCount: skipped.length,
+      applied,
+      skipped,
+      message: 'Restored to the SCAM-winning config snapshot. The 36 auto-tuner over-corrections from Apr 27 evening are NOT applied.',
+    });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+};
+app.post('/api/tuning/restore-april-27-at-1254pm', _restoreApr27At1254Handler);
+app.get('/api/tuning/restore-april-27-at-1254pm',  _restoreApr27At1254Handler);  // browser-bar use
+
 
 // POST apply a tuning change
 app.post('/api/tuning/apply', express.json(), (req, res) => {
