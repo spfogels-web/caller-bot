@@ -1785,6 +1785,142 @@ export function decideAction(scores, state, labels, metrics) {
   return 'IGNORE';
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// BUYING CONFIRMATION DETECTOR
+//
+// Catches "buying is HAPPENING" patterns — both slow accumulation and fast
+// surges — so we can post coins that have legitimately confirmed strength
+// even when the falling-knife detector might otherwise penalize them.
+//
+// Three patterns:
+//   FAST_BUILD  — one rescan shows multiple strong signals (sudden surge)
+//   SLOW_BUILD  — 2+ rescans show consistent positive momentum (gradual climb)
+//   RECLAIM     — coin dipped 1h but is now bouncing with confirmed buying
+//                 (the post-migration / dip-then-real-buy pattern)
+//
+// Returns: { score: 0-100, type, signals: [], bullishCount }
+//   score >= 85 → strong enough to qualify a new POST path
+//   score >= 50 → enough to halve the falling-knife penalty
+//   score >= 30 → enough to reduce knife penalty by 25%
+//
+// SAFETY: requires rugRisk < 35 to register. Pump-and-dumps with active
+// dev movement or extreme top10 concentration get filtered out.
+// ═════════════════════════════════════════════════════════════════════════════
+export function computeBuyingConfirmation(metrics, history = [], rugRisk = 0) {
+  const m = metrics;
+  const signals = [];
+  let bullishCount = 0;
+  let pattern = 'NONE';
+
+  // Hard filter — pump-and-dump traps don't count as buying confirmation
+  if (rugRisk >= 35) {
+    return { score: 0, type: 'BLOCKED_BY_RUG', signals: ['rug risk too high'], bullishCount: 0 };
+  }
+
+  const d = m.deltas || {};
+  const hasDeltas = d.minutesAgo != null;
+
+  // ── FAST_BUILD signals (single rescan can confirm) ─────────────────────
+  // Each is a binary yes/no. 3+ in one rescan = FAST_BUILD detected.
+  let fastSignals = 0;
+  if (d.volumeDelta != null && d.volumeDelta > 50)        { fastSignals++; signals.push(`Volume +${d.volumeDelta.toFixed(0)}%`); }
+  if (d.holderDelta != null && d.holderDelta > 12)        { fastSignals++; signals.push(`Holders +${d.holderDelta.toFixed(0)}%`); }
+  if (d.mcapDelta != null && d.mcapDelta > 18)            { fastSignals++; signals.push(`MCap +${d.mcapDelta.toFixed(0)}%`); }
+  if (d.buyRatioDelta != null && d.buyRatioDelta > 0.10)  { fastSignals++; signals.push(`Buy ratio +${(d.buyRatioDelta*100).toFixed(0)}pp`); }
+  if (d.velocityDelta != null && d.velocityDelta > 3)     { fastSignals++; signals.push(`Velocity +${d.velocityDelta.toFixed(1)} buys/min`); }
+  if (m.priceChange5m != null && m.priceChange5m > 8 && m.priceChange1h != null && m.priceChange1h > 0) {
+    fastSignals++; signals.push(`5m +${m.priceChange5m.toFixed(0)}% with 1h support`);
+  }
+  if (m.volumeAcceleration != null && m.volumeAcceleration > 2.5 && (m.buySellRatio1h ?? 0) >= 0.55) {
+    fastSignals++; signals.push(`Volume ${m.volumeAcceleration.toFixed(1)}x baseline + buy ratio ${(m.buySellRatio1h*100).toFixed(0)}%`);
+  }
+  if (fastSignals >= 3) { pattern = 'FAST_BUILD'; bullishCount = fastSignals; }
+
+  // ── SLOW_BUILD signals (need multi-scan history) ───────────────────────
+  // Look at last 2-3 snapshots from history. If consistent positive trend,
+  // that's slow accumulation — usually higher quality than fast spikes.
+  let slowSignals = 0;
+  if (Array.isArray(history) && history.length >= 2) {
+    const recent = history.slice(0, 3);  // most recent 3 snapshots
+    // All snapshots show holder count growing
+    const holdersGrowing = recent.every(h => h.holders != null) &&
+      recent.every((h, i) => i === 0 || h.holders >= (recent[i-1].holders ?? 0) * 0.98);
+    if (holdersGrowing && recent.length >= 2 && (m.holders ?? 0) > (recent[recent.length-1].holders ?? 0)) {
+      slowSignals++; signals.push(`Holders growing across ${recent.length+1} scans`);
+    }
+    // Buy ratio steady or improving
+    const brSteady = recent.every(h => h.buySellRatio1h != null && h.buySellRatio1h >= 0.50);
+    if (brSteady && (m.buySellRatio1h ?? 0) >= 0.55) {
+      slowSignals++; signals.push(`Buy ratio held >50% across rescans`);
+    }
+    // Mcap not dropping over the window
+    if (recent.length >= 2 && recent[0].marketCap != null && recent[recent.length-1].marketCap != null) {
+      const oldestMcap = recent[recent.length-1].marketCap;
+      const drop = oldestMcap > 0 ? (m.marketCap - oldestMcap) / oldestMcap : 0;
+      if (drop >= -0.05) {  // mcap held within -5% over window
+        slowSignals++; signals.push(`MCap held over ${recent.length+1} scans`);
+      }
+    }
+    // Volume building (current >= 70% of vol6h-rate)
+    if (m.volume1h != null && m.volume6h != null && m.volume6h > 0) {
+      const ratio = m.volume1h / Math.max(1, m.volume6h / 6);
+      if (ratio >= 0.7) {
+        slowSignals++; signals.push(`Volume sustained at ${ratio.toFixed(1)}x baseline`);
+      }
+    }
+    if (slowSignals >= 3 && pattern === 'NONE') {
+      pattern = 'SLOW_BUILD';
+      bullishCount = Math.max(bullishCount, slowSignals);
+    }
+  }
+
+  // ── RECLAIM pattern (dipped, now bouncing with buying confirmed) ───────
+  // Specific to post-migration / post-dip recovery setups. Different from
+  // a pure FAST_BUILD because the coin had a recent NEGATIVE move that's
+  // now being absorbed by buyers.
+  let reclaimSignals = 0;
+  if (m.priceChange1h != null && m.priceChange1h < -10
+      && m.priceChange5m != null && m.priceChange5m > 3) {
+    reclaimSignals++; signals.push(`5m +${m.priceChange5m.toFixed(0)}% reclaim after 1h ${m.priceChange1h.toFixed(0)}% dip`);
+  }
+  if (reclaimSignals > 0 && (m.buySellRatio1h ?? 0) >= 0.55) {
+    reclaimSignals++; signals.push(`Buy ratio ${(m.buySellRatio1h*100).toFixed(0)}% during reclaim`);
+  }
+  if (reclaimSignals > 0 && d.holderDelta != null && d.holderDelta > 3) {
+    reclaimSignals++; signals.push(`Holders +${d.holderDelta.toFixed(0)}% during reclaim`);
+  }
+  if (reclaimSignals >= 2 && pattern === 'NONE') {
+    pattern = 'RECLAIM';
+    bullishCount = reclaimSignals;
+  }
+
+  // ── Score calculation ─────────────────────────────────────────────────
+  let score = 0;
+  if (pattern === 'FAST_BUILD') {
+    // 3 sigs = 60, 4 = 75, 5 = 88, 6+ = 95
+    score = Math.min(95, 45 + fastSignals * 12);
+  } else if (pattern === 'SLOW_BUILD') {
+    // Slow builds are more reliable — bump score
+    score = Math.min(92, 50 + slowSignals * 14);
+  } else if (pattern === 'RECLAIM') {
+    score = Math.min(85, 35 + reclaimSignals * 18);
+  }
+
+  // Penalty for negative deltas (would-be bullish moves with selling pressure).
+  // Dev selling and LP draining are near-rug signals — clamp confirmation score
+  // hard so it can't trigger the momentum/demand bumps downstream.
+  if (d.devPctDelta != null && d.devPctDelta < -1) {
+    score = Math.min(score, 25);
+    signals.push(`⚠️ DEV SELLING (${d.devPctDelta.toFixed(1)}pp) — buying confirmation invalidated`);
+  }
+  if (d.liquidityDelta != null && d.liquidityDelta < -10) {
+    score = Math.min(score, 25);
+    signals.push(`⚠️ LP DROP (${d.liquidityDelta.toFixed(0)}%) — invalidates buying confirmation`);
+  }
+
+  return { score: Math.round(score), type: pattern, signals, bullishCount };
+}
+
 // ── Top-level v5 pipeline ──────────────────────────────────────────────────
 export function scoreCoinV5(candidate, metricsIn = null) {
   const m = metricsIn || calculateBehaviorMetrics(candidate);
@@ -1795,18 +1931,42 @@ export function scoreCoinV5(candidate, metricsIn = null) {
   const wallet   = computeWalletQualityScore(m);
   const demand   = computeDemandQualityScore(m);
 
+  // Compute buying confirmation BEFORE final call so we can apply its
+  // adjustments to the score components.
+  const history = candidate?._history || candidate?.history || [];
+  const buyingConfirmation = computeBuyingConfirmation(m, history, rugRisk.score);
+
+  // ── BUYING CONFIRMATION ADJUSTMENTS ─────────────────────────────────
+  // When confirmation pattern detected, reduce knife/distribution penalty
+  // baked into momentum (post-migration dips that are being bought are
+  // NOT falling knives). Also bumps demand quality since real buyers
+  // stepping in IS sustained interest.
+  let momentumAdj = momentum.score;
+  let demandAdj   = demand.score;
+  if (buyingConfirmation.score >= 50) {
+    // Strong confirmation: cancel any knife penalty, add demand bonus
+    const knifeRefund = Math.min(20, momentum.score < 50 ? 50 - momentum.score : 0);
+    momentumAdj = Math.min(100, momentum.score + knifeRefund);
+    demandAdj   = Math.min(100, demand.score + 10);
+  } else if (buyingConfirmation.score >= 30) {
+    // Moderate confirmation: smaller bonus
+    momentumAdj = Math.min(100, momentum.score + 5);
+    demandAdj   = Math.min(100, demand.score + 5);
+  }
+
   const W = V5_WEIGHTS.finalCall;
   const finalCallRaw =
-      momentum.score * W.mq
-    + demand.score   * W.dq
+      momentumAdj * W.mq
+    + demandAdj   * W.dq
     + wallet.score   * W.wq
     + scanner.score  * W.ss
     - rugRisk.score  * W.rr;
   const finalCall = clampScore(Math.round(finalCallRaw));
 
   const scoreSet = {
-    scanner: scanner.score, rugRisk: rugRisk.score, momentum: momentum.score,
-    wallet: wallet.score,   demand: demand.score,   finalCall,
+    scanner: scanner.score, rugRisk: rugRisk.score, momentum: momentumAdj,
+    wallet: wallet.score,   demand: demandAdj,   finalCall,
+    momentumBase: momentum.score, demandBase: demand.score, // for audit
   };
   const labels = assignLabels(state, scoreSet, m);
   const action = decideAction(scoreSet, state, labels, m);
@@ -1819,7 +1979,6 @@ export function scoreCoinV5(candidate, metricsIn = null) {
   // Lifecycle state = NEW_BIRTH/FIRST_EXPANSION/... based on AGE.
   // Activity  state = NEW/WATCHING/QUIET/REVIVING/HOT/REJECTED based on
   //                   ACTIVITY trajectory (volume/buys/wallets over time).
-  const history = candidate?._history || candidate?.history || [];
   const activity = classifyActivityState(m, history, scoreSet, labels);
 
   // Reactivation only fires when activity says REVIVING — second-leg detection.
@@ -1849,6 +2008,7 @@ export function scoreCoinV5(candidate, metricsIn = null) {
     decision,           // { label, reasoning, phase }
     triggers,           // { call, kill }
     context,            // "Previously quiet, now showing X"
+    buyingConfirmation, // { score, type: FAST_BUILD|SLOW_BUILD|RECLAIM|NONE, signals[], bullishCount }
   };
 }
 
@@ -2302,6 +2462,7 @@ export function runDualModel(candidate, discoveryWeights = null) {
       decision:     v5.decision,
       triggers:     v5.triggers,
       context:      v5.context,
+      buyingConfirmation: v5.buyingConfirmation,
       ageMinutes,
     },
   };
