@@ -4786,6 +4786,7 @@ async function processCandidate(candidate, isRescan = false) {
     // buyers returning" patterns that historically run hardest.
     if (v5?.decision?.label === 'REVIVING' && (v5.scores?.rugRisk ?? 99) < 35 && finalDecision !== 'BLOCKLIST') {
       finalDecision = 'AUTO_POST';
+      enrichedCandidate._v5Reviving = { rugRisk: v5.scores.rugRisk, at: Date.now() };
       console.log(`[auto-caller:v5] $${enrichedCandidate.token??ca.slice(0,6)} REVIVING → AUTO_POST (second-leg breakout, rug=${v5.scores.rugRisk})`);
     }
     const v5HardBlock = v5 && v5.action === 'BLOCK';
@@ -4939,12 +4940,14 @@ async function processCandidate(candidate, isRescan = false) {
           // AI upgrades: if scorer said WATCHLIST but Claude sees a gem in range → POST
           // v5 BLOCK is never overridable — protects against AI rubber-stamping rugs.
           if (!v5HardBlock && aiDecision === 'AUTO_POST' && finalDecision === 'WATCHLIST' && aiScore >= 45) {
+            enrichedCandidate._aiUpgrade = { from: 'WATCHLIST', aiScore, mcap, at: Date.now() };
             finalDecision = 'AUTO_POST';
             logEvent('INFO', 'AI_UPGRADE', `${enrichedCandidate.token} WATCHLIST→AUTO_POST ai=${aiScore} mcap=${mcap}`);
             console.log(`[ai-os] ⬆️  AI upgraded $${enrichedCandidate.token}: WATCHLIST → AUTO_POST (score ${aiScore}, mcap $${(mcap/1000).toFixed(1)}K)`);
           }
           // AI upgrades HOLD_FOR_REVIEW → AUTO_POST if it's a gem
           if (!v5HardBlock && aiDecision === 'AUTO_POST' && finalDecision === 'HOLD_FOR_REVIEW' && isGemRange && aiScore >= 50) {
+            enrichedCandidate._aiUpgrade = { from: 'HOLD_FOR_REVIEW', aiScore, mcap, at: Date.now() };
             finalDecision = 'AUTO_POST';
             logEvent('INFO', 'AI_UPGRADE', `${enrichedCandidate.token} HOLD→AUTO_POST ai=${aiScore}`);
             console.log(`[ai-os] ⬆️  AI upgraded $${enrichedCandidate.token}: HOLD → AUTO_POST (gem range)`);
@@ -6174,6 +6177,23 @@ async function processCandidate(candidate, isRescan = false) {
         } catch (err) { console.warn('[auto-caller] holders fetch failed:', err.message); }
       }
 
+      // Derive bot_source from whichever bypass / promotion path actually
+      // pushed this candidate to AUTO_POST. Priority is most-specific-first:
+      // a candidate can have multiple flags (e.g. cluster + score-trump);
+      // we attribute to the most actionable lane for tuning.
+      const _sm = enrichedCandidate._smartMoney;
+      const botSource =
+          _sm?.kind === 'kol'                          ? 'KOL'
+        : _sm?.kind === 'cluster'                      ? 'SM_CLUSTER'
+        : enrichedCandidate._fastLane                  ? 'FAST_LANE'
+        : enrichedCandidate._swarmSignal               ? 'SWARM'
+        : _sm?.kind === 'single'                       ? 'SM_SINGLE'
+        : enrichedCandidate._scoreTrump?.tier === 'FRESH' ? 'SCORE_TRUMP_FRESH'
+        : enrichedCandidate._scoreTrump?.tier === 'YOUNG' ? 'SCORE_TRUMP_YOUNG'
+        : enrichedCandidate._aiUpgrade                 ? 'AI_UPGRADE'
+        : enrichedCandidate._v5Reviving                ? 'V5_REVIVING'
+        :                                                'SCORER';
+
       insertCall({
         candidateId,
         token:           enrichedCandidate.token,
@@ -6187,6 +6207,7 @@ async function processCandidate(candidate, isRescan = false) {
         priceUsd:        enrichedCandidate.priceUsd,
         marketCap:       enrichedCandidate.marketCap,
         liquidity:       enrichedCandidate.liquidity,
+        botSource,
         called_at:       new Date().toISOString(),
         holderAddresses: earlyHoldersForCall,
         // Bonding-curve snapshot (pump.fun lifecycle) — populated by enricher.
