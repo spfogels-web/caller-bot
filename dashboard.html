@@ -3146,6 +3146,22 @@ body::before {
         <div class="stat-tile" style="--tile-color:var(--text3);cursor:pointer" onclick="switchTab('calls')"><div class="tile-label">⏳ PENDING</div><div class="tile-value" id="ovCallsPending">—</div><div class="tile-sub">unresolved</div></div>
       </div>
 
+      <!-- ═══ TOP 25 WINS — floating bubble visualization ═══ -->
+      <div class="card" style="margin-bottom:14px;border-color:rgba(255,215,64,0.35);background:linear-gradient(135deg,rgba(255,215,64,0.04),rgba(156,39,176,0.03))">
+        <div class="card-hdr" style="background:linear-gradient(90deg,rgba(255,215,64,0.1),rgba(156,39,176,0.05),transparent)">
+          <div class="card-title" style="color:var(--gold)"><span class="icon">🏆</span>TOP 25 WINS — LARGEST X PEAKS</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-family:var(--mono);font-size:7px;color:var(--text3);letter-spacing:1px">CLICK A BUBBLE</span>
+            <span id="ovBubblesStatus" style="font-family:var(--mono);font-size:8px;color:var(--gold);letter-spacing:1px">—</span>
+          </div>
+        </div>
+        <div class="card-body" style="padding:0;position:relative">
+          <div id="ovBubblesStage" style="position:relative;width:100%;height:380px;overflow:hidden;background:radial-gradient(ellipse at center,rgba(255,215,64,0.04),rgba(0,0,0,0) 70%);cursor:default">
+            <div id="ovBubblesEmpty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:10px;color:var(--text3);letter-spacing:1px">Loading top wins…</div>
+          </div>
+        </div>
+      </div>
+
       <!-- ═══ CURRENT WEEK — live scoreboard (post-reset) ═══ -->
       <div class="card" style="margin-bottom:14px;border-color:rgba(24,255,255,0.35);background:linear-gradient(135deg,rgba(24,255,255,0.03),rgba(0,230,118,0.02))">
         <div class="card-hdr" style="background:linear-gradient(90deg,rgba(24,255,255,0.08),rgba(0,230,118,0.04),transparent)">
@@ -5460,6 +5476,8 @@ async function loadOverview(){
   if(v8)renderV8Row(v8);
   const calls=await apiFetch('/api/calls?limit=6');
   if(calls)renderCallCards('recentCallsCards',calls.rows||calls.calls||[],true);
+
+  loadTopWinsBubbles();
 
   // Weekly performance stats
   try {
@@ -9585,6 +9603,186 @@ function startAutoRefresh(){
   },15000);
 }
 
+// ── TOP 25 WINS — floating bubble visualization ──────────
+// Pulls /api/hall-of-fame?limit=25 (top WIN calls by peak_multiple), renders
+// each as a circle whose radius scales with sqrt(peakX) so a 1000x doesn't
+// dwarf a 5x. Bubbles drift with simple Newtonian motion and bounce off the
+// stage walls + each other. Click → opens DexScreener for the contract.
+let _topWinsAnim = null;
+let _topWinsResizeBound = false;
+async function loadTopWinsBubbles(){
+  const stage = document.getElementById('ovBubblesStage');
+  const empty = document.getElementById('ovBubblesEmpty');
+  const status = document.getElementById('ovBubblesStatus');
+  if (!stage) return;
+
+  let data;
+  try {
+    data = await apiFetch('/api/hall-of-fame?limit=25');
+  } catch (e) { data = null; }
+  const rows = (data && data.rows) ? data.rows : [];
+  if (!rows.length) {
+    if (empty) empty.textContent = 'No wins recorded yet';
+    if (status) status.textContent = '0 WINS';
+    return;
+  }
+  if (empty) empty.remove();
+  if (status) status.textContent = rows.length + ' WINS · BEST ' + rows[0].peak_multiple.toFixed(0) + 'x';
+
+  // Stop any previous animation before rebuilding (called from auto-refresh).
+  if (_topWinsAnim) { cancelAnimationFrame(_topWinsAnim); _topWinsAnim = null; }
+  // Clear any existing bubble nodes (keep child #ovBubblesEmpty already removed).
+  Array.from(stage.querySelectorAll('.bubble-node')).forEach(n => n.remove());
+
+  const peaks = rows.map(r => Math.max(1, r.peak_multiple || 1));
+  const maxPeak = Math.max(...peaks);
+  const minPeak = Math.min(...peaks);
+
+  function colorFor(peak){
+    if (peak >= 100) return { fill:'rgba(255,215,64,0.20)', stroke:'rgba(255,215,64,0.85)', text:'#ffd740', glow:'rgba(255,215,64,0.55)' };
+    if (peak >= 25)  return { fill:'rgba(224,64,251,0.18)', stroke:'rgba(224,64,251,0.80)', text:'#e040fb', glow:'rgba(224,64,251,0.50)' };
+    if (peak >= 10)  return { fill:'rgba(0,230,118,0.16)',  stroke:'rgba(0,230,118,0.80)',  text:'#00e676', glow:'rgba(0,230,118,0.45)' };
+    if (peak >= 5)   return { fill:'rgba(24,255,255,0.14)', stroke:'rgba(24,255,255,0.75)', text:'#18ffff', glow:'rgba(24,255,255,0.40)' };
+    return                  { fill:'rgba(68,138,255,0.12)', stroke:'rgba(68,138,255,0.65)', text:'#82b1ff', glow:'rgba(68,138,255,0.30)' };
+  }
+
+  const W = stage.clientWidth || 800;
+  const H = stage.clientHeight || 380;
+  // Radius range tuned to 25 bubbles in a 380px-tall stage.
+  const R_MIN = 26, R_MAX = 78;
+  function radiusFor(peak){
+    if (maxPeak === minPeak) return (R_MIN + R_MAX) / 2;
+    const t = (Math.log(peak) - Math.log(minPeak)) / (Math.log(maxPeak) - Math.log(minPeak));
+    return R_MIN + t * (R_MAX - R_MIN);
+  }
+
+  // Build bubble bodies + DOM nodes.
+  const bubbles = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const peak = Math.max(1, r.peak_multiple || 1);
+    const radius = radiusFor(peak);
+    const c = colorFor(peak);
+    const ca = r.contract_address || '';
+    const tok = r.token || '?';
+    const peakStr = peak >= 100 ? peak.toFixed(0) + 'x' : peak.toFixed(1) + 'x';
+    const fontTok = Math.max(9,  Math.min(16, radius * 0.32));
+    const fontX   = Math.max(11, Math.min(22, radius * 0.42));
+
+    const node = document.createElement('div');
+    node.className = 'bubble-node';
+    node.title = '$' + tok + '  ' + peak.toFixed(2) + 'x  →  open DexScreener';
+    node.style.cssText = [
+      'position:absolute',
+      'width:' + (radius*2) + 'px',
+      'height:' + (radius*2) + 'px',
+      'border-radius:50%',
+      'background:radial-gradient(circle at 30% 30%,' + c.fill.replace(/[\d.]+\)$/, '0.35)') + ',' + c.fill + ' 70%,rgba(0,0,0,0.25))',
+      'border:1.5px solid ' + c.stroke,
+      'box-shadow:0 0 ' + Math.round(radius*0.6) + 'px ' + c.glow + ',inset 0 0 ' + Math.round(radius*0.4) + 'px ' + c.fill,
+      'display:flex',
+      'flex-direction:column',
+      'align-items:center',
+      'justify-content:center',
+      'cursor:pointer',
+      'user-select:none',
+      'will-change:transform',
+      'left:0',
+      'top:0'
+    ].join(';');
+    node.innerHTML =
+      '<div style="font-family:\'Orbitron\',var(--mono);font-size:' + fontTok + 'px;font-weight:800;color:' + c.text + ';text-shadow:0 0 8px ' + c.glow + ';letter-spacing:0.5px;line-height:1;margin-bottom:3px;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">$' + tok + '</div>' +
+      '<div style="font-family:\'Orbitron\',var(--mono);font-size:' + fontX + 'px;font-weight:900;color:' + c.text + ';text-shadow:0 0 10px ' + c.glow + ';line-height:1">' + peakStr + '</div>';
+    node.addEventListener('click', () => {
+      if (ca) window.open('https://dexscreener.com/solana/' + ca, '_blank');
+    });
+    stage.appendChild(node);
+
+    // Random non-overlapping placement (best effort, 60 tries).
+    let x = 0, y = 0, ok = false;
+    for (let t = 0; t < 60; t++) {
+      x = radius + Math.random() * Math.max(1, W - radius*2);
+      y = radius + Math.random() * Math.max(1, H - radius*2);
+      ok = true;
+      for (let j = 0; j < bubbles.length; j++) {
+        const o = bubbles[j];
+        const dx = x - o.x, dy = y - o.y;
+        if (dx*dx + dy*dy < (radius + o.r + 4) * (radius + o.r + 4)) { ok = false; break; }
+      }
+      if (ok) break;
+    }
+    const speed = 0.25 + Math.random() * 0.35;
+    const angle = Math.random() * Math.PI * 2;
+    bubbles.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, r: radius, node, peak, hover: false });
+  }
+  // Track hover via direct listeners (avoids :hover CSS race with our transform writes).
+  bubbles.forEach(b => {
+    b.node.addEventListener('mouseenter', () => { b.hover = true; });
+    b.node.addEventListener('mouseleave', () => { b.hover = false; });
+  });
+
+  // Cap velocities so heavier collisions don't fling bubbles off-screen.
+  const V_MAX = 0.9;
+
+  function step(){
+    // Simple O(n²) collision pass — n ≤ 25 so it's negligible.
+    for (let i = 0; i < bubbles.length; i++) {
+      const a = bubbles[i];
+      a.x += a.vx;
+      a.y += a.vy;
+      // Wall bounce (with a tiny dampening so corners don't accumulate energy).
+      if (a.x < a.r)        { a.x = a.r;        a.vx = Math.abs(a.vx) * 0.95; }
+      if (a.x > W - a.r)    { a.x = W - a.r;    a.vx = -Math.abs(a.vx) * 0.95; }
+      if (a.y < a.r)        { a.y = a.r;        a.vy = Math.abs(a.vy) * 0.95; }
+      if (a.y > H - a.r)    { a.y = H - a.r;    a.vy = -Math.abs(a.vy) * 0.95; }
+    }
+    for (let i = 0; i < bubbles.length; i++) {
+      const a = bubbles[i];
+      for (let j = i+1; j < bubbles.length; j++) {
+        const b = bubbles[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist2 = dx*dx + dy*dy;
+        const minD = a.r + b.r;
+        if (dist2 > 0 && dist2 < minD*minD) {
+          const dist = Math.sqrt(dist2);
+          const nx = dx / dist, ny = dy / dist;
+          // Resolve overlap.
+          const overlap = (minD - dist) / 2;
+          a.x -= nx * overlap; a.y -= ny * overlap;
+          b.x += nx * overlap; b.y += ny * overlap;
+          // Elastic-ish exchange of normal velocity component.
+          const dvx = b.vx - a.vx, dvy = b.vy - a.vy;
+          const dot = dvx * nx + dvy * ny;
+          if (dot < 0) {
+            a.vx += dot * nx; a.vy += dot * ny;
+            b.vx -= dot * nx; b.vy -= dot * ny;
+          }
+        }
+      }
+    }
+    for (let i = 0; i < bubbles.length; i++) {
+      const a = bubbles[i];
+      const v2 = a.vx*a.vx + a.vy*a.vy;
+      if (v2 > V_MAX*V_MAX) { const s = V_MAX / Math.sqrt(v2); a.vx *= s; a.vy *= s; }
+      const tx = (a.x - a.r), ty = (a.y - a.r);
+      a.node.style.transform = a.hover
+        ? 'translate(' + tx + 'px,' + ty + 'px) scale(1.10)'
+        : 'translate(' + tx + 'px,' + ty + 'px)';
+    }
+    _topWinsAnim = requestAnimationFrame(step);
+  }
+  _topWinsAnim = requestAnimationFrame(step);
+
+  // On resize, rebuild so radii / bounds stay correct.
+  if (!_topWinsResizeBound) {
+    _topWinsResizeBound = true;
+    let rzTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(rzTimer);
+      rzTimer = setTimeout(() => { loadTopWinsBubbles(); }, 250);
+    });
+  }
+}
 // ── BOOT ──────────────────────────────────────────────────
 loadOverview();
 loadPromotedSidebar();
