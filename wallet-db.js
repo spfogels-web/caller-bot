@@ -689,14 +689,30 @@ async function loadFromSQLiteDB() {
     return;
   }
   try {
+    // Filter rationale:
+    //   - score > 0: Dune-scored wallets (legacy)
+    //   - our_win_count > 0: self-trained winners credited by creditWalletsForWin
+    //     (these have NULL score because they were inserted by the learning loop,
+    //     not Dune. Without this clause they were silently invisible to
+    //     crossReferenceHolders — credits flowed but never moved walletQuality.)
+    //   - category IN ('WINNER','KOL','ALPHA','SMART_MONEY'): always include
+    //     promoted wallets even if other counters are zero
     const rows = _db.prepare(
-      'SELECT address, category, win_rate, avg_roi, trade_count, score, notes ' +
-      'FROM tracked_wallets WHERE is_blacklist=0 AND score > 0 ORDER BY score DESC LIMIT 10000'
+      `SELECT address, category, win_rate, avg_roi, trade_count, score, notes,
+              our_win_count, our_avg_win_multiple
+         FROM tracked_wallets
+        WHERE is_blacklist=0
+          AND (score > 0
+               OR our_win_count > 0
+               OR category IN ('WINNER','KOL','ALPHA','SMART_MONEY'))
+        ORDER BY score DESC NULLS LAST, our_win_count DESC NULLS LAST
+        LIMIT 10000`
     ).all();
     if (!rows.length) {
       console.log('[wallet-db] tracked_wallets empty — run Dune scan in Smart Money tab to populate');
       return;
     }
+    let selfTrainedLoaded = 0;
     for (const row of rows) {
       walletDb.set(row.address, {
         address:    row.address,
@@ -705,13 +721,16 @@ async function loadFromSQLiteDB() {
         avgRoi:     row.avg_roi ?? 0,
         tradeCount: row.trade_count ?? 0,
         score:      row.score ?? 0,
-        source:     'db_tracked',
+        ourWinCount:        row.our_win_count ?? 0,
+        ourAvgWinMultiple:  row.our_avg_win_multiple ?? 0,
+        source:     (row.score == null || row.score === 0) && (row.our_win_count ?? 0) > 0 ? 'self_trained' : 'db_tracked',
       });
+      if ((row.score == null || row.score === 0) && (row.our_win_count ?? 0) > 0) selfTrainedLoaded++;
       if (row.category === 'SNIPER' || row.category === 'CLUSTER' || row.category === 'RUG') {
         walletDb.addToBlacklist?.(row.address);
       }
     }
-    console.log('[wallet-db] ✓ Loaded ' + rows.length + ' wallets from tracked_wallets DB');
+    console.log(`[wallet-db] ✓ Loaded ${rows.length} wallets from tracked_wallets DB (${selfTrainedLoaded} self-trained)`);
   } catch (err) {
     console.warn('[wallet-db] SQLite load failed:', err.message);
   }

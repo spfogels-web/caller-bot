@@ -4127,7 +4127,8 @@ async function processCandidate(candidate, isRescan = false) {
     try {
       const histRows = dbInstance.prepare(`
         SELECT snapshot_at_ms, market_cap, liquidity, volume_1h, buy_sell_ratio_1h,
-               buy_velocity, holders, dev_wallet_pct, top10_holder_pct, composite_score
+               buy_velocity, holders, dev_wallet_pct, top10_holder_pct, composite_score,
+               price_change_1h, price_change_5m
         FROM token_metrics_history
         WHERE contract_address=? AND snapshot_at_ms < ?
         ORDER BY snapshot_at_ms DESC LIMIT 5
@@ -4146,10 +4147,11 @@ async function processCandidate(candidate, isRescan = false) {
           devWalletPct:      h.dev_wallet_pct,
           top10HolderPct:    h.top10_holder_pct,
           compositeScore:    h.composite_score,
+          priceChange1h:     h.price_change_1h,
+          priceChange5m:     h.price_change_5m,
           // Cross-snapshot deltas for prior-rug detection in reactivation score
           liquidityDelta:    null,
           devPctDelta:       null,
-          priceChange1h:     null,
         }));
       }
     } catch {}
@@ -5302,9 +5304,17 @@ async function processCandidate(candidate, isRescan = false) {
     //   slowBuildMax1hPct   — 1h pct ceiling for slow build (default +50%)
     {
       const c = enrichedCandidate;
-      const isWalletBypass = c._smartMoney?.kind === 'kol' || c._smartMoney?.kind === 'cluster';
+      // Cluster bypass now requires qualityVerified (≥2 KNOWN_PROFITABLE
+      // wallets in the swarm). Sybil clusters of 3 disposable wallets no
+      // longer bypass this guard.
+      const sm = c._smartMoney;
+      const isWalletBypass = sm?.kind === 'kol' || (sm?.kind === 'cluster' && sm?.qualityVerified === true);
       const isScoreTrump   = !!c._scoreTrump;
-      if (finalDecision === 'AUTO_POST' && !isWalletBypass && !isScoreTrump) {
+      // Score-trump bypass is narrowed: a coin pumping ≥80% in a single
+      // 5m candle is a vertical exit-liquidity move regardless of how
+      // young/cheap it is. Require slow-build context even for trumped coins.
+      const isExtremeSpike = Number(c.priceChange5m ?? c.pct_change_5m ?? 0) >= 80;
+      if (finalDecision === 'AUTO_POST' && !isWalletBypass && !(isScoreTrump && !isExtremeSpike)) {
         const spike5m = SCORING_CONFIG.verticalSpike5mPct ?? 30;
         const buildMin = SCORING_CONFIG.slowBuildMin1hPct ?? 5;
         const buildMax = SCORING_CONFIG.slowBuildMax1hPct ?? 50;
@@ -5352,7 +5362,8 @@ async function processCandidate(candidate, isRescan = false) {
     //   postMigReversalRatio— 5m buyer share that overrides (default 0.65)
     {
       const c = enrichedCandidate;
-      const isWalletBypass = c._smartMoney?.kind === 'kol' || c._smartMoney?.kind === 'cluster';
+      const sm = c._smartMoney;
+      const isWalletBypass = sm?.kind === 'kol' || (sm?.kind === 'cluster' && sm?.qualityVerified === true);
       const isMigrated     = c.pumpFunMigrated === true || c.pumpFunStage === 'MIGRATED';
 
       if (finalDecision === 'AUTO_POST' && isMigrated && !isWalletBypass) {
@@ -5368,7 +5379,14 @@ async function processCandidate(candidate, isRescan = false) {
         const s5    = Number(c.sells5m ?? 0);
         const ratio5m = (b5 + s5) > 0 ? b5 / (b5 + s5) : null;
 
-        const recentSpike     = pct1h >= spike1h;
+        // Recent spike — check current snapshot AND prior history snapshots.
+        // A coin called LATE in the dump (e.g. 30 min after the migration peak)
+        // will have current 1h decayed back near 0%, but a prior history
+        // snapshot from 15-30 min ago will still show the +50% spike. Without
+        // this history check we miss every late-dump entry.
+        const recentSpike     = pct1h >= spike1h
+          || (Array.isArray(c._history) && c._history.some(h =>
+              h.priceChange1h != null && h.priceChange1h >= spike1h && h.minutesAgo <= 45));
         const activelyDumping = pct5m <= dumpPct;
         const sellerDominance = ratio5m != null && ratio5m < buyRatioMin;
         const reversalSignal  = pct5m >= revPct || (ratio5m != null && ratio5m >= revRatio);
@@ -5395,7 +5413,8 @@ async function processCandidate(candidate, isRescan = false) {
     // confirmation in the 3-wallet co-buy.
     {
       const c = enrichedCandidate;
-      const isWalletBypass = c._smartMoney?.kind === 'kol' || c._smartMoney?.kind === 'cluster';
+      const sm = c._smartMoney;
+      const isWalletBypass = sm?.kind === 'kol' || (sm?.kind === 'cluster' && sm?.qualityVerified === true);
       const hardBlock = SCORING_CONFIG.latePump1hHardBlock ?? 80;
       const pct1h = Number(c.priceChange1h ?? c.pct_change_1h ?? 0);
       if (finalDecision === 'AUTO_POST' && !isWalletBypass && pct1h >= hardBlock) {
@@ -16323,6 +16342,21 @@ app.listen(PORT, async () => {
   learningLoopHandles = startLearningLoop(dbInstance, CLAUDE_API_KEY);
   console.log('[startup] ✓ Learning loop active — outcome tracking + missed winner detection');
 
+  // ── Periodic walletDb reload (5 min) ──────────────────────────────────────
+  // The outcome tracker promotes self-trained wallets to category=WINNER when
+  // their our_win_count + our_avg_win_multiple cross thresholds. Those updates
+  // hit tracked_wallets in SQLite, but the in-memory walletDb that powers
+  // crossReferenceHolders is built once at boot. Without periodic reload, new
+  // winner promotions stay invisible until next restart — credits flow but
+  // don't move walletQuality on subsequent calls. Reload every 5 min so newly
+  // promoted wallets light up the cluster signal + walletQuality on the next
+  // candidate evaluation.
+  setInterval(() => {
+    reloadWalletsFromDB().catch(err =>
+      console.warn('[wallet-db] periodic reload failed:', err.message)
+    );
+  }, 5 * 60 * 1000);
+
   // Wire up milestone TG alerts (2x / 5x / 10x on active calls). Uses the
   // group chat, and respects pausePosting so a paused bot stays silent.
   // Milestone alerts go to VIP always; at 2x we ALSO post the original call
@@ -16692,12 +16726,34 @@ app.listen(PORT, async () => {
   setSwarmHook(async (ca, buyers) => {
     try {
       const clusterSize = buyers?.length ?? 3;
-      console.log(`[helius-wh→pipeline] $${ca.slice(0,8)} swarm cluster=${clusterSize} — pushing into processCandidate`);
+      // ── Wallet quality verification ─────────────────────────────────
+      // A "swarm" of 3 disposable wallets isn't alpha — it's a sybil
+      // farm puppeting the cluster signal. Require ≥2 wallets to be
+      // KNOWN_PROFITABLE (WINNER/KOL/ALPHA/SMART_MONEY) before the
+      // cluster gets to bypass guards downstream. Unverified clusters
+      // still trigger a candidate eval, but no bypass privilege.
+      let profitableCount = 0;
+      const profitableCategories = ['WINNER','KOL','ALPHA','SMART_MONEY'];
+      try {
+        const addrs = (buyers || []).map(b => b?.address).filter(Boolean);
+        if (addrs.length > 0) {
+          const placeholders = addrs.map(() => '?').join(',');
+          const rows = dbInstance.prepare(
+            `SELECT address, category FROM tracked_wallets WHERE address IN (${placeholders})`
+          ).all(...addrs);
+          profitableCount = rows.filter(r => profitableCategories.includes(r.category)).length;
+        }
+      } catch (e) {
+        console.warn('[helius-wh→pipeline] quality check failed:', e.message);
+      }
+      const qualityVerified = profitableCount >= 2;
+
+      console.log(`[helius-wh→pipeline] $${ca.slice(0,8)} swarm cluster=${clusterSize} profitable=${profitableCount} verified=${qualityVerified} — pushing into processCandidate`);
       await processCandidate({
         contractAddress: ca,
         chain:           'solana',
         candidateType:   'SMART_MONEY_CLUSTER',
-        _smartMoney:     { kind: 'cluster', clusterSize, detectedAt: Date.now() },
+        _smartMoney:     { kind: 'cluster', clusterSize, qualityVerified, profitableCount, detectedAt: Date.now() },
         _discoveredAt:   Date.now(),
       });
     } catch (err) {

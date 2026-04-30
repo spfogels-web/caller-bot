@@ -1927,11 +1927,13 @@ export function computeBuyingConfirmation(metrics, history = [], rugRisk = 0) {
 // Operator framework: "Strong coins don't just pump — they hold structure
 // after the first pullback." Grades pullback magnitude as a demand modifier:
 //
+//   10-20% drop  → +5  (SHALLOW_FADE — only credited if recovery confirms;
+//                       small -3 if no recovery to nudge but not block)
 //   20-40% drop  → +15 (ideal re-entry zone, often 3-10x runners)
 //   40-55% drop  → +8  (conditional — only credited if recovery confirms)
 //   55-70% drop  → -10 (danger zone, most coins fail here)
 //   70%+ drop    → -25 + deadCoin flag (likely dev exit / liquidity drain)
-//   <20% or +    → 0   (this isn't a pullback play)
+//   <10% or +    → 0   (this isn't a pullback play)
 //
 // Plus modifiers:
 //   +10 recovery bonus — volume holding 1h baseline AND buys winning 5m ≥55%
@@ -1976,6 +1978,13 @@ export function computePostSpikeBehavior(metrics, history = []) {
     dropTier = 'STRONG';
     baseScore = 15;
     signals.push(`1h ${drop1h.toFixed(0)}% — ideal re-entry zone`);
+  } else if (dropPct >= 10) {
+    // SHALLOW_FADE — small drop. Reward recovery; lightly penalize a fade
+    // that's still bleeding without buyer return.
+    dropTier = 'SHALLOW_FADE';
+    baseScore = 5;
+    conditionalNeedsRecovery = true;  // only credited if recovery confirms
+    signals.push(`1h ${drop1h.toFixed(0)}% — shallow fade, looking for buyer return`);
   } else {
     return { score: 0, dropTier: 'SHALLOW', deadCoin: false, recoveryActive: false, signals: [] };
   }
@@ -1997,10 +2006,18 @@ export function computePostSpikeBehavior(metrics, history = []) {
     signals.push(`Recovery: vol ${volBaseline.toFixed(1)}x baseline + 5m buys ${b5}/${b5+s5} (${(buyRatio5m*100).toFixed(0)}%)`);
   }
 
-  // (b) logic: 40-55% tier withholds +8 unless recovery confirms
+  // Conditional tiers (CAUTION 40-55%, SHALLOW_FADE 10-20%) withhold their
+  // base credit unless recovery confirms. SHALLOW_FADE goes one step further
+  // — a shallow drop that's still bleeding without buyer return gets a small
+  // -3 nudge so the scorer doesn't over-credit the bare fact of a small dip.
   if (conditionalNeedsRecovery && !recoveryActive) {
-    baseScore = 0;
-    signals.push(`Caution tier: no recovery yet — withholding +8 credit`);
+    if (dropTier === 'SHALLOW_FADE') {
+      baseScore = -3;
+      signals.push(`Shallow fade with no buyer return — -3 nudge`);
+    } else {
+      baseScore = 0;
+      signals.push(`Caution tier: no recovery yet — withholding +8 credit`);
+    }
   }
 
   // ── Dead-coin refinement ──────────────────────────────────────────────
