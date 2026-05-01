@@ -218,8 +218,8 @@ CREATE TABLE IF NOT EXISTS sniper_settings (
 
   -- Token risk gates
   min_liquidity_usd     NUMERIC(12,2) DEFAULT 20000,
-  min_market_cap_usd    NUMERIC(12,2) DEFAULT 10000,
-  max_market_cap_usd    NUMERIC(12,2) DEFAULT 10000000,
+  min_market_cap_usd    NUMERIC(12,2) DEFAULT 5000,
+  max_market_cap_usd    NUMERIC(12,2) DEFAULT 75000,
   min_volume_24h_usd    NUMERIC(12,2) DEFAULT 10000,
   max_top10_holder_pct  NUMERIC(5,2) DEFAULT 50,
   max_dev_wallet_pct    NUMERIC(5,2) DEFAULT 10,

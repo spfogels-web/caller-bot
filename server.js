@@ -22,6 +22,7 @@ import express          from 'express';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path             from 'path';
+import { timingSafeEqual } from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -349,14 +350,14 @@ const MODES = {
     name: 'NEW_COINS', emoji: '🚀', color: '#00ff88',
     minScore: 40,
     minMarketCap: 1_000,
-    // HARD CAP lowered 150K → 80K based on outcome analysis:
-    //   $13K-$40K (sweet spot, priority)
-    //   $40K-$80K (secondary — 100% WR on 2/2 historically, still viable)
-    //   >$80K     AUTO-REJECT regardless of score
-    maxMarketCap:    80_000,
-    sweetSpotMin:    13_000,
-    sweetSpotMax:    40_000,
-    secondaryMcapMax: 80_000,
+    // Operator policy 2026-04-30:
+    //   $8K-$25K   sweet spot (priority bonus)
+    //   $25K-$75K  allowed but no bonus (pre-bond focus, post-mig with floor)
+    //   >$75K      AUTO-REJECT regardless of score
+    maxMarketCap:    75_000,
+    sweetSpotMin:     8_000,
+    sweetSpotMax:    25_000,
+    secondaryMcapMax: 75_000,
     minLiquidity: 3_000,
     minVolume24h: 500,
     minPairAgeHours: 0,
@@ -758,9 +759,9 @@ try {
   // Format: [key, current, min, max, max_step_per_change, cooldown_hours]
   const tuneParams = [
     // Legacy params (kept for backward compat with existing autotune flows)
-    ['sweetSpotMin',          '8000',  '5000',   '25000',  '2000',  6],
-    ['sweetSpotMax',          '25000', '10000',  '100000', '5000',  6],
-    ['maxMarketCapOverride',  '150000','50000',  '500000', '25000', 6],
+    ['sweetSpotMin',          '8000',  '5000',   '15000',  '1000',  6],
+    ['sweetSpotMax',          '25000', '15000',  '40000',  '2500',  6],
+    ['maxMarketCapOverride',  '75000', '50000',  '75000',  '5000',  6],
     ['minScoreOverride',      '38',    '28',     '60',     '3',     6],
     ['scoreFloorOverride',    '38',    '28',     '60',     '3',     6],
     ['maxPairAgeHoursOverride','4',    '1',      '12',     '1',     12],
@@ -1314,6 +1315,31 @@ setInterval(() => { refreshWinnerMemory(); }, MISSED_REFRESH_MS);
  * Get current AI config overrides set by the operator or AI agent.
  */
 let AI_CONFIG_OVERRIDES = {};
+
+// ── Post-migration cooldown (operator policy 2026-04-30) ─────────────────
+// First-seen-as-MIGRATED timestamps, keyed by contract address. Used by the
+// post-migration cooldown gate in processCandidate to enforce a 5-15 min
+// observation window after pump.fun graduation: do NOT call until we've
+// seen a buyer floor form. In-memory by design — restart loses windows in
+// flight, which is acceptable (worst case: a coin we'd have blocked sneaks
+// through if it migrated <15 min before a restart).
+const _firstMigratedAtMs = new Map();
+const POST_MIG_COOLDOWN_MIN_MS = 5  * 60 * 1000;
+const POST_MIG_COOLDOWN_MAX_MS = 15 * 60 * 1000;
+// LRU cap so the map can't grow unbounded
+function _recordMigration(ca) {
+  if (!ca) return null;
+  let t = _firstMigratedAtMs.get(ca);
+  if (!t) {
+    t = Date.now();
+    _firstMigratedAtMs.set(ca, t);
+    if (_firstMigratedAtMs.size > 5000) {
+      const oldest = _firstMigratedAtMs.keys().next().value;
+      _firstMigratedAtMs.delete(oldest);
+    }
+  }
+  return t;
+}
 // Persist AI_CONFIG_OVERRIDES to SQLite so pausePosting survives restarts.
 try {
   dbInstance.exec(`CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)`);
@@ -1379,8 +1405,8 @@ function persistAIConfig() {
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
   minScoreToPost:         35,   // UNBLOCK — dropped to scorer hard floor. Any passing score should be able to post.
-  sweetSpotBonus:          0,   // DISABLED — hitting an MCap range isn't signal. Was +4 for $13K-$40K.
-  secondaryBonus:          0,   // DISABLED — same reason. Was +2 for $40K-$80K.
+  sweetSpotBonus:          6,   // 2026-04-30 operator policy: $8K-$25K is the best entry band for big runners.
+  secondaryBonus:          0,   // $25K-$75K allowed but no positive bias; user wants pre-bond focus.
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
   devFingerprintCap:       6,   // max positive delta from dev history
@@ -1426,7 +1452,7 @@ const SCORING_CONFIG_DEFAULTS = {
   scoreTrumpFreshMaxAgeMin:   30,    // "fresh" = age <= 30min
   scoreTrumpYoungThreshold:   60,    // young (<2h) score floor
   scoreTrumpYoungMaxAgeHours:  2,    // "young" = age <= 2h
-  scoreTrumpMaxMcap:       80000,    // gem-range cap
+  scoreTrumpMaxMcap:       75000,    // gem-range cap (operator policy 2026-04-30)
 
   // ── ALL TODAY'S NEW GUARDS DISABLED — REVERT TO 4/27 12:54pm BASELINE ──
   // Operator wants the bot's behavior matched to the 4/27 state when SCAM
@@ -1489,8 +1515,8 @@ try {
     const MIGRATE_FORCE = {
       winPeakMultiple:    1.3,  // fallback WIN threshold, lowered from 2.5 → 1.3
       neutralDrawdownPct: 10,
-      sweetSpotBonus:     0,    // user disabled: MCap range isn't a signal
-      secondaryBonus:     0,    // user disabled: MCap range isn't a signal
+      sweetSpotBonus:     6,    // 2026-04-30: re-enabled — $8K-$25K is operator's high-conviction band
+      secondaryBonus:     0,    // $25K-$75K allowed but no positive bias
       targetMultiplier:   5.0,  // NEW user-only tuning target
       // 4/27 baseline restoration — disable today's new guards
       clusterMinScoreToPost:    0,
@@ -1499,7 +1525,7 @@ try {
       // Operator-tuned vertical-spike threshold (raised 30→40→45)
       verticalSpike5mPct:      45,
     };
-    const MIGRATE_FORCE_VERSION = 'v11';  // v11 = winPeakMultiple lowered to 1.3x; v10 = fallen-knife removed
+    const MIGRATE_FORCE_VERSION = 'v12';  // v12 = re-enable sweetSpotBonus per 2026-04-30 policy; v11 = winPeakMultiple lowered to 1.3x
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
@@ -2027,7 +2053,7 @@ function makeFinalDecision(scoreResult, claudeVerdict, candidate) {
   // Real EXTENDED_AVOID cases (2h+ old coin already pumped) still trip.
   const mcapForAvoid = candidate.marketCap ?? 0;
   const ageForAvoid  = candidate.pairAgeHours ?? 99;
-  const avoidExempt  = ageForAvoid < 0.5 && mcapForAvoid >= 8_000 && mcapForAvoid <= 80_000;
+  const avoidExempt  = ageForAvoid < 0.5 && mcapForAvoid >= 8_000 && mcapForAvoid <= 75_000;
   if (setupCheck === 'EXTENDED_AVOID' && !avoidExempt) return 'IGNORE';
   if (setupCheck === 'EXTENDED_AVOID' && avoidExempt) {
     // Fall through — coin still has to clear score + risk gates below.
@@ -4043,27 +4069,18 @@ async function processCandidate(candidate, isRescan = false) {
   if (!ca) return;
   if (isBlocklisted(ca)) { console.log(`[auto-caller] BLOCKLIST skip — ${ca.slice(0,8)}`); return; }
 
-  // ── HARD MCap ceiling: $80K cap based on historical outcome analysis.
-  // Coins above this rarely produce the 10x-ish returns we're hunting, and
-  // late entries are the #1 source of losses. Auto-reject regardless of
-  // score, Claude, OpenAI, or smart-money signals. The cap is overridable
-  // via AI_CONFIG_OVERRIDES.maxMarketCapOverride (set from dashboard / TG).
-  // ── HARD MCap FLOOR: $15K minimum — sub-$15K calls have a high false-
-  // positive rate (3 of 4 recent sub-$15K posts were losers). Coins between
-  // $15K-$18K still need to clear extra V5 verification (rug<25, mq>=58,
-  // wq>=55, OR a known winner wallet) before being eligible for POST.
-  const MCAP_HARD_FLOOR = 15_000;
+  // ── HARD MCap ceiling/floor — operator policy 2026-04-30 ───────────────
+  // Sweet spot $8K-$25K = best entry for big runners. $75K = hard ceiling
+  // (above this, the run we want is mostly behind us). $8K floor = below
+  // here is too pre-launch / too thin to enter cleanly. Cap is overridable
+  // via AI_CONFIG_OVERRIDES.maxMarketCapOverride.
+  const MCAP_HARD_FLOOR = 8_000;
   if ((candidate.marketCap ?? 0) > 0 && (candidate.marketCap ?? 0) < MCAP_HARD_FLOOR) {
     console.log(`[auto-caller] 🚫 $${candidate.token ?? ca.slice(0,6)} rejected — mcap $${Math.round((candidate.marketCap??0)/1000)}K below $${MCAP_HARD_FLOOR/1000}K floor`);
     return;
   }
 
-  // AXIOSCAN-MODE — raised default from 120K to 200K. $papi at $236K was
-  // being blocked even though a 3x from there is still a real call. The
-  // sweet-spot bonuses (+4 for $15-40K, +4 for EARLY_ENTRY) already bias
-  // scoring toward low-MCap entries; the raw cap only needs to filter
-  // "obviously too late" coins (>$250K where 3x is harder).
-  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 200_000;
+  const MCAP_HARD_CAP = AI_CONFIG_OVERRIDES.maxMarketCapOverride ?? 75_000;
   if ((candidate.marketCap ?? 0) > MCAP_HARD_CAP) {
     logEvent('INFO', 'MCAP_CEILING', `${candidate.token ?? ca.slice(0,6)} mcap=${Math.round(candidate.marketCap/1000)}K > ${MCAP_HARD_CAP/1000}K cap`);
     console.log(`[auto-caller] 🛑 $${candidate.token ?? ca.slice(0,6)} rejected — mcap ${Math.round(candidate.marketCap/1000)}K above $${MCAP_HARD_CAP/1000}K ceiling`);
@@ -4210,13 +4227,14 @@ async function processCandidate(candidate, isRescan = false) {
     }
 
     // ── MCap tier bonuses ─────────────────────────────────────────────────
-    // Sweet spot $13K-$40K: +8 points (historical data shows best ROI here)
-    // Sweet spot $15K-$40K pre-bonding: +4 points (best risk/reward for early gems)
-    // Secondary $40K-$80K: +2 points (still viable for continuation plays)
-    // Below $15K: no bonus (too pre-launch to reliably enter)
+    // 2026-04-30 operator policy:
+    //   $8K-$25K   sweet spot: +sweetSpotBonus (best entry for big runners)
+    //   $25K-$75K  secondary: +secondaryBonus (allowed, default 0 — no positive bias)
+    //   <$8K       PRE_SWEETSPOT (below hard floor — already rejected upstream)
+    //   >$75K      blocked upstream by MCAP_HARD_CAP
     const mcap = enrichedCandidate.marketCap ?? 0;
-    const ssMin = TUNING_CONFIG?.thresholds?.sweetSpotMin ?? 15_000;
-    const ssMax = TUNING_CONFIG?.thresholds?.sweetSpotMax ?? 40_000;
+    const ssMin = TUNING_CONFIG?.thresholds?.sweetSpotMin ?? 8_000;
+    const ssMax = TUNING_CONFIG?.thresholds?.sweetSpotMax ?? 25_000;
     let mcapTier = null;
     if (mcap >= ssMin && mcap <= ssMax) {
       const b = addBonusCapped(SCORING_CONFIG.sweetSpotBonus);
@@ -4225,11 +4243,11 @@ async function processCandidate(candidate, isRescan = false) {
         scoreResult.signals.launch.push(`+${b} sweet-spot MCap ($${ssMin/1000}K-$${ssMax/1000}K)`);
       }
       mcapTier = 'SWEET_SPOT';
-    } else if (mcap > ssMax && mcap <= 80_000) {
+    } else if (mcap > ssMax && mcap <= 75_000) {
       const b = addBonusCapped(SCORING_CONFIG.secondaryBonus);
       if (b > 0) {
         (scoreResult.signals = scoreResult.signals || {}).launch = scoreResult.signals.launch || [];
-        scoreResult.signals.launch.push(`+${b} secondary MCap ($${ssMax/1000}K-$80K)`);
+        scoreResult.signals.launch.push(`+${b} secondary MCap ($${ssMax/1000}K-$75K)`);
       }
       mcapTier = 'SECONDARY';
     } else if (mcap > 0 && mcap < ssMin) {
@@ -5063,7 +5081,7 @@ async function processCandidate(candidate, isRescan = false) {
     const mcapForExtremeVeto = enrichedCandidate.marketCap ?? 0;
     const youngSweetspot = ageForExtremeVeto < 0.5
                         && mcapForExtremeVeto >= 5_000
-                        && mcapForExtremeVeto <= 80_000;
+                        && mcapForExtremeVeto <= 75_000;
     if (
       finalDecision === 'AUTO_POST' &&
       !enrichedCandidate._smartMoney &&
@@ -5192,7 +5210,7 @@ async function processCandidate(candidate, isRescan = false) {
       const ageHrs   = Number(enrichedCandidate.pairAgeHours ?? 99);
       const ageMins  = ageHrs * 60;
       const mcap     = Number(enrichedCandidate.marketCap ?? 0);
-      const maxMcap  = SCORING_CONFIG.scoreTrumpMaxMcap ?? 80_000;
+      const maxMcap  = SCORING_CONFIG.scoreTrumpMaxMcap ?? 75_000;
 
       const freshTier = score >= (SCORING_CONFIG.scoreTrumpFreshThreshold ?? 55)
                      && ageMins <= (SCORING_CONFIG.scoreTrumpFreshMaxAgeMin ?? 30)
@@ -5373,6 +5391,55 @@ async function processCandidate(candidate, isRescan = false) {
     // KOL/cluster signals bypass — their post-migration buy IS the
     // confirmation of stability we'd otherwise wait for.
     //
+    // ── POST-MIGRATION COOLDOWN (operator policy 2026-04-30) ─────────────
+    // After a coin graduates the bonding curve, do NOT call for the first
+    // 5 minutes. Between 5-15 minutes post-migration, only call if a buyer
+    // floor is forming (5m buy ratio ≥ 0.55, 5m pct ≥ -3%, no active dump
+    // in immediate history). Past 15 min, fall through to the existing
+    // post-mig dump guard. Applies universally — even smart-money signals
+    // wait for the floor, since the policy is "see floor, then call."
+    {
+      const c = enrichedCandidate;
+      const isMigrated = c.pumpFunMigrated === true || c.pumpFunStage === 'MIGRATED';
+      if (finalDecision === 'AUTO_POST' && isMigrated) {
+        const firstSeenMs = _recordMigration(ca);
+        const elapsedMs = Date.now() - firstSeenMs;
+
+        if (elapsedMs < POST_MIG_COOLDOWN_MIN_MS) {
+          // First 5 min: unconditional cooldown. No call regardless of score.
+          const remainMin = ((POST_MIG_COOLDOWN_MIN_MS - elapsedMs) / 60_000).toFixed(1);
+          logEvent('INFO', 'POST_MIG_COOLDOWN_BLOCK',
+            `${c.token ?? ca.slice(0,6)} migrated ${(elapsedMs/60000).toFixed(1)}min ago — cooldown ${remainMin}min remaining → WATCHLIST`);
+          console.log(`[auto-caller] ⏳ Post-mig cooldown — $${c.token ?? ca.slice(0,6)} migrated ${(elapsedMs/60000).toFixed(1)}min ago, waiting ${remainMin}min for buyer floor → WATCHLIST`);
+          finalDecision = 'WATCHLIST';
+        } else if (elapsedMs <= POST_MIG_COOLDOWN_MAX_MS) {
+          // 5-15 min: require buyer floor before allowing the call through.
+          const pct5m   = Number(c.priceChange5m ?? c.pct_change_5m ?? 0);
+          const b5      = Number(c.buys5m  ?? 0);
+          const s5      = Number(c.sells5m ?? 0);
+          const ratio5m = (b5 + s5) > 0 ? b5 / (b5 + s5) : null;
+          // Floor confirmed when buyers are clearly defending and price isn't
+          // bleeding. Both conditions required — a one-print buy spike with
+          // price still falling is not a floor.
+          const buyersDefending = ratio5m != null && ratio5m >= 0.55;
+          const priceHolding    = pct5m >= -3;
+          const floorConfirmed  = buyersDefending && priceHolding;
+
+          if (!floorConfirmed) {
+            logEvent('INFO', 'POST_MIG_NO_FLOOR',
+              `${c.token ?? ca.slice(0,6)} migrated ${(elapsedMs/60000).toFixed(1)}min ago — no buyer floor (5m=${pct5m.toFixed(1)}% buys=${b5} sells=${s5} ratio=${ratio5m != null ? (ratio5m*100).toFixed(0)+'%' : 'n/a'}) → WATCHLIST`);
+            console.log(`[auto-caller] 🌊 Post-mig no-floor — $${c.token ?? ca.slice(0,6)} ${(elapsedMs/60000).toFixed(1)}min post-mig, buyers/price not confirming → WATCHLIST`);
+            finalDecision = 'WATCHLIST';
+          } else {
+            logEvent('INFO', 'POST_MIG_FLOOR_OK',
+              `${c.token ?? ca.slice(0,6)} migrated ${(elapsedMs/60000).toFixed(1)}min ago · floor confirmed (ratio=${(ratio5m*100).toFixed(0)}%, 5m=${pct5m.toFixed(1)}%)`);
+          }
+        }
+        // > 15 min: existing post-mig dump guard below handles the case.
+      }
+    }
+
+    // ── POST-MIGRATION DUMP GUARD (legacy signal-based) ──────────────────
     // Tunable via SCORING_CONFIG (set via /api/config/scoring):
     //   postMigSpike1hPct   — 1h move that flags "just migrated" (default +50%)
     //   postMigDumpPct      — 5m drop that flags "dumping now" (default -3%)
@@ -6581,6 +6648,63 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
+// ─── Dashboard Basic Auth ─────────────────────────────────────────────────
+// Locks the dashboard + API behind a username/password. Browser shows a
+// native login prompt on first visit; credentials are cached for the session.
+//
+// Configure via Railway env:
+//   DASHBOARD_PASSWORD = <your password>     (required to enable)
+//   DASHBOARD_USER     = <username>          (optional, defaults to "admin")
+//
+// If DASHBOARD_PASSWORD is unset, auth is DISABLED (dev convenience).
+//
+// Bypass list — only the two webhooks stay open. External services (Telegram,
+// Helius) post into these and cannot send Basic Auth headers. Everything else
+// — including the root JSON status, /api/health, and the dashboard — requires
+// login. Railway's default health check is TCP-level and works without an
+// open HTTP endpoint.
+const DASHBOARD_USER     = process.env.DASHBOARD_USER     || 'admin';
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
+const AUTH_BYPASS = new Set(['/webhook', '/webhook/helius']);
+
+function safeStrEq(a, b) {
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+function basicAuthMiddleware(req, res, next) {
+  if (!DASHBOARD_PASSWORD)            return next();   // auth disabled
+  if (req.method === 'OPTIONS')       return next();   // CORS preflight
+  if (AUTH_BYPASS.has(req.path))      return next();   // health + webhooks
+
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Basic ')) {
+    try {
+      const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+      const idx = decoded.indexOf(':');
+      if (idx > -1) {
+        const user = decoded.slice(0, idx);
+        const pass = decoded.slice(idx + 1);
+        if (safeStrEq(user, DASHBOARD_USER) && safeStrEq(pass, DASHBOARD_PASSWORD)) {
+          return next();
+        }
+      }
+    } catch {}
+  }
+
+  res.setHeader('WWW-Authenticate', 'Basic realm="Pulse Caller", charset="UTF-8"');
+  res.status(401).send('Authentication required');
+}
+
+if (DASHBOARD_PASSWORD) {
+  console.log('[auth] ✓ Dashboard locked behind Basic Auth (user=' + DASHBOARD_USER + ')');
+} else {
+  console.log('[auth] ⚠️  Dashboard is OPEN — set DASHBOARD_PASSWORD env var to enable login');
+}
+app.use(basicAuthMiddleware);
+
 // API Usage tracking endpoint
 app.get('/api/usage', (req, res) => {
   setCors(res);
@@ -7301,7 +7425,7 @@ app.get('/api/ai/memory', (req, res) => {
       gemPatterns,
       configOverrides: overrides,
       recentContext: context,
-      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??15_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??40_000 },
+      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??8_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??25_000 },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -7829,7 +7953,7 @@ try { dbInstance.exec(`
 // Tunable config — loaded from kv_store on boot, defaults from scorer
 const TUNING_DEFAULTS = {
   discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
-  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:85000, sweetSpotMin:8000, sweetSpotMax:40000 },
+  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:75000, sweetSpotMin:8000, sweetSpotMax:25000 },
   penalties: { latePump1hThreshold:300, latePump1hPenalty:0, latePump1hSevereThreshold:500, latePump1hSeverePenalty:0, latePump24hThreshold:500, latePump24hPenalty:0, latePumpAgeExemptHours:0.5, winThresholdPct:20, lossThresholdPct:-30 },
 };
 let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
@@ -8337,7 +8461,7 @@ Respond ONLY with valid JSON array:
     const TUNE_BOUNDS = {
       autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
       averageThreshold: [45, 75], mixedThreshold: [55, 85],
-      mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
+      mcapHardCap: [50000, 75000], sweetSpotMin: [5000, 15000], sweetSpotMax: [15000, 40000],
       volumeVelocity: [15, 50], buyPressure: [10, 40], walletQuality: [8, 30],
       holderDistribution: [5, 20], liquidityHealth: [3, 15],
       latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],
@@ -8702,7 +8826,7 @@ Respond ONLY with valid JSON:
       winPeakMultiple: [1.2, 3.0], neutralDrawdownPct: [5, 25],
       autoPostScore: [30, 55], eliteThreshold: [35, 55], cleanThreshold: [40, 65],
       averageThreshold: [45, 75], mixedThreshold: [55, 85],
-      mcapHardCap: [50000, 200000], sweetSpotMin: [5000, 25000], sweetSpotMax: [20000, 80000],
+      mcapHardCap: [50000, 75000], sweetSpotMin: [5000, 15000], sweetSpotMax: [15000, 40000],
       volumeVelocity: [15, 50], buyPressure: [10, 40], walletQuality: [8, 30],
       holderDistribution: [5, 20], liquidityHealth: [3, 15],
       latePump1hPenalty: [5, 50], latePump1hSeverePenalty: [10, 60],

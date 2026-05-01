@@ -62,6 +62,29 @@ async function startup() {
   await tracker.init();
   await sniper.init();
 
+  // ── One-time MCap policy normalization (operator policy 2026-04-30) ──
+  // Lower legacy unmodified defaults to the new $5K min / $75K max ceiling.
+  // Idempotent: only updates values that exactly match the legacy schema
+  // defaults (10000 / 10000000), so any user-edited values are preserved.
+  try {
+    const r = await query(
+      `UPDATE sniper_settings
+         SET max_market_cap_usd = 75000, updated_at = NOW()
+       WHERE is_global_default = TRUE AND max_market_cap_usd = 10000000`
+    );
+    const r2 = await query(
+      `UPDATE sniper_settings
+         SET min_market_cap_usd = 5000, updated_at = NOW()
+       WHERE is_global_default = TRUE AND min_market_cap_usd = 10000`
+    );
+    if ((r?.rowCount ?? 0) || (r2?.rowCount ?? 0)) {
+      console.log('[wt-server] ✓ Normalized sniper_settings MCap bounds to $5K-$75K policy');
+      await sniper.reloadSettings().catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[wt-server] MCap policy normalization skipped:', err.message);
+  }
+
   // Rescore wallets every hour
   setInterval(rescoreAllWallets, 60 * 60 * 1000);
 

@@ -281,16 +281,96 @@ async function enrichWithBirdeye(ca) {
 
 // Birdeye with one retry for very new tokens
 async function enrichWithBirdeyeWithRetry(ca, pairAgeHours) {
-  const result = await enrichWithBirdeye(ca);
+  let result = await enrichWithBirdeye(ca);
 
-  // If Birdeye failed and token is under 30min, wait 2s and try once more
+  // If Birdeye failed and token is under 30min, wait 2s and try once more —
   // Birdeye sometimes needs a moment to index brand new tokens
   if (!result.birdeyeOk && pairAgeHours != null && pairAgeHours < 0.5) {
     console.log('[enricher:birdeye] Retrying for new token in 2s...');
     await new Promise(r => setTimeout(r, 2000));
-    return enrichWithBirdeye(ca);
+    result = await enrichWithBirdeye(ca);
   }
 
+  // ── DexScreener fallback (free, no key) ──────────────────────────────
+  // Kicks in when Birdeye returns nothing — no key, out of credits, 401,
+  // or token not yet indexed. Provides market data only (price, mcap, liq,
+  // volume, %-change, symbol/name). Security fields (top10, dev%, LP) are
+  // null in fallback mode; the rest of the pipeline already tolerates
+  // null security fields so this degrades gracefully.
+  if (!result.birdeyeOk) {
+    const dex = await enrichWithDexScreener(ca);
+    if (dex.dexscreenerOk) {
+      // Merge DexScreener data into the result; flag the data source for logs
+      Object.assign(result, dex);
+      result.birdeyeOk = true;             // pipeline gates on this — keep it true
+      result._marketDataSource = 'dexscreener';
+    }
+  } else {
+    result._marketDataSource = 'birdeye';
+  }
+
+  return result;
+}
+
+// ─── DexScreener Enricher (free fallback) ─────────────────────────────────
+//
+// Free public API, no key, ~300 req/min. Returns the same market-data
+// fields as Birdeye's /defi/token_overview. Does NOT return security data
+// (top10, dev%, LP burn/lock) — those come from Helius/RugCheck if needed.
+
+const DEXSCREENER_BASE    = 'https://api.dexscreener.com';
+const DEXSCREENER_TIMEOUT = 8_000;
+
+async function enrichWithDexScreener(ca) {
+  const result = { dexscreenerOk: false };
+
+  const data = await safeFetch(
+    `${DEXSCREENER_BASE}/latest/dex/tokens/${ca}`,
+    { headers: { Accept: 'application/json' } },
+    'dexscreener:tokens',
+    DEXSCREENER_TIMEOUT
+  );
+
+  const pairs = Array.isArray(data?.pairs) ? data.pairs.filter(p => p?.chainId === 'solana') : [];
+  if (!pairs.length) {
+    console.warn('[enricher:dexscreener] ✗ no Solana pairs (token may be too new to index)');
+    return result;
+  }
+
+  // Pick the highest-liquidity Solana pair as the canonical reference
+  const pair = pairs.reduce((best, p) => {
+    const liq = Number(p?.liquidity?.usd ?? 0);
+    const bestLiq = Number(best?.liquidity?.usd ?? 0);
+    return liq > bestLiq ? p : best;
+  }, pairs[0]);
+
+  result.dexscreenerOk  = true;
+  result.priceUsd       = toNum(pair.priceUsd, null);
+  result.marketCap      = toNum(pair.marketCap ?? pair.fdv, null);
+  result.liquidity      = toNum(pair.liquidity?.usd, null);
+  result.volume24h      = toNum(pair.volume?.h24, null);
+  result.volume6h       = toNum(pair.volume?.h6,  null);
+  result.volume1h       = toNum(pair.volume?.h1,  null);
+  result.priceChange24h = toNum(pair.priceChange?.h24, null);
+  result.priceChange6h  = toNum(pair.priceChange?.h6,  null);
+  result.priceChange1h  = toNum(pair.priceChange?.h1,  null);
+  result.priceChange5m  = toNum(pair.priceChange?.m5,  null);
+
+  // Buys/sells per window — DexScreener exposes these per pair, useful for
+  // the post-mig buyer-floor confirmation gate and divergence scoring
+  result.buys5m   = toNum(pair.txns?.m5?.buys,  null);
+  result.sells5m  = toNum(pair.txns?.m5?.sells, null);
+  result.buys1h   = toNum(pair.txns?.h1?.buys,  null);
+  result.sells1h  = toNum(pair.txns?.h1?.sells, null);
+  result.buys24h  = toNum(pair.txns?.h24?.buys,  null);
+  result.sells24h = toNum(pair.txns?.h24?.sells, null);
+
+  if (pair.baseToken?.symbol) result.token     = pair.baseToken.symbol;
+  if (pair.baseToken?.name)   result.tokenName = pair.baseToken.name;
+  if (pair.pairAddress)       result.pairAddress = pair.pairAddress;
+  if (pair.dexId)             result.dex       = pair.dexId;
+
+  console.log(`[enricher:dexscreener] ✓ ${result.token ?? '?'} mcap:${result.marketCap?.toFixed?.(0) ?? '?'} liq:${result.liquidity?.toFixed?.(0) ?? '?'} dex:${result.dex ?? '?'} (Birdeye fallback)`);
   return result;
 }
 
