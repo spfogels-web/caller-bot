@@ -6663,8 +6663,10 @@ function setCors(res) {
 // — including the root JSON status, /api/health, and the dashboard — requires
 // login. Railway's default health check is TCP-level and works without an
 // open HTTP endpoint.
-const DASHBOARD_USER     = process.env.DASHBOARD_USER     || 'admin';
-const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
+// .trim() defends against trailing whitespace/newlines when pasting into
+// Railway's env UI (a common source of "credentials don't work" issues).
+const DASHBOARD_USER     = (process.env.DASHBOARD_USER     || 'admin').trim();
+const DASHBOARD_PASSWORD = (process.env.DASHBOARD_PASSWORD || '').trim();
 const AUTH_BYPASS = new Set(['/webhook', '/webhook/helius']);
 
 function safeStrEq(a, b) {
@@ -6690,8 +6692,14 @@ function basicAuthMiddleware(req, res, next) {
         if (safeStrEq(user, DASHBOARD_USER) && safeStrEq(pass, DASHBOARD_PASSWORD)) {
           return next();
         }
+        // Diagnostic: log the username received (NOT the password) and show
+        // length-only info so we can spot whitespace/encoding mismatches
+        // without leaking the secret.
+        console.log(`[auth] ✗ login failed — got user="${user}" (len ${user.length}, expected "${DASHBOARD_USER}" len ${DASHBOARD_USER.length}); pass len ${pass.length} (expected ${DASHBOARD_PASSWORD.length})`);
       }
-    } catch {}
+    } catch (err) {
+      console.log(`[auth] ✗ malformed Authorization header: ${err.message}`);
+    }
   }
 
   res.setHeader('WWW-Authenticate', 'Basic realm="Pulse Caller", charset="UTF-8"');
