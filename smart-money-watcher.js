@@ -104,6 +104,8 @@ export function stopSmartMoneyWatcher() {
 }
 
 export function getWatcherStats() {
+  const sessions = parseSessions(process.env.SMART_MONEY_SESSIONS ?? DEFAULT_SESSIONS);
+  const utcHour  = new Date().getUTCHours();
   return {
     watchedWallets:   _watchedWallets.length,
     activeClusters:   clusterMap.size,
@@ -116,6 +118,12 @@ export function getWatcherStats() {
     secondsSinceLastTick: _watcherTelemetry.lastTickAt
       ? Math.round((Date.now() - _watcherTelemetry.lastTickAt) / 1000)
       : null,
+    schedule: {
+      sessions,                                   // [{start,end},...] in UTC hours
+      currentUtcHour: utcHour,
+      inSessionNow:   isInSession(utcHour, sessions),
+      raw:            process.env.SMART_MONEY_SESSIONS ?? DEFAULT_SESSIONS,
+    },
   };
 }
 
@@ -149,7 +157,62 @@ async function refreshWatchedWallets() {
 
 // ─── Polling Tick ────────────────────────────────────────────────────────────
 
+// ── Trading-session schedule ────────────────────────────────────────────
+// Polls only during configured UTC hour ranges to save Helius credits
+// during quiet hours. Default = "Option B" (9 hrs/day): morning + midday +
+// night sessions in EDT, mapped to UTC.
+//
+//   13:00-16:00 UTC  =  9 AM-12 PM EDT  (US market open)
+//   17:00-20:00 UTC  =  1 PM- 4 PM EDT  (lunch / midday rotation)
+//   00:00-03:00 UTC  =  8 PM-11 PM EDT  (US evening prime time)
+//
+// Override format: comma-separated `start-end` UTC hour ranges (0-24).
+//   SMART_MONEY_SESSIONS = "13-16,17-20,0-3"      (Option B, EDT default)
+//   SMART_MONEY_SESSIONS = "14-17,18-21,1-4"      (Option B equivalent in EST)
+//   SMART_MONEY_SESSIONS = "0-24"                 (poll 24/7, no schedule)
+//   SMART_MONEY_SESSIONS = ""                     (poll 24/7, no schedule)
+const DEFAULT_SESSIONS = '13-16,17-20,0-3';
+function parseSessions(spec) {
+  return (spec || '')
+    .split(',').map(s => s.trim()).filter(Boolean)
+    .map(part => {
+      const [a, b] = part.split('-').map(x => Number(x.trim()));
+      if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+      return { start: a, end: b };
+    })
+    .filter(Boolean);
+}
+function isInSession(hour, sessions) {
+  if (!sessions.length) return true;
+  for (const s of sessions) {
+    if (s.start === s.end) continue;                // empty/disabled window
+    if (s.start === 0 && s.end === 24) return true; // 24/7 marker
+    if (s.start < s.end) {
+      if (hour >= s.start && hour < s.end) return true;
+    } else {
+      // Wraparound (e.g. start=22, end=2 → 22-23, 0-1)
+      if (hour >= s.start || hour < s.end) return true;
+    }
+  }
+  return false;
+}
+
 async function tick() {
+  const sessions = parseSessions(process.env.SMART_MONEY_SESSIONS ?? DEFAULT_SESSIONS);
+  const utcHour  = new Date().getUTCHours();
+  if (!isInSession(utcHour, sessions)) {
+    // Off-session — skip tick, log every ~hour during off-hours so the
+    // operator can see we're alive (12 ticks @ 5min = 1h).
+    if ((_watcherTelemetry.totalTicks % 12) === 0) {
+      const next = sessions.length
+        ? sessions.map(s => `${s.start}-${s.end}`).join(',')
+        : '24/7';
+      console.log(`[smart-money] off-session (UTC hour ${utcHour}, schedule ${next}) — sleeping`);
+    }
+    _watcherTelemetry.totalTicks += 1; // count skips so the modulo above advances
+    return;
+  }
+
   _watcherTelemetry.lastTickAt = Date.now();
   _watcherTelemetry.totalTicks += 1;
   _watcherTelemetry.lastTickSwapsSeen = 0;
