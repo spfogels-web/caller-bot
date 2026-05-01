@@ -9607,7 +9607,8 @@ function startAutoRefresh(){
 // Pulls /api/hall-of-fame?limit=25 (top WIN calls by peak_multiple), renders
 // each as a circle whose radius scales with sqrt(peakX) so a 1000x doesn't
 // dwarf a 5x. Bubbles drift with simple Newtonian motion and bounce off the
-// stage walls + each other. Click → opens DexScreener for the contract.
+// stage walls + each other. Click → opens our original promotion card
+// (entry + analysis from when the call was made), via openPromotedModal.
 let _topWinsAnim = null;
 let _topWinsResizeBound = false;
 async function loadTopWinsBubbles(){
@@ -9671,7 +9672,7 @@ async function loadTopWinsBubbles(){
 
     const node = document.createElement('div');
     node.className = 'bubble-node';
-    node.title = '$' + tok + '  ' + peak.toFixed(2) + 'x  →  open DexScreener';
+    node.title = '$' + tok + '  ' + peak.toFixed(2) + 'x  →  open call card';
     node.style.cssText = [
       'position:absolute',
       'width:' + (radius*2) + 'px',
@@ -9694,7 +9695,21 @@ async function loadTopWinsBubbles(){
       '<div style="font-family:\'Orbitron\',var(--mono);font-size:' + fontTok + 'px;font-weight:800;color:' + c.text + ';text-shadow:0 0 8px ' + c.glow + ';letter-spacing:0.5px;line-height:1;margin-bottom:3px;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">$' + tok + '</div>' +
       '<div style="font-family:\'Orbitron\',var(--mono);font-size:' + fontX + 'px;font-weight:900;color:' + c.text + ';text-shadow:0 0 10px ' + c.glow + ';line-height:1">' + peakStr + '</div>';
     node.addEventListener('click', () => {
-      if (ca) window.open('https://dexscreener.com/solana/' + ca, '_blank');
+      if (!ca) return;
+      // Open the original promotion card (entry + analysis from when we
+      // called it). openPromotedModal fetches the full candidate row by
+      // CA, falls back to the bubble row if the lookup fails.
+      try {
+        if (typeof openPromotedModal === 'function') {
+          openPromotedModal({ contract_address: ca, token: tok });
+        } else if (typeof showCoinByCA === 'function') {
+          showCoinByCA(ca);
+        } else {
+          window.open('https://dexscreener.com/solana/' + ca, '_blank');
+        }
+      } catch {
+        window.open('https://dexscreener.com/solana/' + ca, '_blank');
+      }
     });
     stage.appendChild(node);
 
