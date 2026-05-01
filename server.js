@@ -14765,8 +14765,15 @@ const _sourceOutcomesDiagHandler = (req, res) => {
     const since = req.query.since && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
       ? req.query.since
       : null;
+    // until is EXCLUSIVE upper bound — pass tomorrow's date to include today.
+    // E.g. since=2026-04-26&until=2026-04-28 returns April 26+27.
+    const until = req.query.until && /^\d{4}-\d{2}-\d{2}$/.test(req.query.until)
+      ? req.query.until
+      : null;
     const minPeak = Number(req.query.minPeak ?? 1.5);
     const sinceClause = since ? `AND c.called_at >= '${since}'` : '';
+    const untilClause = until ? `AND c.called_at <  '${until}'` : '';
+    const dateRange   = `${sinceClause} ${untilClause}`;
 
     // Per-source breakdown (uses calls.bot_source — falls back to candidate's bot_source)
     const bySource = dbInstance.prepare(`
@@ -14782,9 +14789,29 @@ const _sourceOutcomesDiagHandler = (req, res) => {
         SUM(CASE WHEN c.peak_multiple >= 100 THEN 1 ELSE 0 END) AS n_100x
       FROM calls c
       LEFT JOIN candidates ca ON ca.id = c.candidate_id
-      WHERE 1=1 ${sinceClause}
+      WHERE 1=1 ${dateRange}
       GROUP BY COALESCE(c.bot_source, ca.bot_source, 'UNKNOWN')
       ORDER BY wins DESC, calls DESC
+    `).all().map(r => ({
+      ...r,
+      win_rate_pct: r.calls > 0 ? Math.round((r.wins / r.calls) * 100) : 0,
+    }));
+
+    // Per-day × source breakdown — answers "how many cluster calls did we
+    // get on each specific day in the range?" SQLite date() truncates the
+    // ISO timestamp to YYYY-MM-DD.
+    const byDayBySource = dbInstance.prepare(`
+      SELECT
+        date(c.called_at) AS day,
+        COALESCE(c.bot_source, ca.bot_source, 'UNKNOWN') AS source,
+        COUNT(*)                                              AS calls,
+        SUM(CASE WHEN c.outcome='WIN'  THEN 1 ELSE 0 END)     AS wins,
+        SUM(CASE WHEN c.outcome='LOSS' THEN 1 ELSE 0 END)     AS losses
+      FROM calls c
+      LEFT JOIN candidates ca ON ca.id = c.candidate_id
+      WHERE c.called_at IS NOT NULL ${dateRange}
+      GROUP BY day, source
+      ORDER BY day DESC, calls DESC
     `).all().map(r => ({
       ...r,
       win_rate_pct: r.calls > 0 ? Math.round((r.wins / r.calls) * 100) : 0,
@@ -14808,7 +14835,7 @@ const _sourceOutcomesDiagHandler = (req, res) => {
         ROUND(AVG(CASE WHEN c.outcome='WIN' THEN c.peak_multiple END), 2) AS avg_peak_wins
       FROM calls c
       LEFT JOIN candidates ca ON ca.id = c.candidate_id
-      WHERE 1=1 ${sinceClause}
+      WHERE 1=1 ${dateRange}
       GROUP BY source, score_band
       ORDER BY source, score_band
     `).all();
@@ -14827,7 +14854,7 @@ const _sourceOutcomesDiagHandler = (req, res) => {
       LEFT JOIN candidates ca ON ca.id = c.candidate_id
       WHERE c.peak_multiple IS NOT NULL
         AND c.peak_multiple >= ?
-        ${sinceClause}
+        ${dateRange}
       ORDER BY c.peak_multiple DESC
       LIMIT 25
     `).all(minPeak);
@@ -14843,9 +14870,11 @@ const _sourceOutcomesDiagHandler = (req, res) => {
     res.json({
       ok: true,
       since: since || 'all-time',
+      until: until || 'now',
       min_peak_for_top_winners: minPeak,
       verdict,
       by_source: bySource,
+      by_day_source: byDayBySource,
       score_band_x_source: scoreBands,
       top_winners: topWinners,
     });
