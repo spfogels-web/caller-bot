@@ -6663,10 +6663,21 @@ function setCors(res) {
 // — including the root JSON status, /api/health, and the dashboard — requires
 // login. Railway's default health check is TCP-level and works without an
 // open HTTP endpoint.
-// .trim() defends against trailing whitespace/newlines when pasting into
-// Railway's env UI (a common source of "credentials don't work" issues).
-const DASHBOARD_USER     = (process.env.DASHBOARD_USER     || 'admin').trim();
-const DASHBOARD_PASSWORD = (process.env.DASHBOARD_PASSWORD || '').trim();
+// Whitespace in variable NAMES (not just values) is a real Railway gotcha:
+// pasting from another tool can leave a trailing \n on the env key itself,
+// so process.env.DASHBOARD_USER returns undefined while the actual key in
+// process.env is "DASHBOARD_USER\n". Resolve by scanning all env keys and
+// matching on the trimmed name. .trim() on the value handles trailing
+// whitespace in the value too.
+function readEnvFlexible(target) {
+  const want = target.trim();
+  for (const k of Object.keys(process.env)) {
+    if (k.trim() === want) return process.env[k];
+  }
+  return undefined;
+}
+const DASHBOARD_USER     = (readEnvFlexible('DASHBOARD_USER')     || 'admin').trim();
+const DASHBOARD_PASSWORD = (readEnvFlexible('DASHBOARD_PASSWORD') || '').trim();
 const AUTH_BYPASS = new Set(['/webhook', '/webhook/helius']);
 
 function safeStrEq(a, b) {
