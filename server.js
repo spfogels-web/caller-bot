@@ -14908,6 +14908,11 @@ const _walletWatcherDiagHandler = async (req, res) => {
     `);
     const trackedTotal = trackedByCategory.reduce((s, r) => s + (r.n || 0), 0);
 
+    // Two activity sources:
+    //   wallet_activity = legacy polling watcher (smart-money-watcher.js)
+    //   wallet_events   = current Helius webhook (helius-webhook.js)
+    // Polling was disabled around April 28 to save Helius credits, replaced
+    // by the webhook. Check both so we can tell which mode is active.
     const lastActivity = safeOne(`
       SELECT detected_at, wallet_address, token_mint
       FROM wallet_activity
@@ -14919,31 +14924,56 @@ const _walletWatcherDiagHandler = async (req, res) => {
     const minutesAgo = lastDetectedMs
       ? Math.round((Date.now() - lastDetectedMs) / 60000)
       : null;
-
-    const activity24h = safeOne(`SELECT COUNT(*) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-24 hours')`)?.n ?? 0;
-    const activity1h  = safeOne(`SELECT COUNT(*) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-1 hour')`)?.n ?? 0;
+    const activity24h      = safeOne(`SELECT COUNT(*) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-24 hours')`)?.n ?? 0;
+    const activity1h       = safeOne(`SELECT COUNT(*) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-1 hour')`)?.n ?? 0;
     const uniqueWallets24h = safeOne(`SELECT COUNT(DISTINCT wallet_address) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-24 hours')`)?.n ?? 0;
+
+    // Webhook events — newer, credit-free wallet detection
+    const lastEvent = safeOne(`
+      SELECT received_at, wallet_address, contract_address, event_type, sol_amount
+      FROM wallet_events ORDER BY id DESC LIMIT 1
+    `);
+    const lastEventMs = lastEvent?.received_at
+      ? new Date(lastEvent.received_at).getTime()
+      : null;
+    const eventMinutesAgo = lastEventMs
+      ? Math.round((Date.now() - lastEventMs) / 60000)
+      : null;
+    const events24h  = safeOne(`SELECT COUNT(*) AS n FROM wallet_events WHERE received_at > datetime('now', '-24 hours')`)?.n ?? 0;
+    const events1h   = safeOne(`SELECT COUNT(*) AS n FROM wallet_events WHERE received_at > datetime('now', '-1 hour')`)?.n ?? 0;
+    const eventBuys24h  = safeOne(`SELECT COUNT(*) AS n FROM wallet_events WHERE event_type='BUY' AND received_at > datetime('now', '-24 hours')`)?.n ?? 0;
+    const eventUniqueWallets24h = safeOne(`SELECT COUNT(DISTINCT wallet_address) AS n FROM wallet_events WHERE received_at > datetime('now', '-24 hours')`)?.n ?? 0;
 
     const recent10 = safeAll(`
       SELECT detected_at, wallet_address, token_mint
       FROM wallet_activity
       ORDER BY detected_at DESC LIMIT 10
     `);
+    const recentEvents10 = safeAll(`
+      SELECT received_at, wallet_address, contract_address, event_type, sol_amount
+      FROM wallet_events ORDER BY id DESC LIMIT 10
+    `);
 
-    // Verdict — boolean health indicators the operator can read at a glance.
+    // Aggregate verdict prefers webhook activity (the current architecture).
+    // Falls back to polling activity if webhook is silent.
+    const webhookAlive  = events1h > 0;
+    const pollingAlive  = activity1h > 0;
     const verdict = {
-      watcher_silent_24h:    activity24h === 0,
-      watcher_silent_1h:     activity1h  === 0,
+      webhook_alive_1h:      webhookAlive,
+      webhook_silent_24h:    events24h === 0,
+      polling_alive_1h:      pollingAlive,
+      polling_silent_24h:    activity24h === 0,
       no_qualifying_wallets: trackedTotal === 0,
-      stale:                 minutesAgo != null && minutesAgo > 60,
     };
     const summary = verdict.no_qualifying_wallets
       ? '⚠️ No tracked wallets — Dune scanner has not seeded the pool yet, or all are blacklisted.'
-      : verdict.watcher_silent_24h
-        ? '🛑 Wallet watcher silent for 24h+ — likely stopped polling. Check logs for [smart-money-watcher].'
-        : verdict.watcher_silent_1h
-          ? '⚠️ No activity in the last hour. Watcher may be slow or rate-limited (Helius credits?).'
-          : `✅ Watcher alive — ${activity1h} buys/1h, ${activity24h} buys/24h, last seen ${minutesAgo}min ago.`;
+      : webhookAlive
+        ? `✅ Webhook alive — ${events1h} events/1h, ${events24h} events/24h (${eventBuys24h} BUYs), last seen ${eventMinutesAgo}min ago.`
+        : verdict.webhook_silent_24h && verdict.polling_silent_24h
+          ? '🛑 BOTH wallet pipelines dead. Helius webhook not delivering AND legacy polling watcher off. Check Helius webhook subscription + verify SMART_MONEY_POLLING_ENABLED env if you need polling fallback.'
+          : verdict.webhook_silent_24h
+            ? '🛑 Helius webhook silent 24h+ — webhook subscription likely dropped or Helius isn\'t pushing to /api/helius/webhook. Polling is also off (architecture switched April 28).'
+            : `⚠️ Webhook quiet (last event ${eventMinutesAgo}min ago). ${events1h === 0 ? 'No events in last hour.' : ''}`;
 
     // Live watcher telemetry — answers "is the watcher actually polling
     // right now, and what's Helius returning?" without log scraping.
@@ -14964,7 +14994,20 @@ const _walletWatcherDiagHandler = async (req, res) => {
         total: trackedTotal,
         by_category: trackedByCategory,
       },
-      activity: {
+      // wallet_events = current webhook-driven pipeline (CHECK THIS FIRST)
+      webhook_events: {
+        last_seen_at:           lastEvent?.received_at ?? null,
+        last_seen_minutes_ago:  eventMinutesAgo,
+        last_seen_wallet:       lastEvent?.wallet_address ?? null,
+        last_seen_token:        lastEvent?.contract_address ?? null,
+        last_event_type:        lastEvent?.event_type ?? null,
+        count_1h:               events1h,
+        count_24h:              events24h,
+        buys_24h:               eventBuys24h,
+        unique_wallets_24h:     eventUniqueWallets24h,
+      },
+      // wallet_activity = legacy polling-watcher pipeline (deprecated)
+      legacy_polling_activity: {
         last_seen_at:           lastActivity?.detected_at ?? null,
         last_seen_minutes_ago:  minutesAgo,
         last_seen_wallet:       lastActivity?.wallet_address ?? null,
@@ -14973,7 +15016,8 @@ const _walletWatcherDiagHandler = async (req, res) => {
         count_24h:              activity24h,
         unique_wallets_24h:     uniqueWallets24h,
       },
-      recent_10: recent10,
+      recent_webhook_events_10: recentEvents10,
+      recent_polling_activity_10: recent10,
       generated_at: new Date().toISOString(),
     });
   } catch (err) {
