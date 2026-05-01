@@ -14885,6 +14885,93 @@ const _sourceOutcomesDiagHandler = (req, res) => {
 app.get('/api/diagnostics/source-vs-outcomes',  _sourceOutcomesDiagHandler);
 app.post('/api/diagnostics/source-vs-outcomes', _sourceOutcomesDiagHandler);
 
+// Wallet pipeline health — answers "is the smart-money watcher actually
+// firing?". Reports tracked-wallet counts by category, last activity ts,
+// and 24h / 1h activity volume. If "last_activity_minutes_ago" is high
+// or activity_24h is 0, the watcher is dead/silent.
+const _walletWatcherDiagHandler = (req, res) => {
+  setCors(res);
+  try {
+    const safeOne = (sql, ...params) => {
+      try { return dbInstance.prepare(sql).get(...params); } catch (e) { return { _err: e.message }; }
+    };
+    const safeAll = (sql, ...params) => {
+      try { return dbInstance.prepare(sql).all(...params); } catch (e) { return [{ _err: e.message }]; }
+    };
+
+    const trackedByCategory = safeAll(`
+      SELECT category, COUNT(*) AS n
+      FROM tracked_wallets
+      WHERE COALESCE(is_blacklist, 0) = 0
+      GROUP BY category
+      ORDER BY n DESC
+    `);
+    const trackedTotal = trackedByCategory.reduce((s, r) => s + (r.n || 0), 0);
+
+    const lastActivity = safeOne(`
+      SELECT detected_at, wallet_address, token_mint
+      FROM wallet_activity
+      ORDER BY detected_at DESC LIMIT 1
+    `);
+    const lastDetectedMs = lastActivity?.detected_at
+      ? new Date(lastActivity.detected_at).getTime()
+      : null;
+    const minutesAgo = lastDetectedMs
+      ? Math.round((Date.now() - lastDetectedMs) / 60000)
+      : null;
+
+    const activity24h = safeOne(`SELECT COUNT(*) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-24 hours')`)?.n ?? 0;
+    const activity1h  = safeOne(`SELECT COUNT(*) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-1 hour')`)?.n ?? 0;
+    const uniqueWallets24h = safeOne(`SELECT COUNT(DISTINCT wallet_address) AS n FROM wallet_activity WHERE detected_at > datetime('now', '-24 hours')`)?.n ?? 0;
+
+    const recent10 = safeAll(`
+      SELECT detected_at, wallet_address, token_mint
+      FROM wallet_activity
+      ORDER BY detected_at DESC LIMIT 10
+    `);
+
+    // Verdict — boolean health indicators the operator can read at a glance.
+    const verdict = {
+      watcher_silent_24h:    activity24h === 0,
+      watcher_silent_1h:     activity1h  === 0,
+      no_qualifying_wallets: trackedTotal === 0,
+      stale:                 minutesAgo != null && minutesAgo > 60,
+    };
+    const summary = verdict.no_qualifying_wallets
+      ? '⚠️ No tracked wallets — Dune scanner has not seeded the pool yet, or all are blacklisted.'
+      : verdict.watcher_silent_24h
+        ? '🛑 Wallet watcher silent for 24h+ — likely stopped polling. Check logs for [smart-money-watcher].'
+        : verdict.watcher_silent_1h
+          ? '⚠️ No activity in the last hour. Watcher may be slow or rate-limited (Helius credits?).'
+          : `✅ Watcher alive — ${activity1h} buys/1h, ${activity24h} buys/24h, last seen ${minutesAgo}min ago.`;
+
+    res.json({
+      ok: true,
+      summary,
+      verdict,
+      tracked_wallets: {
+        total: trackedTotal,
+        by_category: trackedByCategory,
+      },
+      activity: {
+        last_seen_at:           lastActivity?.detected_at ?? null,
+        last_seen_minutes_ago:  minutesAgo,
+        last_seen_wallet:       lastActivity?.wallet_address ?? null,
+        last_seen_token:        lastActivity?.token_mint ?? null,
+        count_1h:               activity1h,
+        count_24h:              activity24h,
+        unique_wallets_24h:     uniqueWallets24h,
+      },
+      recent_10: recent10,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.get('/api/diagnostics/wallet-watcher',  _walletWatcherDiagHandler);
+app.post('/api/diagnostics/wallet-watcher', _walletWatcherDiagHandler);
+
 // Leaderboard banner diagnostic — operator reported the /lb banner stopped
 // rendering. Tests three things in order:
 //   1. Is LEADERBOARD_BANNER_URL reachable (HEAD check)?
