@@ -60,6 +60,23 @@ let _pollTimer       = null;
 let _db              = null;
 let _handler         = null;                        // ({ ca, clusterSize, sampleBuyMs }) => Promise
 
+// Telemetry — exposed via getWatcherStats() for the diagnostic endpoint.
+// Lets the operator see "is the watcher actually polling?" without
+// reading every log line.
+const _watcherTelemetry = {
+  startedAt:        null,
+  lastTickAt:       null,
+  totalTicks:       0,
+  lastTickSwapsSeen: 0,
+  helius200:        0,
+  helius429:        0,
+  helius4xx:        0,
+  helius5xx:        0,
+  heliusErrors:     0,
+  lastHeliusStatus: null,
+  lastHeliusError:  null,
+};
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export function startSmartMoneyWatcher(dbInstance, onDetected) {
@@ -74,6 +91,7 @@ export function startSmartMoneyWatcher(dbInstance, onDetected) {
   ensureAlertTable();
 
   console.log('[smart-money] Watcher starting — top ' + TOP_N_WATCHED + ' winner wallets, poll every ' + (POLL_INTERVAL_MS/1000) + 's');
+  _watcherTelemetry.startedAt = Date.now();
   // First tick after 15s (let DB settle), then interval
   setTimeout(() => tick().catch(err => console.warn('[smart-money] first tick error:', err.message)), 15_000);
   _pollTimer = setInterval(() => {
@@ -93,6 +111,11 @@ export function getWatcherStats() {
     pollIntervalSec:  POLL_INTERVAL_MS / 1000,
     clusterThreshold: CLUSTER_THRESHOLD,
     clusterWindowMin: CLUSTER_WINDOW_MS / 60_000,
+    isRunning:        _pollTimer != null,
+    telemetry:        { ..._watcherTelemetry },
+    secondsSinceLastTick: _watcherTelemetry.lastTickAt
+      ? Math.round((Date.now() - _watcherTelemetry.lastTickAt) / 1000)
+      : null,
   };
 }
 
@@ -127,6 +150,10 @@ async function refreshWatchedWallets() {
 // ─── Polling Tick ────────────────────────────────────────────────────────────
 
 async function tick() {
+  _watcherTelemetry.lastTickAt = Date.now();
+  _watcherTelemetry.totalTicks += 1;
+  _watcherTelemetry.lastTickSwapsSeen = 0;
+
   await refreshWatchedWallets();
   pruneSeenSignatures();
   pruneClusterMap();
@@ -141,11 +168,16 @@ async function tick() {
   const watchFiltered = _watchedWallets.filter(w => !kolAddrs.has(w.address));
   const allWallets = [...kolList, ...watchFiltered];
 
-  if (!allWallets.length) return;
+  if (!allWallets.length) {
+    console.log('[smart-money] tick — no wallets to poll');
+    return;
+  }
 
+  let totalSwaps = 0;
   for (const w of allWallets) {
     try {
       const swaps = await fetchWalletSwaps(w.address);
+      totalSwaps += swaps.length;
       for (const tx of swaps) {
         if (!tx?.signature || seenSignatures.has(tx.signature)) continue;
         seenSignatures.set(tx.signature, Date.now() + SEEN_TX_TTL_MS);
@@ -164,16 +196,49 @@ async function tick() {
     }
     await sleep(INTER_WALLET_DELAY_MS);
   }
+  _watcherTelemetry.lastTickSwapsSeen = totalSwaps;
+  // Heartbeat log every tick so operator can confirm polling is alive.
+  // Includes Helius response counters so a sudden 429/4xx surge is visible
+  // without scraping the diagnostic endpoint.
+  console.log(`[smart-money] heartbeat — tick ${_watcherTelemetry.totalTicks}, polled ${allWallets.length} wallets, ${totalSwaps} swaps fetched | helius 200=${_watcherTelemetry.helius200} 429=${_watcherTelemetry.helius429} 4xx=${_watcherTelemetry.helius4xx} 5xx=${_watcherTelemetry.helius5xx} err=${_watcherTelemetry.heliusErrors}${_watcherTelemetry.lastHeliusError ? ' lastErr="' + _watcherTelemetry.lastHeliusError.slice(0,80) + '"' : ''}`);
 }
 
 async function fetchWalletSwaps(address) {
   const url = `${HELIUS_API_BASE}/addresses/${address}/transactions?type=SWAP&api-key=${process.env.HELIUS_API_KEY}&limit=${PER_WALLET_TX_LIMIT}`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
-    if (!res.ok) return [];
+    _watcherTelemetry.lastHeliusStatus = res.status;
+    if (res.ok) {
+      _watcherTelemetry.helius200 += 1;
+      _watcherTelemetry.lastHeliusError = null;
+    } else if (res.status === 429) {
+      _watcherTelemetry.helius429 += 1;
+      // Capture body once for diagnosis (rate-limit messages tell us if
+      // it's a credit issue vs an RPS issue).
+      try {
+        const body = await res.text();
+        _watcherTelemetry.lastHeliusError = `HTTP 429: ${body.slice(0, 200)}`;
+      } catch {}
+      return [];
+    } else if (res.status >= 500) {
+      _watcherTelemetry.helius5xx += 1;
+      _watcherTelemetry.lastHeliusError = `HTTP ${res.status}`;
+      return [];
+    } else {
+      _watcherTelemetry.helius4xx += 1;
+      try {
+        const body = await res.text();
+        _watcherTelemetry.lastHeliusError = `HTTP ${res.status}: ${body.slice(0, 200)}`;
+      } catch {
+        _watcherTelemetry.lastHeliusError = `HTTP ${res.status}`;
+      }
+      return [];
+    }
     const data = await res.json();
     return Array.isArray(data) ? data : [];
-  } catch {
+  } catch (err) {
+    _watcherTelemetry.heliusErrors += 1;
+    _watcherTelemetry.lastHeliusError = `${err.name}: ${err.message}`;
     return [];
   }
 }

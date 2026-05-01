@@ -14889,7 +14889,7 @@ app.post('/api/diagnostics/source-vs-outcomes', _sourceOutcomesDiagHandler);
 // firing?". Reports tracked-wallet counts by category, last activity ts,
 // and 24h / 1h activity volume. If "last_activity_minutes_ago" is high
 // or activity_24h is 0, the watcher is dead/silent.
-const _walletWatcherDiagHandler = (req, res) => {
+const _walletWatcherDiagHandler = async (req, res) => {
   setCors(res);
   try {
     const safeOne = (sql, ...params) => {
@@ -14945,10 +14945,21 @@ const _walletWatcherDiagHandler = (req, res) => {
           ? '⚠️ No activity in the last hour. Watcher may be slow or rate-limited (Helius credits?).'
           : `✅ Watcher alive — ${activity1h} buys/1h, ${activity24h} buys/24h, last seen ${minutesAgo}min ago.`;
 
+    // Live watcher telemetry — answers "is the watcher actually polling
+    // right now, and what's Helius returning?" without log scraping.
+    let watcherStats = null;
+    try {
+      const mod = await import('./smart-money-watcher.js');
+      if (typeof mod.getWatcherStats === 'function') {
+        watcherStats = mod.getWatcherStats();
+      }
+    } catch (e) { watcherStats = { _err: e.message }; }
+
     res.json({
       ok: true,
       summary,
       verdict,
+      watcher: watcherStats,
       tracked_wallets: {
         total: trackedTotal,
         by_category: trackedByCategory,
