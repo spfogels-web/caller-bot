@@ -6758,6 +6758,18 @@ if (DASHBOARD_PASSWORD) {
 } else {
   console.log('[auth] ⚠️  Dashboard is OPEN — set DASHBOARD_PASSWORD env var to enable login');
 }
+// One-shot diagnostic — list every DASHBOARD_* env var the runtime actually
+// received from Railway, with name + length only (never the value). Helps
+// catch invisible whitespace in variable names (e.g. "DASHBOARD_USER " vs
+// "DASHBOARD_USER") and confirms which vars Railway is actually exposing.
+{
+  const dashKeys = Object.keys(process.env).filter(k => k.startsWith('DASHBOARD'));
+  console.log(`[auth:debug] DASHBOARD_* env keys exposed at runtime: ${dashKeys.length} found`);
+  for (const k of dashKeys) {
+    const v = process.env[k] || '';
+    console.log(`[auth:debug]   "${k}" (name len ${k.length}) → value len ${v.length}`);
+  }
+}
 app.use(basicAuthMiddleware);
 
 // API Usage tracking endpoint
