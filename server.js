@@ -6695,7 +6695,54 @@ function basicAuthMiddleware(req, res, next) {
   }
 
   res.setHeader('WWW-Authenticate', 'Basic realm="Pulse Caller", charset="UTF-8"');
-  res.status(401).send('Authentication required');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.status(401).send(`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pulse Caller — Locked</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#0a0e1a;color:#e6e6e6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;overflow:hidden}
+  /* Fake-dashboard backdrop. Heavy blur + dim so nothing readable can leak
+     through. Pure CSS — no real data is ever rendered on this page. */
+  .backdrop{position:fixed;inset:0;background:
+    radial-gradient(ellipse at 20% 30%,rgba(0,230,118,0.12),transparent 50%),
+    radial-gradient(ellipse at 80% 70%,rgba(224,64,251,0.10),transparent 50%),
+    radial-gradient(ellipse at 50% 50%,rgba(68,138,255,0.08),transparent 60%),
+    linear-gradient(180deg,#0a0e1a 0%,#0d1224 100%);
+    filter:blur(40px);transform:scale(1.1);pointer-events:none}
+  .backdrop::before{content:'';position:absolute;inset:0;background-image:
+    repeating-linear-gradient(0deg,rgba(255,255,255,0.02) 0,rgba(255,255,255,0.02) 1px,transparent 1px,transparent 80px),
+    repeating-linear-gradient(90deg,rgba(255,255,255,0.02) 0,rgba(255,255,255,0.02) 1px,transparent 1px,transparent 80px);
+    filter:blur(2px)}
+  .lock{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:10}
+  .lock-card{background:rgba(15,20,40,0.85);border:1px solid rgba(0,230,118,0.25);border-radius:14px;padding:36px 44px;backdrop-filter:blur(20px);box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;max-width:420px}
+  .lock-icon{font-size:48px;margin-bottom:14px;filter:drop-shadow(0 0 12px rgba(0,230,118,0.4))}
+  .lock-title{font-size:22px;font-weight:700;letter-spacing:1px;color:#00e676;margin-bottom:6px}
+  .lock-sub{font-size:13px;color:#8899bb;margin-bottom:20px;line-height:1.5}
+  .lock-prompt{font-size:11px;color:#5566aa;font-family:ui-monospace,'Courier New',monospace;padding:10px 14px;border:1px dashed rgba(85,102,170,0.3);border-radius:6px;background:rgba(0,0,0,0.2)}
+</style>
+</head><body>
+<div class="backdrop"></div>
+<div class="lock">
+  <div class="lock-card">
+    <div class="lock-icon">🔒</div>
+    <div class="lock-title">PULSE CALLER</div>
+    <div class="lock-sub">This dashboard is private. Please sign in to continue.</div>
+    <div class="lock-prompt">awaiting authentication…</div>
+  </div>
+</div>
+<script>
+  // If user dismissed the browser prompt, give them a way to re-trigger it.
+  // Hitting any key or clicking will request creds again, which causes the
+  // browser to re-show the native auth prompt for this realm.
+  function retry(){location.reload()}
+  document.addEventListener('click',retry);
+  document.addEventListener('keydown',retry);
+</script>
+</body></html>`);
 }
 
 if (DASHBOARD_PASSWORD) {
