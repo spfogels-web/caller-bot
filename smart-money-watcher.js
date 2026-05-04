@@ -79,6 +79,15 @@ const _watcherTelemetry = {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+// Optional getter the operator can pass in so the watcher respects the
+// master bot toggle. When _botActive is false, the watcher skips its
+// Helius poll entirely (don't burn credits collecting data that can't
+// become calls). If unset, watcher polls regardless of toggle state.
+let _getBotActive = null;
+export function setBotActiveGetter(fn) {
+  _getBotActive = typeof fn === 'function' ? fn : null;
+}
+
 export function startSmartMoneyWatcher(dbInstance, onDetected) {
   if (_pollTimer) { console.warn('[smart-money] already running'); return; }
   if (!process.env.HELIUS_API_KEY) {
@@ -198,6 +207,16 @@ function isInSession(hour, sessions) {
 }
 
 async function tick() {
+  // Master bot toggle gate — when bot is OFF, skip the entire poll. Don't
+  // burn Helius credits gathering data that can't become calls anyway.
+  if (_getBotActive && _getBotActive() === false) {
+    if ((_watcherTelemetry.totalTicks % 12) === 0) {
+      console.log('[smart-money] bot toggle OFF — skipping tick (no Helius calls)');
+    }
+    _watcherTelemetry.totalTicks += 1;
+    return;
+  }
+
   const sessions = parseSessions(process.env.SMART_MONEY_SESSIONS ?? DEFAULT_SESSIONS);
   const utcHour  = new Date().getUTCHours();
   if (!isInSession(utcHour, sessions)) {

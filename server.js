@@ -17697,7 +17697,12 @@ app.listen(PORT, async () => {
   if (String(process.env.SMART_MONEY_POLLING_ENABLED || '').toLowerCase() === '1' ||
       String(process.env.SMART_MONEY_POLLING_ENABLED || '').toLowerCase() === 'true') {
     try {
-      const { startSmartMoneyWatcher } = await import('./smart-money-watcher.js');
+      const { startSmartMoneyWatcher, setBotActiveGetter } = await import('./smart-money-watcher.js');
+      // Wire the master bot toggle so the watcher skips polling entirely
+      // when the bot is OFF — saves Helius credits during paused periods.
+      if (typeof setBotActiveGetter === 'function') {
+        setBotActiveGetter(() => _botActive);
+      }
       startSmartMoneyWatcher(dbInstance, async ({ ca, kind, clusterSize }) => {
         try {
           if (kind === 'exit') {
