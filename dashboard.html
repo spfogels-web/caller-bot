@@ -4767,12 +4767,12 @@ body::before {
         <!-- WALLET CATEGORY CARDS -->
         <div class="wi-cat-grid">
 
-          <!-- 1. WHALES — proven winners -->
+          <!-- 1. WHALES — primary target tier (≥100 SOL) -->
           <div class="wi-cat-card" style="--cat-col:#ffd740;background:rgba(255,215,64,0.04);border-color:rgba(255,215,64,0.25)" onclick="loadWalletRankings('WINNER')">
             <div class="cat-icon-big">🐋</div>
             <div class="wi-cat-name">WHALE INTEL</div>
             <div class="wi-cat-count" id="smCatWinner">0</div>
-            <div class="wi-cat-desc">Proven winners. High win rate, consistent early entries. Follow these.</div>
+            <div class="wi-cat-desc"><b style="color:#ffd740">≥100 SOL holdings</b> — primary harvest target. Buys from these move the market. Follow aggressively.</div>
             <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
               <span style="color:rgba(255,215,64,0.7)">AVG WIN RATE</span>
               <span style="color:#ffd740;font-weight:700" id="smWinnerAvgWR">—</span>
@@ -4780,12 +4780,12 @@ body::before {
             <div class="wi-cat-bar"></div>
           </div>
 
-          <!-- 2. SMART MONEY -->
+          <!-- 2. SMART MONEY (8-99 SOL) -->
           <div class="wi-cat-card" style="--cat-col:#18ffff;background:rgba(24,255,255,0.04);border-color:rgba(24,255,255,0.25)" onclick="loadWalletRankings('SMART_MONEY')">
             <div class="cat-icon-big">🧠</div>
             <div class="wi-cat-name">SMART MONEY</div>
             <div class="wi-cat-count" id="smCatSmart">0</div>
-            <div class="wi-cat-desc">Algorithmic or insider wallets with superior timing and exit strategy.</div>
+            <div class="wi-cat-desc"><b style="color:#18ffff">8–99 SOL holdings</b> — meaningful but not whale-tier. Cluster signals from these still move scores.</div>
             <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
               <span style="color:rgba(24,255,255,0.7)">AVG ROI</span>
               <span style="color:#18ffff;font-weight:700" id="smSmartAvgROI">—</span>
@@ -4793,12 +4793,12 @@ body::before {
             <div class="wi-cat-bar"></div>
           </div>
 
-          <!-- 3. MOMENTUM -->
+          <!-- 3. MOMENTUM (5-7 SOL) -->
           <div class="wi-cat-card" style="--cat-col:#00e676;background:rgba(0,230,118,0.04);border-color:rgba(0,230,118,0.25)" onclick="loadWalletRankings('MOMENTUM')">
             <div class="cat-icon-big">📈</div>
             <div class="wi-cat-name">MOMENTUM</div>
             <div class="wi-cat-count" id="smCatMomentum">0</div>
-            <div class="wi-cat-desc">Trend chasers — enter after proof. Good signal for confirmation plays.</div>
+            <div class="wi-cat-desc"><b style="color:#00e676">5–7 SOL holdings</b> — above the dust floor. Trend confirmation only, not high-conviction.</div>
             <div style="margin-top:8px;display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px">
               <span style="color:rgba(0,230,118,0.7)">SIGNAL STRENGTH</span>
               <span style="color:#00e676;font-weight:700" id="smMomSignal">—</span>

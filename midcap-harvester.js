@@ -1,11 +1,16 @@
 /**
  * ─────────────────────────────────────────────────────────────────────────────
- *  midcap-harvester.js — twice-daily $250K+ MCap winner sweep
+ *  midcap-harvester.js — twice-daily $250K+ MCap whale sweep
  *
  *  The middle tier between wallet-harvester (passive, from our own WINs) and
  *  legendary-harvester (weekly, $30M+ runs only). There are hundreds of
  *  Solana coins doing $250K+ MCap every day — that's where fresh alpha lives
  *  before wallets become obvious. This sweeps them all twice a day.
+ *
+ *  WHALE-FOCUSED (operator policy 2026-05-01):
+ *  Primary mission is finding wallets with ≥100 SOL holdings (WHALE / WINNER
+ *  tier) — those are the wallets whose buys actually move markets. Hard
+ *  floor: 5 SOL. Anything below is filtered out as dust, no signal value.
  *
  *  Flow (runs at boot + every 12h):
  *   1. Dune SQL: Solana tokens with $500K+ cumulative volume in last 24h
@@ -266,12 +271,15 @@ async function runMidcapTick(dbInstance, heliusKey) {
     }
     console.log(`[midcap-harvester] harvesting ${newMints.length} new midcap coins (of ${rows.length} total)...`);
 
-    // Whale-hunt filter: only insert wallets with > 3 SOL. Categorize by tier:
-    //   ≥100 SOL → WINNER · 8-99 → SMART_MONEY · 3-7 → MOMENTUM · <3 skipped.
-    // (Midcap harvester is specifically looking for whales holding the top
-    // slots of these CAs — dust wallets get filtered per user directive.)
+    // Whale-hunt filter (operator policy 2026-05-01):
+    // Primary focus = whales with ≥100 SOL holdings — that's the WINNER tier.
+    // Hard floor 5 SOL, anything below is dust and gets skipped entirely.
+    //   ≥100 SOL  → WINNER     (whale tier — main focus, what we're really hunting)
+    //   8-99 SOL  → SMART_MONEY (still meaningful holdings, secondary tier)
+    //   5-7 SOL   → MOMENTUM   (above floor but small — keep for cluster signal value)
+    //   <5 SOL    → SKIPPED    (dust, no signal value)
     const { filterAndClassifyBySol } = await import('./harvester-cleanup.js');
-    const MIDCAP_MIN_SOL = 3;
+    const MIDCAP_MIN_SOL = 5;
 
     let coinsHarvested = 0;
     for (const coin of newMints) {
@@ -300,7 +308,8 @@ async function runMidcapTick(dbInstance, heliusKey) {
       coinsHarvested++;
       if (coinsHarvested % 20 === 0) {
         const volK = ((coin.vol_24h_usd || 0) / 1000).toFixed(0);
-        console.log(`[midcap-harvester]   [${coinsHarvested}/${newMints.length}] ${ca.slice(0,8)}… ($${volK}K 24h): ${qualified.length}/${owners.length} ≥8 SOL, +${added} new, ${promoted} promoted`);
+        const whaleCount = qualified.filter(q => q.category === 'WINNER').length;
+        console.log(`[midcap-harvester]   [${coinsHarvested}/${newMints.length}] ${ca.slice(0,8)}… ($${volK}K 24h): ${qualified.length}/${owners.length} ≥5 SOL (${whaleCount} whales ≥100 SOL), +${added} new, ${promoted} promoted`);
       }
       await sleep(INTER_COIN_DELAY_MS);
     }
