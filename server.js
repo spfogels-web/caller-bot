@@ -105,8 +105,6 @@ import {
 
 const {
   TELEGRAM_BOT_TOKEN,
-  TELEGRAM_GROUP_CHAT_ID,         // VIP channel — fires on raw signal
-  TELEGRAM_FREE_CHAT_ID,          // Free channel — fires only after 2x delayed
   TELEGRAM_TRENCH_THREAD_ID,      // Forum-topic thread ID for call cards (e.g. "Trench Calls"). When set, all CA beacons + call cards + threaded follow-ups + milestone alerts route here. Banter/persona replies stay on the main thread (General).
   CLAUDE_API_KEY,
   OPENAI_API_KEY,
@@ -116,6 +114,25 @@ const {
   MIN_SCORE_TO_POST = 50,
   SCAN_INTERVAL_MS  = 60 * 1000,  // 60s — was 90s, scan more frequently
 } = process.env;
+
+// Multi-chat fan-out (operator policy 2026-05-01):
+// TELEGRAM_GROUP_CHAT_ID and TELEGRAM_FREE_CHAT_ID accept either a single
+// chat id OR a comma-separated list of chat ids. Every call card, milestone
+// update, and group broadcast fans out to ALL chats in the list. Backward
+// compatible — a single id behaves exactly as before.
+//   TELEGRAM_GROUP_CHAT_ID = "-1001234567890"                    (one VIP chat)
+//   TELEGRAM_GROUP_CHAT_ID = "-1001234567890,-1009876543210"     (two VIP chats)
+function parseChatIds(envValue) {
+  if (!envValue) return [];
+  return String(envValue).split(',').map(s => s.trim()).filter(Boolean);
+}
+const TELEGRAM_GROUP_CHAT_IDS = parseChatIds(process.env.TELEGRAM_GROUP_CHAT_ID);
+const TELEGRAM_FREE_CHAT_IDS  = parseChatIds(process.env.TELEGRAM_FREE_CHAT_ID);
+// Singular references kept for backward compat — point at the FIRST chat id
+// in the list. Used by diagnostic/test endpoints that just need any valid id.
+// The actual broadcasts iterate over the full *_IDS array via the helpers below.
+const TELEGRAM_GROUP_CHAT_ID  = TELEGRAM_GROUP_CHAT_IDS[0] || '';
+const TELEGRAM_FREE_CHAT_ID   = TELEGRAM_FREE_CHAT_IDS[0]  || '';
 // Helper that adds message_thread_id to a Telegram-API body when the env
 // var is set. Supergroups in forum mode require the integer thread ID; absent
 // it Telegram routes to the General topic.
@@ -437,7 +454,8 @@ console.log(`  port          : ${PORT}`);
 console.log(`  mode          : ${activeMode.emoji} ${activeMode.name}`);
 console.log(`  tg token      : ${TELEGRAM_BOT_TOKEN      ? '✓ present' : '✗ MISSING'}`);
 console.log(`  claude key    : ${CLAUDE_API_KEY           ? '✓ present' : '✗ MISSING'}`);
-console.log(`  group id      : ${TELEGRAM_GROUP_CHAT_ID   ? '✓ present' : '— not set'}`);
+console.log(`  group ids     : ${TELEGRAM_GROUP_CHAT_IDS.length ? '✓ ' + TELEGRAM_GROUP_CHAT_IDS.length + ' chat(s) — ' + TELEGRAM_GROUP_CHAT_IDS.map(id => id.length > 12 ? id.slice(0, 12) + '…' : id).join(', ') : '— not set'}`);
+console.log(`  free ids      : ${TELEGRAM_FREE_CHAT_IDS.length  ? '✓ ' + TELEGRAM_FREE_CHAT_IDS.length  + ' chat(s)' : '— not set'}`);
 console.log(`  admin id      : ${ADMIN_TELEGRAM_ID        ? '✓ present' : '— not set'}`);
 console.log(`  birdeye key   : ${process.env.BIRDEYE_API_KEY  ? '✓ present' : '✗ MISSING'}`);
 console.log(`  helius key    : ${process.env.HELIUS_API_KEY   ? '✓ present' : '✗ MISSING'}`);
@@ -2227,8 +2245,11 @@ async function sendTelegramMessage(chatId, text, options = {}) {
 }
 
 async function sendTelegramGroupMessage(text, options = {}) {
-  if (!TELEGRAM_GROUP_CHAT_ID) return;
-  return sendTelegramMessage(TELEGRAM_GROUP_CHAT_ID, text, options);
+  if (!TELEGRAM_GROUP_CHAT_IDS.length) return;
+  // Fan out to every configured group chat. Use Promise.allSettled so one
+  // chat's failure (e.g. bot kicked, chat deleted) doesn't block the others.
+  const sends = TELEGRAM_GROUP_CHAT_IDS.map(chatId => sendTelegramMessage(chatId, text, options));
+  return Promise.allSettled(sends);
 }
 
 async function sendAdminAlert(text) {
@@ -2432,8 +2453,8 @@ async function resolveCoinImage(candidate) {
 // Used when sendCallAlertWithImage exhausts all photo paths. Splits very
 // long captions into chunks so Telegram's 4096-char limit doesn't drop
 // the whole message. Posts to Trench Calls topic when configured.
-async function _emergencyTextFallback(caption) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) {
+async function _emergencyTextFallbackToOneChat(chatId, caption) {
+  if (!TELEGRAM_BOT_TOKEN || !chatId) {
     console.warn('[TG-fallback] ❌ skipped — TG creds missing');
     return;
   }
@@ -2445,7 +2466,7 @@ async function _emergencyTextFallback(caption) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(_withTrenchThread({
-        chat_id: TELEGRAM_GROUP_CHAT_ID,
+        chat_id: chatId,
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
@@ -2453,34 +2474,45 @@ async function _emergencyTextFallback(caption) {
       signal: AbortSignal.timeout(10_000),
     });
     if (r.ok) {
-      console.log('[TG-fallback] ✓ text-only call posted');
+      console.log(`[TG-fallback] ✓ text-only call posted to ${chatId}`);
     } else {
       const body = (await r.text()).slice(0, 300);
-      console.warn(`[TG-fallback] ❌ text fallback also failed: status=${r.status} body=${body}`);
+      console.warn(`[TG-fallback] ❌ text fallback to ${chatId} failed: status=${r.status} body=${body}`);
       // Last resort: try without HTML parse_mode in case formatting is the issue
       try {
         await fetch(`${TELEGRAM_API}/sendMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(_withTrenchThread({
-            chat_id: TELEGRAM_GROUP_CHAT_ID,
+            chat_id: chatId,
             text: text.replace(/<[^>]+>/g, ''),  // strip HTML tags
             disable_web_page_preview: true,
           })),
           signal: AbortSignal.timeout(10_000),
         });
-        console.log('[TG-fallback] ✓ plain-text call posted (no HTML)');
+        console.log(`[TG-fallback] ✓ plain-text call posted (no HTML) to ${chatId}`);
       } catch (err2) {
-        console.error(`[TG-fallback] ❌ FINAL FAILURE — call card never posted: ${err2.message}`);
+        console.error(`[TG-fallback] ❌ FINAL FAILURE — call card never posted to ${chatId}: ${err2.message}`);
       }
     }
   } catch (err) {
-    console.warn(`[TG-fallback] ❌ network err: ${err.message}`);
+    console.warn(`[TG-fallback] ❌ network err for ${chatId}: ${err.message}`);
   }
 }
 
-async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageUrl = null) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_ID) return;
+// Backward-compat wrapper — fans out to every configured group chat.
+async function _emergencyTextFallback(caption) {
+  if (!TELEGRAM_GROUP_CHAT_IDS.length) return;
+  await Promise.allSettled(
+    TELEGRAM_GROUP_CHAT_IDS.map(chatId => _emergencyTextFallbackToOneChat(chatId, caption))
+  );
+}
+
+// Send the call card (photo + caption + threaded full report) to one chat.
+// Extracted from sendCallAlertWithImage so the outer broadcaster can iterate
+// over every chat in TELEGRAM_GROUP_CHAT_IDS and fan out to all of them.
+async function _sendCallAlertToOneChat(chatId, caption, fullDetailText, coinImageUrl) {
+  if (!TELEGRAM_BOT_TOKEN || !chatId) return;
 
   // Prefer the coin's own image (DexScreener info.imageUrl). Fall back to
   // pulse-caller banner if the coin has no metadata image.
@@ -2515,7 +2547,7 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(_withTrenchThread({
-        chat_id:    TELEGRAM_GROUP_CHAT_ID,
+        chat_id:    chatId,
         photo:      photoSrc,
         caption:    safeCaption,
         ...(parseMode ? { parse_mode: parseMode } : {}),
@@ -2535,30 +2567,30 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
           console.log(`[TG] Banner file_id cached for future calls`);
         }
       }
-      console.log(`[TG] ✓ Photo+caption sent`);
+      console.log(`[TG] ✓ Photo+caption sent to ${chatId}`);
     } else {
       // Build a verbose error log so we can see WHY Telegram rejected the
       // photo. Common causes: coin image URL 404, banner URL 404, image too
       // big, MIME wrong, rate limited, thread doesn't exist.
       const errorDesc = photoData?.description || photoData?.error_message || JSON.stringify(photoData).slice(0, 300);
-      console.warn(`[TG] ❌ Photo send failed: status=${photoRes.status} description="${errorDesc}" usingCoinImage=${usingCoinImage} photoSrc=${String(photoSrc).slice(0,80)}`);
+      console.warn(`[TG] ❌ Photo send to ${chatId} failed: status=${photoRes.status} description="${errorDesc}" usingCoinImage=${usingCoinImage} photoSrc=${String(photoSrc).slice(0,80)}`);
 
       // If the coin image URL was rejected by Telegram, retry with pulse banner
       if (usingCoinImage) {
-        console.warn(`[TG] ⤴ Retrying with pulse banner fallback`);
-        await sendCallAlertWithImage(caption, fullDetailText, null);
+        console.warn(`[TG] ⤴ Retrying with pulse banner fallback for ${chatId}`);
+        await _sendCallAlertToOneChat(chatId, caption, fullDetailText, null);
         return;
       }
       // Banner failed too. Force a TEXT-ONLY post via direct fetch so the
       // call doesn't get silently dropped. We've seen sendTelegramGroupMessage
       // fall through quietly when something weird happens upstream.
       if (_bannerFileId) { _bannerFileId = null; console.warn('[TG] banner file_id cleared'); }
-      console.warn(`[TG] ⚠ Photo path completely failed — forcing direct text-only fallback`);
-      await _emergencyTextFallback(safeCaption);
+      console.warn(`[TG] ⚠ Photo path failed for ${chatId} — forcing direct text-only fallback`);
+      await _emergencyTextFallbackToOneChat(chatId, safeCaption);
     }
   } catch (err) {
-    console.warn(`[TG] ❌ Photo exception: ${err.message} stack=${(err.stack||'').slice(0,200)}`);
-    await _emergencyTextFallback(safeCaption);
+    console.warn(`[TG] ❌ Photo exception for ${chatId}: ${err.message} stack=${(err.stack||'').slice(0,200)}`);
+    await _emergencyTextFallbackToOneChat(chatId, safeCaption);
   }
 
   // ── FOLLOW-UP: Full detailed analysis ──────────────────────────────────
@@ -2573,7 +2605,7 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
     }
     try {
       let body = {
-        chat_id: TELEGRAM_GROUP_CHAT_ID,
+        chat_id: chatId,
         text: full,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
@@ -2589,12 +2621,26 @@ async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageU
         signal: AbortSignal.timeout(15_000),
       });
       if (!r.ok) {
-        console.warn(`[TG] Full-report send failed: ${r.status} ${(await r.text()).slice(0,200)}`);
+        console.warn(`[TG] Full-report send to ${chatId} failed: ${r.status} ${(await r.text()).slice(0,200)}`);
       } else {
-        console.log(`[TG] ✓ Full detailed report sent (${full.length} chars)`);
+        console.log(`[TG] ✓ Full detailed report sent to ${chatId} (${full.length} chars)`);
       }
     } catch (err) {
-      console.warn(`[TG] Full-report error: ${err.message}`);
+      console.warn(`[TG] Full-report error for ${chatId}: ${err.message}`);
+    }
+  }
+}
+
+// Outer broadcaster — fans out the call card to every configured group chat.
+// Sequential (not Promise.all) so the first send caches the banner file_id
+// for subsequent sends in the loop. One chat's failure doesn't block others.
+async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageUrl = null) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_IDS.length) return;
+  for (const chatId of TELEGRAM_GROUP_CHAT_IDS) {
+    try {
+      await _sendCallAlertToOneChat(chatId, caption, fullDetailText, coinImageUrl);
+    } catch (err) {
+      console.warn(`[TG] Call card fan-out to ${chatId} failed: ${err.message}`);
     }
   }
 }
@@ -17463,9 +17509,9 @@ app.listen(PORT, async () => {
     const safeCaption = msg.length > 1020 ? msg.slice(0, 1017) + '…' : msg;
     const photoSrc    = _bannerFileId || BANNER_IMAGE_URL;
 
-    async function sendMilestonePhoto(threadId) {
+    async function sendMilestonePhoto(targetChatId, threadId) {
       const body = {
-        chat_id:    TELEGRAM_GROUP_CHAT_ID,
+        chat_id:    targetChatId,
         photo:      photoSrc,
         caption:    safeCaption,
         parse_mode: 'HTML',
@@ -17486,12 +17532,12 @@ app.listen(PORT, async () => {
           }
           return true;
         }
-        console.warn(`[milestone-tg] photo failed status=${r.status} desc="${j.description ?? ''}" — falling back to text`);
+        console.warn(`[milestone-tg] photo to ${targetChatId} failed status=${r.status} desc="${j.description ?? ''}" — falling back to text`);
       } catch (err) {
-        console.warn(`[milestone-tg] photo err: ${err.message}`);
+        console.warn(`[milestone-tg] photo err for ${targetChatId}: ${err.message}`);
       }
       // Photo failed — text fallback so milestone still fires
-      const textBody = { chat_id: TELEGRAM_GROUP_CHAT_ID, text: msg, parse_mode: 'HTML', disable_web_page_preview: true };
+      const textBody = { chat_id: targetChatId, text: msg, parse_mode: 'HTML', disable_web_page_preview: true };
       if (threadId) textBody.message_thread_id = threadId;
       try {
         await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -17505,14 +17551,18 @@ app.listen(PORT, async () => {
     }
 
     const sends = [];
-    if (TELEGRAM_GROUP_CHAT_ID) {
-      if (_trenchThreadId) sends.push(sendMilestonePhoto(_trenchThreadId));
-      sends.push(sendMilestonePhoto(null));
+    // Fan out milestone photo to every configured group chat. Trench-thread
+    // routing only applies to the FIRST chat (the primary VIP) since other
+    // groups likely don't have the same forum-topic structure.
+    for (const groupChatId of TELEGRAM_GROUP_CHAT_IDS) {
+      const isPrimary = groupChatId === TELEGRAM_GROUP_CHAT_ID;
+      if (isPrimary && _trenchThreadId) sends.push(sendMilestonePhoto(groupChatId, _trenchThreadId));
+      sends.push(sendMilestonePhoto(groupChatId, null));
     }
 
     // Free tier: first 2x unlocks the call (post the original + milestone).
     // Subsequent milestones (5/10/25x) also fire to free.
-    if (TELEGRAM_FREE_CHAT_ID && meta.milestone >= 2) {
+    if (TELEGRAM_FREE_CHAT_IDS.length && meta.milestone >= 2) {
       try {
         // On the first unlock (2x), fire the full entry card to free channel
         if (meta.milestone === 2 && meta.ca) {
@@ -17538,11 +17588,15 @@ app.listen(PORT, async () => {
               `Setup: ${callRow.setup_type_at_call ?? '?'} · Structure: ${callRow.structure_grade_at_call ?? '?'}\n\n` +
               (verdictSnip ? `<i>"${verdictSnip}${callRow.claude_verdict?.length > 220 ? '…' : ''}"</i>\n\n` : '') +
               `<i>This was called on our VIP feed at entry. Now live on free — already 2× up.</i>`;
-            sends.push(sendTelegramMessage(TELEGRAM_FREE_CHAT_ID, freeCard));
+            for (const freeChatId of TELEGRAM_FREE_CHAT_IDS) {
+              sends.push(sendTelegramMessage(freeChatId, freeCard));
+            }
           }
         }
-        // Every milestone also fires the follow-up message to free
-        sends.push(sendTelegramMessage(TELEGRAM_FREE_CHAT_ID, msg));
+        // Every milestone also fires the follow-up message to all free chats
+        for (const freeChatId of TELEGRAM_FREE_CHAT_IDS) {
+          sends.push(sendTelegramMessage(freeChatId, msg));
+        }
       } catch (err) {
         console.warn('[free-tier] milestone dispatch failed:', err.message);
       }
