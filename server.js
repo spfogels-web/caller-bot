@@ -18013,42 +18013,72 @@ app.listen(PORT, async () => {
       sends.push(sendMilestonePhoto(groupChatId, null));
     }
 
-    // Free tier: first 2x unlocks the call (post the original + milestone).
-    // Subsequent milestones (5/10/25x) also fire to free.
-    if (TELEGRAM_FREE_CHAT_IDS.length && meta.milestone >= 2) {
+    // ── FREE TIER: milestone cards with entry context + VIP CTA ───────────
+    // Every milestone fires a self-contained card to the free channel:
+    //   • The milestone (2×, 5×, 10×, etc.) — celebratory header
+    //   • Token + CA + entry MC (proof the bot called it BEFORE the move)
+    //   • Time elapsed since entry (drives the "you missed early entry" feeling)
+    //   • A short verdict snippet (intelligence preview)
+    //   • Clear VIP CTA — get live calls at entry, not after confirmation
+    // Replaces the previous 2×-only entry card + bare milestone-update spam.
+    // Each milestone is a fresh marketing moment, not noise.
+    if (TELEGRAM_FREE_CHAT_IDS.length && meta.milestone >= 2 && meta.ca) {
       try {
-        // On the first unlock (2x), fire the full entry card to free channel
-        if (meta.milestone === 2 && meta.ca) {
-          const callRow = dbInstance.prepare(`
-            SELECT c.token, c.contract_address, c.market_cap_at_call, c.called_at,
-                   c.claude_verdict, c.claude_risk, c.setup_type_at_call,
-                   c.structure_grade_at_call, c.score_at_call,
-                   ca.sltp
-            FROM calls c
-            LEFT JOIN candidates ca ON ca.id = c.candidate_id
-            WHERE c.contract_address = ? ORDER BY c.id DESC LIMIT 1
-          `).get(meta.ca);
-          if (callRow) {
-            const entryMc = callRow.market_cap_at_call ?? 0;
-            const verdictSnip = (callRow.claude_verdict || '').slice(0, 220);
-            const freeCard =
-              `🎯 <b>PULSE CALLER — FREE PICK (${meta.milestone}× confirmed)</b>\n` +
-              `━━━━━━━━━━━━━━━━━━━━━\n` +
-              `<b>$${(callRow.token || '?').toUpperCase()}</b>\n` +
-              `<code>${callRow.contract_address}</code>\n\n` +
-              `Entry MC: <b>$${Math.round(entryMc/1000)}K</b>\n` +
-              `Score: ${callRow.score_at_call ?? '?'}/100 · Risk: ${callRow.claude_risk ?? '?'}\n` +
-              `Setup: ${callRow.setup_type_at_call ?? '?'} · Structure: ${callRow.structure_grade_at_call ?? '?'}\n\n` +
-              (verdictSnip ? `<i>"${verdictSnip}${callRow.claude_verdict?.length > 220 ? '…' : ''}"</i>\n\n` : '') +
-              `<i>This was called on our VIP feed at entry. Now live on free — already 2× up.</i>`;
-            for (const freeChatId of TELEGRAM_FREE_CHAT_IDS) {
-              sends.push(sendTelegramMessage(freeChatId, freeCard));
-            }
+        const callRow = dbInstance.prepare(`
+          SELECT c.token, c.contract_address, c.market_cap_at_call, c.called_at,
+                 c.claude_verdict, c.claude_risk, c.setup_type_at_call,
+                 c.structure_grade_at_call, c.score_at_call
+          FROM calls c
+          LEFT JOIN candidates ca ON ca.id = c.candidate_id
+          WHERE c.contract_address = ? ORDER BY c.id DESC LIMIT 1
+        `).get(meta.ca);
+
+        if (callRow) {
+          const entryMc = callRow.market_cap_at_call ?? 0;
+          const calledAt = callRow.called_at ? new Date(callRow.called_at) : null;
+          const minsAgo = calledAt ? Math.round((Date.now() - calledAt.getTime()) / 60_000) : null;
+          const timeAgo = minsAgo == null ? '?'
+            : minsAgo < 60     ? `${minsAgo}m ago`
+            : minsAgo < 1440   ? `${(minsAgo / 60).toFixed(1)}h ago`
+            :                    `${(minsAgo / 1440).toFixed(1)}d ago`;
+          const verdictSnip = (callRow.claude_verdict || '').slice(0, 180);
+          const mEmoji = meta.milestone >= 100 ? '🚀🚀🚀'
+                      : meta.milestone >= 25  ? '🚀🚀'
+                      : meta.milestone >= 10  ? '🚀'
+                      : meta.milestone >= 5   ? '💎'
+                      :                          '✅';
+
+          const freeCard =
+            `${mEmoji} <b>PULSE CALL HIT ${meta.milestone}×</b>\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `<b>$${(callRow.token || '?').toUpperCase()}</b>\n` +
+            `<code>${callRow.contract_address}</code>\n\n` +
+            `<b>📍 Entry MC:</b>  $${Math.round(entryMc/1000)}K\n` +
+            `<b>⏱ Called:</b>   ${timeAgo}\n` +
+            `<b>📊 Score:</b>    ${callRow.score_at_call ?? '?'}/100 · Risk: ${callRow.claude_risk ?? '?'}\n` +
+            (callRow.setup_type_at_call ? `<b>🎯 Setup:</b>    ${callRow.setup_type_at_call}\n` : '') +
+            `\n` +
+            (verdictSnip ? `<i>"${verdictSnip}${callRow.claude_verdict?.length > 180 ? '…' : ''}"</i>\n\n` : '') +
+            `━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `⚡ <b>This call hit VIP at entry.</b>\n` +
+            `Free tier sees it only after ${meta.milestone}× confirmation.\n\n` +
+            `Want better entries on every call?\n` +
+            `Tap below to get live alerts — $89/30 days.`;
+
+          const ctaKeyboard = {
+            inline_keyboard: [[
+              { text: '💎 Get Live Calls — Subscribe', callback_data: 'sub:start' },
+            ]],
+          };
+
+          for (const freeChatId of TELEGRAM_FREE_CHAT_IDS) {
+            sends.push(sendTelegramMessage(freeChatId, freeCard, { reply_markup: ctaKeyboard }));
           }
-        }
-        // Every milestone also fires the follow-up message to all free chats
-        for (const freeChatId of TELEGRAM_FREE_CHAT_IDS) {
-          sends.push(sendTelegramMessage(freeChatId, msg));
+        } else {
+          // Fallback if call row not found (shouldn't happen) — basic milestone msg
+          for (const freeChatId of TELEGRAM_FREE_CHAT_IDS) {
+            sends.push(sendTelegramMessage(freeChatId, msg));
+          }
         }
       } catch (err) {
         console.warn('[free-tier] milestone dispatch failed:', err.message);
