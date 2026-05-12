@@ -2765,39 +2765,37 @@ function buildStartMessage() {
 
 function buildHelpMessage() {
   return (
-    `<b>🐺 ALPHA LENNIX — AI OPERATING SYSTEM</b>\n\n` +
-    `<b>📊 ANALYSIS COMMANDS</b>\n` +
-    `<code>/analyze [CA]</code> — Full AI analysis on any token\n` +
-    `<code>/scan [CA]</code> — Quick onchain scan\n` +
-    `<code>/why [CA]</code> — Why was this called/skipped?\n\n` +
-    `<b>📈 BOT INTEL</b>\n` +
-    `<code>/top</code> — Best recent calls\n` +
-    `<code>/lb [24h|7d|30d|all]</code> — Group leaderboard (everyone, incl. Pulse)\n` +
+    `<b>🐺 PULSE CALLER — Help Menu</b>\n\n` +
+    `Tap /menu for the button interface.\n\n` +
+    `<b>🆓 FREE TIER</b> — works for everyone\n` +
+    `<code>/lb [24h|7d|30d|all]</code> — Group leaderboard\n` +
     `<code>/pulselb [24h|7d|30d|all]</code> — Pulse's own top calls\n` +
-    `<code>/regime</code> — Current market regime\n` +
-    `<code>/stats</code> — Bot performance stats\n` +
-    `<code>/calls</code> — Last 5 group calls\n` +
-    `<code>/watchlist</code> — Current watchlist\n\n` +
-    `<b>👤 YOUR PERSONAL TOOLS</b>\n` +
-    `<code>/portfolio add [CA]</code> — Add coin to your watchlist\n` +
     `<code>/portfolio</code> — View your portfolio with live P&amp;L\n` +
+    `<code>/portfolio add [CA]</code> — Add coin\n` +
     `<code>/portfolio remove [CA]</code> — Drop a coin\n` +
     `<code>/portfolio clear</code> — Clear all\n` +
     `<code>/alert [CA] [target]</code> — DM alert when target hit\n` +
-    `   <i>Examples: <code>/alert &lt;CA&gt; 100k</code> or <code>/alert &lt;CA&gt; 5x</code></i>\n` +
     `<code>/alerts</code> — Your active alerts\n` +
     `<code>/alert remove [id]</code> — Cancel an alert\n` +
-    `<code>/profile [@user]</code> — Win history (no arg = your own)\n` +
-    `<code>/myprofile</code> — Shortcut to your profile\n` +
+    `<code>/profile [@user]</code> — Win history\n` +
+    `<code>/myprofile</code> — Shortcut to your profile\n\n` +
+    `<b>💎 VIP TIER</b> — requires /subscribe ($89 / 30 days)\n` +
+    `<code>/analyze [CA]</code> — Full AI analysis on any token\n` +
+    `<code>/scan [CA]</code> — Quick onchain scan\n` +
+    `<code>/why [CA]</code> — Why was this called/skipped?\n` +
+    `<code>/top</code> — Best recent calls\n` +
+    `<code>/calls</code> — Last 5 group calls\n` +
+    `<code>/watchlist</code> — Current watchlist\n` +
+    `<code>/regime</code> — Current market regime\n` +
+    `<code>/stats</code> — Bot performance stats\n` +
     `<code>/track [wallet]</code> — Add a Solana wallet to Pulse's DB\n` +
     `<code>/mywallets</code> — Wallets you've tracked\n` +
-    `<code>/untrack [wallet]</code> — Remove a tracked wallet\n\n` +
-    `<b>💎 VIP MEMBERSHIP</b>\n` +
+    `<code>/untrack [wallet]</code> — Remove a tracked wallet\n` +
+    `⚡ <b>VIP also gets the calls AT ENTRY, not 2× delayed.</b>\n\n` +
+    `<b>💳 MEMBERSHIP</b>\n` +
     `<code>/subscribe</code> — Get VIP access (Solana Pay)\n` +
-    `<code>/vip</code> or <code>/status</code> — Check your subscription status\n\n` +
-    `<b>⚙️ ADMIN</b>\n` +
-    `<code>/config [key] [value]</code> — Live tuning\n\n` +
-    `<i>AI OS active. Hunting $8K-$25K sweet-spot gems with 75% target win rate.</i>`
+    `<code>/vip</code> or <code>/status</code> — Check your subscription\n\n` +
+    `<i>Hunting $8K-$25K sweet-spot gems with 75% target win rate.</i>`
   );
 }
 
@@ -2857,6 +2855,46 @@ async function handleWhyCommand(chatId, input) {
   } catch (err) {
     console.error('[why]', err.message);
     await sendTelegramMessage(chatId, `❌ Error: ${escapeHtml(err.message.slice(0,200))}`);
+  }
+}
+
+// ── VIP tier gating ─────────────────────────────────────────────────────────
+// Premium commands check this before running. ACTIVE subscription = full
+// access; PENDING / EXPIRED / no row = free tier with upgrade prompt.
+// Admin (ADMIN_TELEGRAM_ID) always counts as VIP — operator never gets gated
+// out of their own bot.
+function isUserVip(telegramId) {
+  if (!telegramId) return false;
+  if (String(telegramId) === String(ADMIN_TELEGRAM_ID)) return true;
+  try {
+    const row = dbInstance.prepare(`
+      SELECT 1 FROM subscriptions
+      WHERE telegram_id = ?
+        AND status = 'ACTIVE'
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
+      LIMIT 1
+    `).get(String(telegramId));
+    return !!row;
+  } catch { return false; }
+}
+
+async function sendUpgradePrompt(chatId, featureName) {
+  try {
+    const { buildSubscribeCtaKeyboard } = await import('./subscription-engine.js');
+    await sendTelegramMessage(chatId,
+      `💎 <b>Premium Feature</b>\n\n` +
+      `<b>${featureName}</b> is a VIP-only tool.\n\n` +
+      `Subscribe to unlock:\n` +
+      `• 🧪 Deep AI analysis on any token\n` +
+      `• 🔍 "Why was this called?" reasoning\n` +
+      `• 🏆 Best recent calls feed\n` +
+      `• 📊 Live bot stats + market regime\n` +
+      `• 👁 Active watchlist + wallet tracking\n` +
+      `• ⚡ Calls at entry (not 2× delayed)\n\n` +
+      `<b>$89 for 30 days. Pay in SOL.</b>`,
+      { reply_markup: buildSubscribeCtaKeyboard() });
+  } catch (err) {
+    await sendTelegramMessage(chatId, `💎 Premium feature — run /subscribe to unlock.`);
   }
 }
 
@@ -14243,8 +14281,10 @@ app.post('/webhook', async (req, res) => {
           } else if (action === 'vip') {
             await handleVipStatusCommand(chatId, tgUserId);
           } else if (action === 'top') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🏆 Top Recent Calls'); return; }
             await handleTopCommand(chatId);
           } else if (action === 'calls') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '📞 Recent Group Calls'); return; }
             await handleCallsCommand(chatId);
           } else if (action === 'profile') {
             await handleProfileCommand(chatId, '', tgUserId, tgUsername || cbq.from?.first_name);
@@ -14277,20 +14317,24 @@ app.post('/webhook', async (req, res) => {
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'watchlist') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '👁 Active Watchlist'); return; }
             await handleWatchlistCommand(chatId);
           } else if (action === 'why_prompt') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔍 Why Was This Called?'); return; }
             await replyNew(
               `🔍 <b>Why was a coin called or skipped?</b>\n\nReply with: <code>/why &lt;CA or $TICKER&gt;</code>\n\n` +
               `Example: <code>/why $SCAM</code>`,
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'analyze_prompt') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis'); return; }
             await replyNew(
               `🧪 <b>Deep AI analysis</b>\n\nReply with: <code>/analyze &lt;CA or $TICKER&gt;</code>\n\n` +
               `Runs 4 sub-scorers + wallet intel — takes ~20 seconds.`,
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'stats') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '📊 Bot Performance Stats'); return; }
             await handleStatsCommand(chatId);
           } else if (action === 'help') {
             await replyNew(buildHelpMessage(), buildBackToMenuKeyboard());
@@ -14548,23 +14592,24 @@ app.post('/webhook', async (req, res) => {
       case '/start':     await handleStartCommand(chatId);              break;
       case '/menu':      await handleMenuCommand(chatId);               break;
       case '/help':      await handleHelpCommand(chatId);               break;
-      case '/analyze':   await handleAnalyzeCommand(chatId, args);      break;
-      case '/scan':      await handleScanCommand(chatId, args);         break;
-      case '/stats':     await handleStatsCommand(chatId);              break;
-      case '/calls':     await handleCallsCommand(chatId);              break;
-      case '/watchlist': await handleWatchlistCommand(chatId);          break;
-      case '/regime':    await handleRegimeCommand(chatId);             break;
-      // ── AI Operating System commands ──
-      case '/why':       await handleWhyCommand(chatId, args);          break;
-      case '/top':       await handleTopCommand(chatId);                break;
+      // ── PREMIUM (VIP-only) ──
+      case '/analyze':   isUserVip(fromId) ? await handleAnalyzeCommand(chatId, args)   : await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis'); break;
+      case '/scan':      isUserVip(fromId) ? await handleScanCommand(chatId, args)      : await sendUpgradePrompt(chatId, '🔬 Quick Onchain Scan'); break;
+      case '/stats':     isUserVip(fromId) ? await handleStatsCommand(chatId)            : await sendUpgradePrompt(chatId, '📊 Bot Performance Stats'); break;
+      case '/calls':     isUserVip(fromId) ? await handleCallsCommand(chatId)            : await sendUpgradePrompt(chatId, '📞 Recent Group Calls'); break;
+      case '/watchlist': isUserVip(fromId) ? await handleWatchlistCommand(chatId)        : await sendUpgradePrompt(chatId, '👁 Active Watchlist'); break;
+      case '/regime':    isUserVip(fromId) ? await handleRegimeCommand(chatId)           : await sendUpgradePrompt(chatId, '🌐 Market Regime'); break;
+      case '/why':       isUserVip(fromId) ? await handleWhyCommand(chatId, args)        : await sendUpgradePrompt(chatId, '🔍 Why Was This Called?'); break;
+      case '/top':       isUserVip(fromId) ? await handleTopCommand(chatId)              : await sendUpgradePrompt(chatId, '🏆 Top Recent Calls'); break;
+      case '/track':     isUserVip(fromId) ? await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 Track a Wallet'); break;
+      case '/untrack':   isUserVip(fromId) ? await handleUntrackWalletCommand(chatId, args, fromId)                                                    : await sendUpgradePrompt(chatId, '🐋 Untrack a Wallet'); break;
+      case '/mywallets': isUserVip(fromId) ? await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 My Tracked Wallets'); break;
+      // ── ADMIN ──
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
-      // ── User-facing personal features ──
+      // ── FREE TIER ──
       case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/profile':     await handleProfileCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/myprofile':   await handleProfileCommand(chatId, '', fromId, message.from?.username || message.from?.first_name); break;
-      case '/track':       await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
-      case '/untrack':     await handleUntrackWalletCommand(chatId, args, fromId); break;
-      case '/mywallets':   await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
       case '/alert':       await handleAlertCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/alerts':      await handleAlertCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name); break;
       // Primary group leaderboard — /lb (alias /grouplb kept for back-compat)

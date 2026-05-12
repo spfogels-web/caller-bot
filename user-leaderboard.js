@@ -215,6 +215,8 @@ export function getRichGroupStats(db, timeframe = '1d') {
 export function getGroupLeaderboard(db, timeframe = '7d') {
   const cutoff = TIMEFRAME_MAP[timeframe] || TIMEFRAME_MAP['7d'];
   try {
+    // Exclude Pulse Caller from the group leaderboard — it has its own
+    // dedicated /pulselb command. The group LB is for human users only.
     const rows = db.prepare(`
       SELECT
         user_id,
@@ -227,6 +229,7 @@ export function getGroupLeaderboard(db, timeframe = '7d') {
         ROUND(MAX(peak_multiple), 2) AS best_multiple
       FROM user_calls
       WHERE called_at > datetime('now', ?)
+        AND user_id != ?
       GROUP BY user_id
       HAVING total_calls >= 1
       ORDER BY
@@ -235,7 +238,7 @@ export function getGroupLeaderboard(db, timeframe = '7d') {
         wins DESC,
         total_calls DESC
       LIMIT 20
-    `).all(cutoff);
+    `).all(cutoff, PULSE_USER_ID);
 
     // Compute hit rate (wins / resolved) per row
     return rows.map(r => {
@@ -264,7 +267,8 @@ export function getGroupStats(db, timeframe = '7d') {
         ROUND(MAX(peak_multiple), 2) AS best_multiple
       FROM user_calls
       WHERE called_at > datetime('now', ?)
-    `).get(cutoff);
+        AND user_id != ?
+    `).get(cutoff, PULSE_USER_ID);
   } catch (err) {
     console.warn('[user-lb] group stats:', err.message);
     return { users: 0, calls: 0, wins: 0, losses: 0 };
