@@ -2792,9 +2792,12 @@ function buildHelpMessage() {
     `<code>/track [wallet]</code> — Add a Solana wallet to Pulse's DB\n` +
     `<code>/mywallets</code> — Wallets you've tracked\n` +
     `<code>/untrack [wallet]</code> — Remove a tracked wallet\n\n` +
+    `<b>💎 VIP MEMBERSHIP</b>\n` +
+    `<code>/subscribe</code> — Get VIP access (Solana Pay)\n` +
+    `<code>/vip</code> or <code>/status</code> — Check your subscription status\n\n` +
     `<b>⚙️ ADMIN</b>\n` +
     `<code>/config [key] [value]</code> — Live tuning\n\n` +
-    `<i>AI OS active. Hunting $15K-$120K micro-caps with 53% win rate.</i>`
+    `<i>AI OS active. Hunting $8K-$25K sweet-spot gems with 75% target win rate.</i>`
   );
 }
 
@@ -2854,6 +2857,54 @@ async function handleWhyCommand(chatId, input) {
   } catch (err) {
     console.error('[why]', err.message);
     await sendTelegramMessage(chatId, `❌ Error: ${escapeHtml(err.message.slice(0,200))}`);
+  }
+}
+
+// ── VIP Subscription commands (Solana Pay) ──────────────────────────────────
+async function handleSubscribeCommand(chatId, telegramId, username) {
+  try {
+    const { handleSubscribeRequest } = await import('./subscription-engine.js');
+    const result = await handleSubscribeRequest({ telegramId, username, chatId });
+    if (!result?.message) {
+      await sendTelegramMessage(chatId, '⚠️ Could not process subscribe request.');
+      return;
+    }
+    await sendTelegramMessage(chatId, result.message);
+  } catch (err) {
+    console.warn('[subscribe] err:', err.message);
+    await sendTelegramMessage(chatId, `⚠️ Subscription error: ${escapeHtml(err.message)}`);
+  }
+}
+
+async function handleVipStatusCommand(chatId, telegramId) {
+  try {
+    const row = dbInstance.prepare(`
+      SELECT status, amount_usd, paid_at, expires_at
+      FROM subscriptions
+      WHERE telegram_id = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(String(telegramId));
+    if (!row) {
+      await sendTelegramMessage(chatId,
+        `You don't have a subscription yet.\n\nRun /subscribe to start.`);
+      return;
+    }
+    if (row.status === 'ACTIVE') {
+      const daysLeft = Math.max(0, Math.ceil((new Date(row.expires_at).getTime() - Date.now()) / 86_400_000));
+      await sendTelegramMessage(chatId,
+        `✅ <b>VIP ACTIVE</b>\n\n` +
+        `Expires: <b>${row.expires_at.split('T')[0]}</b> (${daysLeft} days left)\n` +
+        `Last payment: $${row.amount_usd} on ${row.paid_at?.split('T')[0] ?? '?'}\n\n` +
+        `Renew with /subscribe.`);
+    } else if (row.status === 'PENDING') {
+      await sendTelegramMessage(chatId,
+        `⏳ <b>Payment pending.</b>\n\nRun /subscribe to see your payment instructions again.`);
+    } else {
+      await sendTelegramMessage(chatId,
+        `❌ <b>VIP ${row.status}</b>\n\nLast subscription expired on ${row.expires_at?.split('T')[0] ?? '?'}.\n\nRun /subscribe to renew.`);
+    }
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Error: ${escapeHtml(err.message.slice(0,200))}`);
   }
 }
 
@@ -14206,6 +14257,11 @@ app.post('/webhook', async (req, res) => {
       // Pulse's own call leaderboard — /pulselb (alias /leaderboard kept)
       case '/pulselb':     await handleLeaderboardCommand(chatId, args); break;
       case '/leaderboard': await handleLeaderboardCommand(chatId, args); break;
+      // ── VIP subscription (Solana Pay) ──
+      case '/subscribe':   await handleSubscribeCommand(chatId, fromId, message.from?.username); break;
+      case '/upgrade':     await handleSubscribeCommand(chatId, fromId, message.from?.username); break;
+      case '/vip':         await handleVipStatusCommand(chatId, fromId); break;
+      case '/status':      await handleVipStatusCommand(chatId, fromId); break;
       default:
         if (!message.text || message.text.startsWith('/')) break;
         const lower = message.text.trim().toLowerCase();
@@ -17675,6 +17731,21 @@ app.listen(PORT, async () => {
     startEarlyBuyerHarvester(dbInstance, HELIUS_API_KEY);
   } catch (err) {
     console.warn('[early-buyer-harvester] failed to start:', err.message);
+  }
+
+  // ── VIP Subscription engine (Solana Pay) ──────────────────────────────
+  // Listens for incoming SOL on the recipient wallet, matches the memo to
+  // a pending /subscribe row, activates the subscription, generates a
+  // one-time Telegram invite link, DMs the user. Runs an hourly cron for
+  // expiry reminders + auto-kick.
+  try {
+    const { initSubscriptionEngine } = await import('./subscription-engine.js');
+    initSubscriptionEngine({
+      db:                dbInstance,
+      telegramBotToken:  TELEGRAM_BOT_TOKEN,
+    });
+  } catch (err) {
+    console.warn('[subscriptions] failed to start:', err.message);
   }
 
   // ── One-time cleanup of harvester wallets inserted WITHOUT SOL check ──

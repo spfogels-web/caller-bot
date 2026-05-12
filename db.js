@@ -858,6 +858,39 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_fp_outcome  ON coin_fingerprints(outcome)`,
     `CREATE INDEX IF NOT EXISTS idx_fp_decision ON coin_fingerprints(decision, taken_at_ms DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_fp_pending  ON coin_fingerprints(outcome) WHERE outcome IS NULL`,
+
+    // ── VIP subscriptions (Solana Pay) ───────────────────────────────────
+    // Tracks every /subscribe request and its lifecycle. The payment-watcher
+    // matches incoming SOL transactions to PENDING rows by their unique
+    // payment_ref (Solana Pay memo). On match → status flips to ACTIVE, a
+    // one-time Telegram invite link is generated, user is DMed the link,
+    // and expires_at is set. The expiry tracker kicks lapsed users out.
+    `CREATE TABLE IF NOT EXISTS subscriptions (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id     TEXT    NOT NULL,
+      username        TEXT,
+      chat_id         TEXT,                              -- where /subscribe was invoked (for reply DM)
+      payment_ref     TEXT    UNIQUE NOT NULL,           -- short unique memo to match payment to user
+      amount_usd      REAL    NOT NULL,
+      amount_sol      REAL    NOT NULL,                  -- SOL quoted at request time
+      sol_price_usd   REAL    NOT NULL,                  -- price snapshot
+      status          TEXT    NOT NULL DEFAULT 'PENDING',  -- PENDING | ACTIVE | EXPIRED | EXPIRED_REMOVED | CANCELLED
+      paid_tx_sig     TEXT,                              -- signature when payment lands
+      paid_at         TEXT,
+      expires_at      TEXT,                              -- 30 days after paid_at
+      invite_link     TEXT,                              -- one-time TG invite DMed to user
+      invite_sent_at  TEXT,
+      reminder_3d_at  TEXT,                              -- when 3-day reminder was sent
+      reminder_1d_at  TEXT,                              -- when 1-day reminder was sent
+      removed_at      TEXT,                              -- when user was kicked from VIP channel
+      notes           TEXT,
+      created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_sub_telegram_id ON subscriptions(telegram_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_sub_status      ON subscriptions(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_sub_expires_at  ON subscriptions(expires_at) WHERE status='ACTIVE'`,
+    `CREATE INDEX IF NOT EXISTS idx_sub_payment_ref ON subscriptions(payment_ref)`,
+    `CREATE INDEX IF NOT EXISTS idx_sub_pending     ON subscriptions(status, created_at DESC) WHERE status='PENDING'`,
   ];
 
   let added = 0;
