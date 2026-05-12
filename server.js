@@ -3436,8 +3436,20 @@ function buildRegimeMessage() {
 
 // ─── Command Handlers ─────────────────────────────────────────────────────────
 
-async function handleStartCommand(chatId)     { await sendTelegramMessage(chatId, buildStartMessage()); }
-async function handleHelpCommand(chatId)      { await sendTelegramMessage(chatId, buildHelpMessage()); }
+async function handleStartCommand(chatId)     {
+  await sendTelegramMessage(chatId,
+    `👋 <b>Welcome to Pulse Caller</b>\n\n` +
+    `Elite Solana micro-cap gem hunter. Tap any button below to get started — no need to remember command syntax.`,
+    { reply_markup: buildMainMenuKeyboard() }
+  );
+}
+async function handleHelpCommand(chatId)      { await sendTelegramMessage(chatId, buildHelpMessage(), { reply_markup: buildMainMenuKeyboard() }); }
+async function handleMenuCommand(chatId)      {
+  await sendTelegramMessage(chatId,
+    `📱 <b>Pulse Caller Menu</b>\n\nTap any option below:`,
+    { reply_markup: buildMainMenuKeyboard() }
+  );
+}
 async function handleStatsCommand(chatId)     { await sendTelegramMessage(chatId, buildStatsMessage()); }
 async function handleCallsCommand(chatId)     { await sendTelegramMessage(chatId, buildRecentCallsMessage()); }
 async function handleWatchlistCommand(chatId) { await sendTelegramMessage(chatId, buildWatchlistMessage()); }
@@ -3747,6 +3759,105 @@ async function handleAlertCommand(chatId, args, fromUserId, username) {
 
 // ─── /leaderboard — top calls (Hall of Fame) ─────────────────────────────────
 // Build inline-keyboard buttons for timeframe selection.
+// ─── Inline Menu Keyboards ────────────────────────────────────────────────
+// One-tap navigation so users never have to remember command syntax.
+// Each button either runs the action inline (menu:run-X) or opens a
+// submenu (menu:open-X). Pattern: callback_data = "menu:<action>[:<arg>]".
+
+function buildMainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '💎 Subscribe VIP',  callback_data: 'menu:subscribe' },
+        { text: '✅ My VIP Status',  callback_data: 'menu:vip' },
+      ],
+      [
+        { text: '🏆 Top Calls',      callback_data: 'menu:top' },
+        { text: '📞 Recent Calls',   callback_data: 'menu:calls' },
+      ],
+      [
+        { text: '📊 Leaderboards',   callback_data: 'menu:lb_open' },
+      ],
+      [
+        { text: '💼 My Portfolio',   callback_data: 'menu:portfolio_open' },
+        { text: '👤 My Profile',     callback_data: 'menu:profile' },
+      ],
+      [
+        { text: '🔔 Alerts',         callback_data: 'menu:alerts_open' },
+        { text: '👁 Watchlist',      callback_data: 'menu:watchlist' },
+      ],
+      [
+        { text: '🔍 Why Was It Called?', callback_data: 'menu:why_prompt' },
+      ],
+      [
+        { text: '🧪 Analyze Token',  callback_data: 'menu:analyze_prompt' },
+        { text: '📈 Bot Stats',      callback_data: 'menu:stats' },
+      ],
+      [
+        { text: '❓ Help',           callback_data: 'menu:help' },
+      ],
+    ],
+  };
+}
+
+function buildLeaderboardSubmenu() {
+  return {
+    inline_keyboard: [
+      [{ text: '── 📊 GROUP LEADERBOARD ──',  callback_data: 'menu:noop' }],
+      [
+        { text: '24h',  callback_data: 'lb:24h' },
+        { text: '7d',   callback_data: 'lb:7d' },
+        { text: '30d',  callback_data: 'lb:30d' },
+        { text: 'All',  callback_data: 'lb:all' },
+      ],
+      [{ text: '── ⚡ PULSE CALLER ──', callback_data: 'menu:noop' }],
+      [
+        { text: '24h',  callback_data: 'pulselb:24h' },
+        { text: '7d',   callback_data: 'pulselb:7d' },
+        { text: '30d',  callback_data: 'pulselb:30d' },
+        { text: 'All',  callback_data: 'pulselb:all' },
+      ],
+      [{ text: '⬅ Back to Menu', callback_data: 'menu:main' }],
+    ],
+  };
+}
+
+function buildPortfolioSubmenu() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '💼 View My Portfolio', callback_data: 'menu:portfolio_view' },
+      ],
+      [
+        { text: '➕ Add Coin',     callback_data: 'menu:portfolio_add_prompt' },
+        { text: '➖ Remove Coin',  callback_data: 'menu:portfolio_remove_prompt' },
+      ],
+      [
+        { text: '🗑 Clear All',    callback_data: 'menu:portfolio_clear_prompt' },
+      ],
+      [{ text: '⬅ Back to Menu', callback_data: 'menu:main' }],
+    ],
+  };
+}
+
+function buildAlertsSubmenu() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🔔 My Active Alerts', callback_data: 'menu:alerts_list' },
+      ],
+      [
+        { text: '➕ New Price Alert',   callback_data: 'menu:alert_new_prompt' },
+      ],
+      [{ text: '⬅ Back to Menu', callback_data: 'menu:main' }],
+    ],
+  };
+}
+
+function buildBackToMenuKeyboard() {
+  return { inline_keyboard: [[{ text: '⬅ Back to Menu', callback_data: 'menu:main' }]] };
+}
+
 // prefix is 'lb' for /lb or 'pulselb' for /pulselb. activeTf gets a checkmark.
 function buildLeaderboardKeyboard(prefix, activeTf) {
   const tfs = [
@@ -14063,6 +14174,132 @@ app.post('/webhook', async (req, res) => {
       const [prefix, arg] = cbData.split(':');
       if (!prefix || !arg || !msgRef?.chat?.id || !msgRef?.message_id) return;
 
+      // menu:<action>[:<arg>] → main menu + submenu navigation. Buttons
+      // either run an action inline (sending a new message with the result)
+      // or open a submenu (editing the existing menu message in place).
+      if (prefix === 'menu') {
+        try {
+          const tgUserId   = cbq.from?.id;
+          const tgUsername = cbq.from?.username;
+          const chatId     = msgRef.chat.id;
+          const action     = arg;
+
+          // Submenu navigation — edit the current message's keyboard
+          const editMenuTo = async (text, keyboard) => {
+            try {
+              await fetch(`${TELEGRAM_API}/editMessageText`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId, message_id: msgRef.message_id,
+                  text, parse_mode: 'HTML', disable_web_page_preview: true,
+                  reply_markup: keyboard,
+                }),
+                signal: AbortSignal.timeout(8_000),
+              });
+            } catch {}
+          };
+
+          // Helper: send a fresh message in response to the button tap
+          const replyNew = async (text, keyboard) => {
+            const body = {
+              chat_id: chatId, text, parse_mode: 'HTML',
+              disable_web_page_preview: true,
+            };
+            if (keyboard) body.reply_markup = keyboard;
+            try {
+              await fetch(`${TELEGRAM_API}/sendMessage`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(8_000),
+              });
+            } catch {}
+          };
+
+          // Branch on action — most run an existing command handler
+          if (action === 'main') {
+            await editMenuTo(
+              `📱 <b>Pulse Caller Menu</b>\n\nTap any option below:`,
+              buildMainMenuKeyboard(),
+            );
+          } else if (action === 'lb_open') {
+            await editMenuTo(
+              `📊 <b>Leaderboards</b>\n\nPick a window:`,
+              buildLeaderboardSubmenu(),
+            );
+          } else if (action === 'portfolio_open') {
+            await editMenuTo(
+              `💼 <b>Your Portfolio</b>\n\nTrack coins you bought, with live P&amp;L:`,
+              buildPortfolioSubmenu(),
+            );
+          } else if (action === 'alerts_open') {
+            await editMenuTo(
+              `🔔 <b>Price Alerts</b>\n\nGet DMed when a coin hits your target:`,
+              buildAlertsSubmenu(),
+            );
+          } else if (action === 'subscribe') {
+            const { handleSubscribeRequest } = await import('./subscription-engine.js');
+            const res = await handleSubscribeRequest({ telegramId: tgUserId, username: tgUsername, chatId });
+            await replyNew(res.message, res.keyboard);
+          } else if (action === 'vip') {
+            await handleVipStatusCommand(chatId, tgUserId);
+          } else if (action === 'top') {
+            await handleTopCommand(chatId);
+          } else if (action === 'calls') {
+            await handleCallsCommand(chatId);
+          } else if (action === 'profile') {
+            await handleProfileCommand(chatId, '', tgUserId, tgUsername || cbq.from?.first_name);
+          } else if (action === 'portfolio_view') {
+            await handlePortfolioCommand(chatId, '', tgUserId, tgUsername || cbq.from?.first_name);
+          } else if (action === 'portfolio_add_prompt') {
+            await replyNew(
+              `➕ <b>Add coin to portfolio</b>\n\nReply with: <code>/portfolio add &lt;CA&gt;</code>\n\n` +
+              `Example: <code>/portfolio add 4cnjEuGQcid193EDmKw6v2gruw7WURWu3WNfC8m9Ttz8</code>`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'portfolio_remove_prompt') {
+            await replyNew(
+              `➖ <b>Remove coin from portfolio</b>\n\nReply with: <code>/portfolio remove &lt;CA&gt;</code>`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'portfolio_clear_prompt') {
+            await replyNew(
+              `🗑 <b>Clear entire portfolio?</b>\n\nReply <code>/portfolio clear</code> to confirm.`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'alerts_list') {
+            await handleAlertCommand(chatId, 'list', tgUserId, tgUsername || cbq.from?.first_name);
+          } else if (action === 'alert_new_prompt') {
+            await replyNew(
+              `🔔 <b>New price alert</b>\n\nReply with: <code>/alert &lt;CA&gt; &lt;target&gt;</code>\n\n` +
+              `Examples:\n` +
+              `<code>/alert &lt;CA&gt; 100k</code> — alert at $100K mcap\n` +
+              `<code>/alert &lt;CA&gt; 5x</code> — alert at 5× current price`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'watchlist') {
+            await handleWatchlistCommand(chatId);
+          } else if (action === 'why_prompt') {
+            await replyNew(
+              `🔍 <b>Why was a coin called or skipped?</b>\n\nReply with: <code>/why &lt;CA or $TICKER&gt;</code>\n\n` +
+              `Example: <code>/why $SCAM</code>`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'analyze_prompt') {
+            await replyNew(
+              `🧪 <b>Deep AI analysis</b>\n\nReply with: <code>/analyze &lt;CA or $TICKER&gt;</code>\n\n` +
+              `Runs 4 sub-scorers + wallet intel — takes ~20 seconds.`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'stats') {
+            await handleStatsCommand(chatId);
+          } else if (action === 'help') {
+            await replyNew(buildHelpMessage(), buildBackToMenuKeyboard());
+          }
+          // 'noop' is for section-divider buttons — do nothing
+        } catch (err) { console.warn('[menu-callback] err:', err.message); }
+        return;
+      }
+
       // sub:<action>[:<paymentRef>] → VIP subscription button callbacks.
       // Actions: check, cancel, start, renew, stats.
       if (prefix === 'sub') {
@@ -14309,6 +14546,7 @@ app.post('/webhook', async (req, res) => {
   try {
     switch (command) {
       case '/start':     await handleStartCommand(chatId);              break;
+      case '/menu':      await handleMenuCommand(chatId);               break;
       case '/help':      await handleHelpCommand(chatId);               break;
       case '/analyze':   await handleAnalyzeCommand(chatId, args);      break;
       case '/scan':      await handleScanCommand(chatId, args);         break;
@@ -17279,15 +17517,16 @@ app.listen(PORT, async () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           commands: [
+            { command: 'menu',       description: '📱 Open the button menu (tap me first!)' },
             { command: 'subscribe',  description: '💎 Get VIP access (Solana Pay)' },
             { command: 'vip',        description: '✅ Check your subscription status' },
-            { command: 'why',        description: '🔍 Why was this called? /why CA' },
             { command: 'top',        description: '🏆 Best recent calls' },
             { command: 'lb',         description: '📊 Group leaderboard' },
             { command: 'pulselb',    description: '⚡ Pulse Caller leaderboard' },
             { command: 'portfolio',  description: '💼 Your portfolio' },
             { command: 'profile',    description: '👤 Your win history' },
             { command: 'alert',      description: '🔔 Set a price alert' },
+            { command: 'why',        description: '🔍 Why was this called? /why CA' },
             { command: 'analyze',    description: '🧪 Deep AI analysis of a token' },
             { command: 'help',       description: '❓ Show all commands' },
           ],
