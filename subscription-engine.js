@@ -127,12 +127,14 @@ export async function handleSubscribeRequest({ telegramId, username, chatId }) {
   if (active) {
     const daysLeft = Math.max(0, Math.ceil((new Date(active.expires_at).getTime() - Date.now()) / 86_400_000));
     return {
-      ok:     true,
-      status: 'ACTIVE',
+      ok:       true,
+      status:   'ACTIVE',
       message:
-        `✅ <b>You're already a VIP subscriber.</b>\n\n` +
-        `Expires: <b>${active.expires_at.split('T')[0]}</b> (${daysLeft} days remaining)\n\n` +
-        `To extend, run /subscribe again 3 days before expiry.`,
+        `✅ <b>VIP Active</b>\n\n` +
+        `<b>Expires:</b> ${active.expires_at.split('T')[0]} <i>(${daysLeft} day${daysLeft===1?'':'s'} left)</i>\n` +
+        `<b>Last payment:</b> $${active.amount_usd} on ${active.paid_at?.split('T')[0] ?? '?'}\n\n` +
+        `Renew anytime — your time stacks, no gap in access.`,
+      keyboard: buildActiveStatusKeyboard(),
     };
   }
 
@@ -148,6 +150,7 @@ export async function handleSubscribeRequest({ telegramId, username, chatId }) {
       ok:        true,
       status:    'PENDING_REUSE',
       message:   formatPaymentInstructions(recent),
+      keyboard:  buildPaymentKeyboard(recent),
       paymentRef: recent.payment_ref,
     };
   }
@@ -184,30 +187,126 @@ export async function handleSubscribeRequest({ telegramId, username, chatId }) {
     ok:         true,
     status:     'PENDING_NEW',
     message:    formatPaymentInstructions(sub),
+    keyboard:   buildPaymentKeyboard(sub),
     paymentRef,
   };
 }
 
 function formatPaymentInstructions(sub) {
-  // Solana Pay deeplink — works in Phantom, Solflare, etc. The memo field
-  // carries our payment_ref so we can match the incoming tx to this user.
+  return (
+    `💎 <b>PULSE CALLER VIP</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `Get the calls <b>at entry</b>, not after the move.\n\n` +
+    `<b>💰 Price:</b>  $${sub.amount_usd} for ${_subDays} days\n` +
+    `<b>⚡ Pay:</b>    <code>${sub.amount_sol} SOL</code>\n` +
+    `<b>📈 SOL @ </b> $${sub.sol_price_usd.toFixed(2)}\n\n` +
+    `<b>📍 Wallet:</b>\n<code>${_recipientWallet}</code>\n\n` +
+    `<b>🎯 Memo (REQUIRED):</b>\n<code>${sub.payment_ref}</code>\n\n` +
+    `<i>The memo is how we match your payment to your account. Without it, you'll need to contact support.</i>\n\n` +
+    `Once paid on-chain (~30 sec), you'll get your one-time VIP invite link DMed automatically.\n\n` +
+    `⏱ Quote valid for <b>${PENDING_PAYMENT_WINDOW_MIN} min</b>.`
+  );
+}
+
+// Inline keyboard for the payment card. Tap-and-go UX:
+//   💎 Pay   → opens Solana Pay deeplink in Phantom / Solflare / etc.
+//   📋 Copy  → Telegram copies the value to clipboard (Bot API 7.5+)
+//   ✅ Check → manual payment poll for impatient users
+//   ❌ Cancel→ abandon this quote
+function buildPaymentKeyboard(sub) {
   const solanaPayUrl =
     `solana:${_recipientWallet}?amount=${sub.amount_sol}` +
     `&label=${encodeURIComponent('Pulse Caller VIP')}` +
     `&memo=${encodeURIComponent(sub.payment_ref)}`;
-  return (
-    `🔒 <b>PULSE CALLER VIP — Subscribe</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `<b>Price:</b> $${sub.amount_usd} / ${_subDays} days\n` +
-    `<b>Pay:</b> <code>${sub.amount_sol} SOL</code> (quoted @ $${sub.sol_price_usd.toFixed(2)}/SOL)\n\n` +
-    `<b>Send to wallet:</b>\n<code>${_recipientWallet}</code>\n\n` +
-    `<b>⚠️ MEMO REQUIRED — paste this in the memo/note field:</b>\n<code>${sub.payment_ref}</code>\n\n` +
-    `Without the memo we can't match your payment to your account.\n\n` +
-    `<b>Mobile wallet?</b> Tap this Solana Pay link to auto-fill:\n` +
-    `<a href="${solanaPayUrl}">${solanaPayUrl}</a>\n\n` +
-    `Once your payment confirms on-chain (~30 sec), you'll receive a DM with your one-time VIP invite link.\n\n` +
-    `Quote valid for <b>${PENDING_PAYMENT_WINDOW_MIN} minutes</b>.`
-  );
+  return {
+    inline_keyboard: [
+      [
+        { text: `💎 Pay ${sub.amount_sol} SOL`, url: solanaPayUrl },
+      ],
+      [
+        { text: '📋 Copy Wallet', copy_text: { text: _recipientWallet } },
+        { text: '📋 Copy Memo',   copy_text: { text: sub.payment_ref } },
+      ],
+      [
+        { text: '✅ I Paid — Check Now', callback_data: `sub:check:${sub.payment_ref}` },
+        { text: '❌ Cancel',              callback_data: `sub:cancel:${sub.payment_ref}` },
+      ],
+    ],
+  };
+}
+
+// Inline keyboard for ACTIVE subscriber status card.
+export function buildActiveStatusKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🔄 Renew Early', callback_data: 'sub:renew' },
+        { text: '📊 My Stats',    callback_data: 'sub:stats' },
+      ],
+    ],
+  };
+}
+
+// Inline keyboard for users who don't have a subscription yet.
+export function buildSubscribeCtaKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '💎 Subscribe Now', callback_data: 'sub:start' },
+      ],
+    ],
+  };
+}
+
+/**
+ * Manually check a pending subscription's payment status.
+ * Used by the "✅ I Paid — Check Now" button callback. Forces one tick of
+ * the payment poller, then returns the latest state of the subscription.
+ */
+export async function checkSubscriptionStatus(paymentRef) {
+  if (!_db || !paymentRef) return { ok: false, message: '⚠️ Engine not ready.' };
+  try {
+    await paymentTick();
+  } catch {}
+  const sub = _db.prepare('SELECT * FROM subscriptions WHERE payment_ref = ?').get(paymentRef);
+  if (!sub) return { ok: false, message: '⚠️ Could not find your subscription. Run /subscribe to start fresh.' };
+  if (sub.status === 'ACTIVE') {
+    return {
+      ok: true,
+      message:
+        `✅ <b>Payment received — you're VIP!</b>\n\n` +
+        `Subscription active until <b>${sub.expires_at.split('T')[0]}</b>.\n\n` +
+        (sub.invite_link
+          ? `Your invite link was DMed to you. If you missed it, tap below:\n<a href="${sub.invite_link}">${sub.invite_link}</a>`
+          : `Generating your invite link…`),
+    };
+  }
+  if (sub.status === 'PENDING') {
+    return {
+      ok: true,
+      message:
+        `⏳ <b>Still waiting for your payment</b>\n\n` +
+        `If you've already sent SOL, give it ~30 sec to confirm on-chain.\n\n` +
+        `Memo: <code>${sub.payment_ref}</code>\n` +
+        `Amount: <code>${sub.amount_sol} SOL</code>\n\n` +
+        `Tap "Check Now" again in a minute.`,
+    };
+  }
+  return { ok: true, message: `Subscription status: <b>${sub.status}</b>` };
+}
+
+/**
+ * Cancel a pending subscription quote.
+ */
+export function cancelPendingSubscription(paymentRef) {
+  if (!_db || !paymentRef) return false;
+  try {
+    const result = _db.prepare(`
+      UPDATE subscriptions SET status='CANCELLED', notes='cancelled by user'
+      WHERE payment_ref = ? AND status = 'PENDING'
+    `).run(paymentRef);
+    return result.changes > 0;
+  } catch { return false; }
 }
 
 // ─── Payment Polling ─────────────────────────────────────────────────────────

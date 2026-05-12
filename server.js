@@ -2869,7 +2869,8 @@ async function handleSubscribeCommand(chatId, telegramId, username) {
       await sendTelegramMessage(chatId, '⚠️ Could not process subscribe request.');
       return;
     }
-    await sendTelegramMessage(chatId, result.message);
+    const opts = result.keyboard ? { reply_markup: result.keyboard } : {};
+    await sendTelegramMessage(chatId, result.message, opts);
   } catch (err) {
     console.warn('[subscribe] err:', err.message);
     await sendTelegramMessage(chatId, `⚠️ Subscription error: ${escapeHtml(err.message)}`);
@@ -2885,23 +2886,33 @@ async function handleVipStatusCommand(chatId, telegramId) {
       ORDER BY id DESC LIMIT 1
     `).get(String(telegramId));
     if (!row) {
+      const { buildSubscribeCtaKeyboard } = await import('./subscription-engine.js');
       await sendTelegramMessage(chatId,
-        `You don't have a subscription yet.\n\nRun /subscribe to start.`);
+        `💎 <b>You're not a VIP yet</b>\n\n` +
+        `VIP members get every call <b>at entry</b>, before the market sees the move. Free tier gets the call only after 2× confirmation.\n\n` +
+        `Tap below to subscribe.`,
+        { reply_markup: buildSubscribeCtaKeyboard() });
       return;
     }
     if (row.status === 'ACTIVE') {
+      const { buildActiveStatusKeyboard } = await import('./subscription-engine.js');
       const daysLeft = Math.max(0, Math.ceil((new Date(row.expires_at).getTime() - Date.now()) / 86_400_000));
       await sendTelegramMessage(chatId,
-        `✅ <b>VIP ACTIVE</b>\n\n` +
-        `Expires: <b>${row.expires_at.split('T')[0]}</b> (${daysLeft} days left)\n` +
-        `Last payment: $${row.amount_usd} on ${row.paid_at?.split('T')[0] ?? '?'}\n\n` +
-        `Renew with /subscribe.`);
+        `✅ <b>VIP Active</b>\n\n` +
+        `<b>Expires:</b> ${row.expires_at.split('T')[0]} <i>(${daysLeft} day${daysLeft===1?'':'s'} left)</i>\n` +
+        `<b>Last payment:</b> $${row.amount_usd} on ${row.paid_at?.split('T')[0] ?? '?'}\n\n` +
+        `Renew anytime — your time stacks, no gap in access.`,
+        { reply_markup: buildActiveStatusKeyboard() });
     } else if (row.status === 'PENDING') {
       await sendTelegramMessage(chatId,
-        `⏳ <b>Payment pending.</b>\n\nRun /subscribe to see your payment instructions again.`);
+        `⏳ <b>Payment pending</b>\n\nTap /subscribe to see your payment card again.`);
     } else {
+      const { buildSubscribeCtaKeyboard } = await import('./subscription-engine.js');
       await sendTelegramMessage(chatId,
-        `❌ <b>VIP ${row.status}</b>\n\nLast subscription expired on ${row.expires_at?.split('T')[0] ?? '?'}.\n\nRun /subscribe to renew.`);
+        `❌ <b>VIP ${row.status}</b>\n\n` +
+        `Last subscription ended on ${row.expires_at?.split('T')[0] ?? '?'}.\n\n` +
+        `Tap below to renew.`,
+        { reply_markup: buildSubscribeCtaKeyboard() });
     }
   } catch (err) {
     await sendTelegramMessage(chatId, `⚠️ Error: ${escapeHtml(err.message.slice(0,200))}`);
@@ -14052,6 +14063,73 @@ app.post('/webhook', async (req, res) => {
       const [prefix, arg] = cbData.split(':');
       if (!prefix || !arg || !msgRef?.chat?.id || !msgRef?.message_id) return;
 
+      // sub:<action>[:<paymentRef>] → VIP subscription button callbacks.
+      // Actions: check, cancel, start, renew, stats.
+      if (prefix === 'sub') {
+        try {
+          const tgUserId = cbq.from?.id;
+          const tgUsername = cbq.from?.username;
+          const action = arg;
+          const ref    = cbData.split(':')[2] || null;
+          const sub    = await import('./subscription-engine.js');
+
+          if (action === 'check' && ref) {
+            const res = await sub.checkSubscriptionStatus(ref);
+            await fetch(`${TELEGRAM_API}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: msgRef.chat.id, text: res.message, parse_mode: 'HTML',
+                disable_web_page_preview: true,
+              }),
+              signal: AbortSignal.timeout(8_000),
+            });
+          } else if (action === 'cancel' && ref) {
+            const ok = sub.cancelPendingSubscription(ref);
+            await fetch(`${TELEGRAM_API}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: msgRef.chat.id,
+                text: ok ? '❌ Payment quote cancelled. Run /subscribe to get a fresh quote anytime.' : '⚠️ Could not cancel — quote may already be paid or expired.',
+                parse_mode: 'HTML',
+              }),
+              signal: AbortSignal.timeout(8_000),
+            });
+          } else if (action === 'start' || action === 'renew') {
+            const res = await sub.handleSubscribeRequest({
+              telegramId: tgUserId, username: tgUsername, chatId: msgRef.chat.id,
+            });
+            await fetch(`${TELEGRAM_API}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: msgRef.chat.id, text: res.message, parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                ...(res.keyboard ? { reply_markup: res.keyboard } : {}),
+              }),
+              signal: AbortSignal.timeout(8_000),
+            });
+          } else if (action === 'stats') {
+            const row = dbInstance.prepare(`
+              SELECT amount_usd, paid_at, expires_at, payment_ref
+              FROM subscriptions WHERE telegram_id = ? AND status='ACTIVE'
+              ORDER BY id DESC LIMIT 1
+            `).get(String(tgUserId));
+            const text = row
+              ? `📊 <b>Your VIP Subscription</b>\n\n` +
+                `Started: ${row.paid_at?.split('T')[0] ?? '?'}\n` +
+                `Expires: ${row.expires_at?.split('T')[0] ?? '?'}\n` +
+                `Paid: $${row.amount_usd}\n` +
+                `Ref: <code>${row.payment_ref}</code>`
+              : 'No active subscription found.';
+            await fetch(`${TELEGRAM_API}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: msgRef.chat.id, text, parse_mode: 'HTML' }),
+              signal: AbortSignal.timeout(8_000),
+            });
+          }
+        } catch (err) { console.warn('[sub-callback] err:', err.message); }
+        return;
+      }
+
       // pnl:<userId> → P&L card for the caller. Sends as a NEW message
       // (not edit) so the original CA card stays intact and multiple users
       // can each tap to see the caller's stats. Returns early.
@@ -17189,6 +17267,39 @@ app.get('/api/v8/dashboard', (req, res) => {
 
 app.listen(PORT, async () => {
   console.log(`[server] Listening on port ${PORT}`);
+
+  // Register the bot's command menu with Telegram — these are the commands
+  // that show up when a user taps "/" in the chat input. Order matters: the
+  // most-used commands go first. Re-registers on every boot so it's always
+  // in sync with the code.
+  if (TELEGRAM_BOT_TOKEN) {
+    try {
+      await fetch(`${TELEGRAM_API}/setMyCommands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          commands: [
+            { command: 'subscribe',  description: '💎 Get VIP access (Solana Pay)' },
+            { command: 'vip',        description: '✅ Check your subscription status' },
+            { command: 'why',        description: '🔍 Why was this called? /why CA' },
+            { command: 'top',        description: '🏆 Best recent calls' },
+            { command: 'lb',         description: '📊 Group leaderboard' },
+            { command: 'pulselb',    description: '⚡ Pulse Caller leaderboard' },
+            { command: 'portfolio',  description: '💼 Your portfolio' },
+            { command: 'profile',    description: '👤 Your win history' },
+            { command: 'alert',      description: '🔔 Set a price alert' },
+            { command: 'analyze',    description: '🧪 Deep AI analysis of a token' },
+            { command: 'help',       description: '❓ Show all commands' },
+          ],
+          scope: { type: 'default' },
+        }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      console.log('[server] ✓ Telegram /commands menu registered');
+    } catch (err) {
+      console.warn('[server] setMyCommands failed:', err.message);
+    }
+  }
 
   if (!TELEGRAM_BOT_TOKEN)          console.warn('[server] ⚠️  TELEGRAM_BOT_TOKEN missing');
   if (!CLAUDE_API_KEY)              console.warn('[server] ⚠️  CLAUDE_API_KEY missing');
