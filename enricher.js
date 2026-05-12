@@ -291,22 +291,47 @@ async function enrichWithBirdeyeWithRetry(ca, pairAgeHours) {
     result = await enrichWithBirdeye(ca);
   }
 
-  // ── DexScreener fallback (free, no key) ──────────────────────────────
+  // ── DexScreener fallback (free, no key) — MARKET DATA ────────────────
   // Kicks in when Birdeye returns nothing — no key, out of credits, 401,
   // or token not yet indexed. Provides market data only (price, mcap, liq,
-  // volume, %-change, symbol/name). Security fields (top10, dev%, LP) are
-  // null in fallback mode; the rest of the pipeline already tolerates
-  // null security fields so this degrades gracefully.
+  // volume, %-change, symbol/name).
   if (!result.birdeyeOk) {
     const dex = await enrichWithDexScreener(ca);
     if (dex.dexscreenerOk) {
-      // Merge DexScreener data into the result; flag the data source for logs
       Object.assign(result, dex);
       result.birdeyeOk = true;             // pipeline gates on this — keep it true
       result._marketDataSource = 'dexscreener';
     }
   } else {
     result._marketDataSource = 'birdeye';
+  }
+
+  // ── RugCheck fallback (free, no key) — SECURITY DATA ─────────────────
+  // Fills the security-data gap when Birdeye is dead. Provides top10
+  // holder %, dev wallet %, freeze/mint authority, and LP burn/lock —
+  // the fields the scorer needs to actually catch rugs. Only fires when
+  // those fields are still missing after Birdeye + DexScreener.
+  const securityMissing = result.top10HolderPct == null
+                       || result.devWalletPct   == null
+                       || result.lpSecurityStatus == null
+                       || result.lpSecurityStatus === 'UNKNOWN';
+  if (securityMissing) {
+    const rug = await enrichWithRugCheck(ca);
+    if (rug.rugcheckOk) {
+      // Only set fields the upstream sources didn't already provide —
+      // never overwrite a Birdeye value with a RugCheck one.
+      for (const key of ['top10HolderPct', 'devWalletPct', 'freezeAuthority',
+                          'mintAuthority', 'lpBurnedPct', 'lpLockedPct',
+                          'lpUnlockAtSec', 'lpLocked', 'lpSecurityStatus',
+                          'rugcheckScore', 'rugcheckRisks', 'rugcheckCreator']) {
+        if (result[key] == null || result[key] === 'UNKNOWN') {
+          result[key] = rug[key];
+        }
+      }
+      result._securityDataSource = 'rugcheck';
+    }
+  } else {
+    result._securityDataSource = 'birdeye';
   }
 
   return result;
@@ -371,6 +396,101 @@ async function enrichWithDexScreener(ca) {
   if (pair.dexId)             result.dex       = pair.dexId;
 
   console.log(`[enricher:dexscreener] ✓ ${result.token ?? '?'} mcap:${result.marketCap?.toFixed?.(0) ?? '?'} liq:${result.liquidity?.toFixed?.(0) ?? '?'} dex:${result.dex ?? '?'} (Birdeye fallback)`);
+  return result;
+}
+
+// ─── RugCheck Enricher (free fallback) — SECURITY DATA ───────────────────
+//
+// Free public API at api.rugcheck.xyz, no key required. Returns the security
+// fields Birdeye's /defi/token_security gave us: top 10 holder %, dev/creator
+// wallet %, freeze/mint authority status, LP burn/lock state, and a normalized
+// rug-risk score. This is what the scorer needs to actually catch rugs.
+//
+// Rate limit: ~30-60 req/min on the free tier. Same indexing-lag issue as
+// Birdeye for brand-new tokens (<30 sec old), so the existing retry pattern
+// in enrichWithBirdeyeWithRetry helps here too.
+
+const RUGCHECK_BASE    = 'https://api.rugcheck.xyz/v1';
+const RUGCHECK_TIMEOUT = 10_000;
+
+async function enrichWithRugCheck(ca) {
+  const result = { rugcheckOk: false };
+
+  const data = await safeFetch(
+    `${RUGCHECK_BASE}/tokens/${ca}/report`,
+    { headers: { Accept: 'application/json' } },
+    'rugcheck:report',
+    RUGCHECK_TIMEOUT
+  );
+
+  if (!data || data.error) {
+    if (data?.error) console.warn(`[enricher:rugcheck] ✗ ${data.error}`);
+    return result;
+  }
+
+  result.rugcheckOk = true;
+
+  // ── Mint / freeze authority ──────────────────────────────────────────
+  // RugCheck returns null when the authority is revoked (which is GOOD
+  // for safety). Mirror Birdeye's convention: 0 = revoked, 1 = active.
+  if (data.token?.freezeAuthority !== undefined) {
+    result.freezeAuthority = data.token.freezeAuthority == null ? 0 : 1;
+  }
+  if (data.token?.mintAuthority !== undefined) {
+    result.mintAuthority = data.token.mintAuthority == null ? 0 : 1;
+  }
+
+  // ── Top holder concentration ─────────────────────────────────────────
+  // RugCheck returns topHolders as array of { address, pct, owner, ... }.
+  // Sum the top 10 (excluding LP/bonding-curve PDA entries which RugCheck
+  // tags with .insider === false but .owner === the AMM program).
+  if (Array.isArray(data.topHolders)) {
+    const real = data.topHolders.filter(h => !h.isLpHolder && !h.isBondingCurve);
+    const top10 = real.slice(0, 10);
+    const sumPct = top10.reduce((s, h) => s + (Number(h.pct) || 0), 0);
+    if (sumPct > 0) result.top10HolderPct = Math.min(100, sumPct);
+  }
+
+  // ── Dev / creator wallet % ───────────────────────────────────────────
+  if (data.creator) result.rugcheckCreator = data.creator;
+  if (Array.isArray(data.topHolders) && data.creator) {
+    const dev = data.topHolders.find(h => h.address === data.creator);
+    if (dev?.pct != null) result.devWalletPct = Number(dev.pct);
+  }
+  // Some RugCheck responses include creatorBalance + totalSupply for the
+  // dev share directly — use that as a backup
+  if (result.devWalletPct == null && data.creatorBalance && data.totalHolders) {
+    // creatorBalance is in token units; we'd need supply to compute % which
+    // we don't have here. Skip rather than guess.
+  }
+
+  // ── LP burn / lock state ─────────────────────────────────────────────
+  // RugCheck's markets[] has lp.lpLockedPct and lp.lpLockedUSD. A market
+  // with lpLocked === true and the burn address as recipient is fully
+  // burned (safest). Look at the largest pool by liquidity.
+  if (Array.isArray(data.markets) && data.markets.length) {
+    const pool = data.markets.reduce((best, m) => {
+      const liq = Number(m?.liquidityUsd ?? m?.lp?.lpLockedUSD ?? 0);
+      const bestLiq = Number(best?.liquidityUsd ?? best?.lp?.lpLockedUSD ?? 0);
+      return liq > bestLiq ? m : best;
+    }, data.markets[0]);
+    const lockedPct = Number(pool?.lp?.lpLockedPct ?? 0);
+    if (lockedPct > 0) result.lpLockedPct = lockedPct;
+    // RugCheck flags fully burned LP when 100% locked to burn address
+    if (pool?.lp?.burnPct != null) result.lpBurnedPct = Number(pool.lp.burnPct);
+    // Compose the same lpSecurityStatus the rest of the pipeline expects
+    result.lpSecurityStatus = classifyLpSecurity(result.lpBurnedPct, result.lpLockedPct, null);
+    if (result.lpBurnedPct >= 95 || result.lpLockedPct >= 80) result.lpLocked = 1;
+  }
+
+  // ── Rug-risk score (bonus — RugCheck's own assessment) ───────────────
+  // 0-100, higher = riskier. Useful as an extra scorer input.
+  if (data.score != null) result.rugcheckScore = Number(data.score);
+  if (Array.isArray(data.risks)) {
+    result.rugcheckRisks = data.risks.map(r => r.name).filter(Boolean).slice(0, 8);
+  }
+
+  console.log(`[enricher:rugcheck] ✓ top10:${result.top10HolderPct?.toFixed?.(1) ?? '?'}% dev:${result.devWalletPct?.toFixed?.(1) ?? '?'}% mint:${result.mintAuthority ?? '?'} freeze:${result.freezeAuthority ?? '?'} lp:${result.lpSecurityStatus ?? '?'} rugScore:${result.rugcheckScore ?? '?'} (Birdeye-security fallback)`);
   return result;
 }
 
