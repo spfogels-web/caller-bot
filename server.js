@@ -16197,7 +16197,7 @@ app.get('/api/helius/webhook/create',  _heliusWebhookCreateHandler);  // browser
 // webhook by ID. Call this AFTER you've created the webhook in the Helius
 // dashboard and added HELIUS_WEBHOOK_ID to Railway env. Replaces the
 // webhook's accountAddresses list with our current 4,800+ tracked wallets.
-app.post('/api/helius/webhook/setup', async (req, res) => {
+const _heliusWebhookSetupHandler = async (req, res) => {
   setCors(res);
   const webhookId = process.env.HELIUS_WEBHOOK_ID || (req.body || {}).webhookId;
   // Prefer HELIUS_ENHANCED_API_KEY (specific to Enhanced APIs + webhooks);
@@ -16221,7 +16221,9 @@ app.post('/api/helius/webhook/setup', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
-});
+};
+app.post('/api/helius/webhook/setup', _heliusWebhookSetupHandler);
+app.get('/api/helius/webhook/setup',  _heliusWebhookSetupHandler);  // browser-bar trigger
 
 // Stats: see what the webhook has been ingesting
 app.get('/api/helius/webhook/stats', (req, res) => {
