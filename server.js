@@ -375,7 +375,7 @@ const MODES = {
     sweetSpotMin:     8_000,
     sweetSpotMax:    25_000,
     secondaryMcapMax: 75_000,
-    minLiquidity: 3_000,
+    minLiquidity: 5_000,
     minVolume24h: 500,
     minPairAgeHours: 0,
     maxPairAgeHours: 4,
@@ -386,7 +386,7 @@ const MODES = {
     thresholdAdjust: -8,
     weightMomentum: true,
     ignoreSellPressure: true,
-    description: 'Micro-cap gem hunter. Sweet spot $13K-$40K · secondary $40K-$80K · hard block above $80K.',
+    description: 'Micro-cap gem hunter. Sweet spot $8K-$25K · secondary $25K-$75K · hard block above $75K.',
   },
   TRENDING: {
     name: 'TRENDING', emoji: '📈', color: '#ffd700',
@@ -1422,7 +1422,11 @@ function persistAIConfig() {
 // and whenever a POST /api/config/scoring lands. Every hot-path site below
 // that used hardcoded bonuses / thresholds now reads through SCORING_CONFIG.
 const SCORING_CONFIG_DEFAULTS = {
-  minScoreToPost:         35,   // UNBLOCK — dropped to scorer hard floor. Any passing score should be able to post.
+  // ── PRODUCTION LAUNCH 2026-05-12 — tightened from 4/27 baseline ──────
+  // Goal: 10-20 calls/day at 75% win rate. The 4/27 baseline (35 floor,
+  // 80 noSignalCap, all guards disabled) was set for max volume during
+  // testing. Production needs the opposite: high-conviction only.
+  minScoreToPost:         45,   // Raised 35 → 45. Hard floor — no AUTO_POST below this.
   sweetSpotBonus:          6,   // 2026-04-30 operator policy: $8K-$25K is the best entry band for big runners.
   secondaryBonus:          0,   // $25K-$75K allowed but no positive bias; user wants pre-bond focus.
   preLaunchBonus:          6,   // dev funded by CEX within 6h
@@ -1430,8 +1434,8 @@ const SCORING_CONFIG_DEFAULTS = {
   devFingerprintCap:       6,   // max positive delta from dev history
   hotDevBonus:             4,   // bonus when dev has a coin that hit 2x+ in the last 24h
   globalBonusCap:         10,   // total bonus stack across all sources
-  noSignalCap:            80,   // AXIOSCAN-MODE — less restrictive ceiling for clean-structure coins (was 72)
-  rugGuardMinScore:       55,   // AXIOSCAN-MODE — loosened from 58. $13K-$17.5K requires this score.
+  noSignalCap:            65,   // Lowered 80 → 65 — "clean but boring" coins (no smart-money signal) capped lower so wallet signals drive AUTO_POST.
+  rugGuardMinScore:       60,   // Raised 55 → 60. $13K-$17.5K rug-cluster band needs stricter bar.
   consensusOverrideScore: 60,   // (legacy — only used if claudeOnlyMode=0)
   deadRegimeFloorAdj:     12,   // DEAD market adds this to minScoreToPost
   // ── USER-ONLY KNOB ────────────────────────────────────────────────────
@@ -1445,7 +1449,7 @@ const SCORING_CONFIG_DEFAULTS = {
   winPeakMultiple:       1.3,   // Fallback WIN threshold — ≥1.3x = WIN, <1.3x = LOSS.
   neutralDrawdownPct:     10,   // ≤10% drawdown = NEUTRAL at 6h
   claudeOnlyMode:          1,   // 1=Claude is sole decision maker; 0=legacy Claude+OpenAI consensus
-  minLiquidityForPost:  1500,   // AXIOSCAN-MODE — $1.5K min liquidity (was $3K). Many 10x moonshots start with thin liquidity and grow it.
+  minLiquidityForPost:  3000,   // Production: $3K min liquidity (was $1.5K). Thin-pool calls had too many rugs.
   lockedKnobs: ['targetMultiplier'],  // ONLY the user-target multiplier is locked — bot tunes everything else
   earlyMCapDeferMinutes:   0,   // DISABLED — was deferring $6K-$9K coins 3min, which was holding too many. Set to 0 to skip defer entirely.
   earlyMCapDeferMin:    6000,   // lower edge of the defer band ($)
@@ -1531,19 +1535,24 @@ try {
     // and learning loop. The scorer finds coins with the sweet-spot profile
     // via pre-breakout + early-entry + winner-wallet bonuses already shipped.
     const MIGRATE_FORCE = {
-      winPeakMultiple:    1.3,  // fallback WIN threshold, lowered from 2.5 → 1.3
+      winPeakMultiple:    1.3,  // fallback WIN threshold
       neutralDrawdownPct: 10,
-      sweetSpotBonus:     6,    // 2026-04-30: re-enabled — $8K-$25K is operator's high-conviction band
+      sweetSpotBonus:     6,    // $8K-$25K high-conviction band
       secondaryBonus:     0,    // $25K-$75K allowed but no positive bias
-      targetMultiplier:   5.0,  // NEW user-only tuning target
-      // 4/27 baseline restoration — disable today's new guards
-      clusterMinScoreToPost:    0,
-      absoluteMinScoreToPost:   0,
-      latePump1hHardBlock:    999,
-      // Operator-tuned vertical-spike threshold (raised 30→40→45)
-      verticalSpike5mPct:      45,
+      targetMultiplier:   5.0,  // user-only tuning target
+      // ── PRODUCTION LAUNCH 2026-05-12 — re-enable disabled guards ─────
+      // The 4/27 baseline disabled these for max-volume testing. Production
+      // needs them ON to drive the 75% win-rate target.
+      minScoreToPost:           45,   // hard floor — no AUTO_POST below
+      noSignalCap:              65,   // clean-but-boring ceiling
+      rugGuardMinScore:         60,   // rug-cluster band scrutiny
+      clusterMinScoreToPost:    40,   // SM_CLUSTER calls need score 40+
+      absoluteMinScoreToPost:   28,   // hard floor across all paths (even KOL/cluster)
+      latePump1hHardBlock:      80,   // block coins already +80% in 1h
+      minLiquidityForPost:    3000,   // $3K min pool — filters rug-friendly thin pools
+      verticalSpike5mPct:       45,
     };
-    const MIGRATE_FORCE_VERSION = 'v12';  // v12 = re-enable sweetSpotBonus per 2026-04-30 policy; v11 = winPeakMultiple lowered to 1.3x
+    const MIGRATE_FORCE_VERSION = 'v13';  // v13 = production launch tightening; v12 = re-enable sweetSpotBonus
     let migrated = false;
     for (const [key, newDefault] of Object.entries(MIGRATE_UP)) {
       const stored = SCORING_CONFIG[key];
