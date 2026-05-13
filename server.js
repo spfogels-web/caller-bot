@@ -2900,6 +2900,84 @@ async function handleWhyCommand(chatId, input) {
   }
 }
 
+// ── /wallets <CA> — show wallet backing for a token ──────────────────────
+// "Which tracked wallets bought this coin, and what are their stats?"
+// Premium feature — gives the user proof that the call is backed by
+// proven traders, not just the scorer.
+async function handleWalletsCommand(chatId, args) {
+  const ca = (args || '').trim();
+  if (!ca || ca.length < 32) {
+    await sendTelegramMessage(chatId,
+      `⚠️ Usage: <code>/wallets &lt;CA&gt;</code>\n\nExample: <code>/wallets DXcwhg1MwrResr1CoaBuhnnHmcx222ntZAgRd28Jpump</code>`);
+    return;
+  }
+  try {
+    // Reuse the API logic for consistency
+    const sql = `
+      WITH all_buys AS (
+        SELECT wallet_address AS addr, MIN(detected_at) AS first_buy_at
+        FROM wallet_activity WHERE token_mint = ? GROUP BY wallet_address
+        UNION
+        SELECT wallet_address AS addr, MIN(received_at) AS first_buy_at
+        FROM wallet_events WHERE contract_address = ? AND event_type='BUY' GROUP BY wallet_address
+      ),
+      cons AS (SELECT addr, MIN(first_buy_at) AS first_buy_at FROM all_buys GROUP BY addr),
+      ls AS (
+        SELECT wa.wallet_address AS addr,
+               SUM(CASE WHEN c.outcome='WIN'  THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN c.outcome='LOSS' THEN 1 ELSE 0 END) AS losses,
+               ROUND(AVG(CASE WHEN c.outcome='WIN' THEN c.peak_multiple END), 1) AS avg_peak
+        FROM wallet_activity wa JOIN calls c ON c.contract_address = wa.token_mint
+        WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+        GROUP BY wa.wallet_address
+      )
+      SELECT cb.addr, cb.first_buy_at, tw.category, tw.is_kol_tier,
+             ROUND(tw.sol_balance, 2) AS sol_balance,
+             ls.wins, ls.losses, ls.avg_peak
+      FROM cons cb
+      LEFT JOIN tracked_wallets tw ON tw.address = cb.addr
+      LEFT JOIN ls ON ls.addr = cb.addr
+      ORDER BY ls.wins DESC NULLS LAST, ls.avg_peak DESC NULLS LAST
+      LIMIT 15
+    `;
+    const wallets = dbInstance.prepare(sql).all(ca, ca);
+    if (!wallets.length) {
+      await sendTelegramMessage(chatId,
+        `🐋 <b>No tracked wallets</b> have bought this token (yet).\n\n` +
+        `If this is a brand-new mint, signal may still arrive in the next few minutes.`);
+      return;
+    }
+
+    const tokenRow = dbInstance.prepare(
+      `SELECT token, market_cap_at_call FROM calls WHERE contract_address = ? ORDER BY id DESC LIMIT 1`
+    ).get(ca);
+
+    const whales      = wallets.filter(w => (w.sol_balance ?? 0) >= 100).length;
+    const kols        = wallets.filter(w => w.is_kol_tier === 1).length;
+    const perfectHR   = wallets.filter(w => w.wins > 0 && w.losses === 0 && w.wins >= 3).length;
+
+    let msg = `🐋 <b>Wallet Backing — $${tokenRow?.token ?? '?'}</b>\n`;
+    msg += `<code>${ca}</code>\n\n`;
+    msg += `<b>${wallets.length}</b> tracked wallets · `;
+    msg += `<b>${whales}</b> whales (≥100 SOL) · `;
+    msg += `<b>${kols}</b> KOL-tier · `;
+    msg += `<b>${perfectHR}</b> with perfect hit rate\n\n`;
+    msg += `<b>Top 10 buyers:</b>\n`;
+    for (let i = 0; i < Math.min(10, wallets.length); i++) {
+      const w = wallets[i];
+      const hr = w.wins + w.losses > 0 ? Math.round(w.wins * 100 / (w.wins + w.losses)) : null;
+      const star = w.is_kol_tier === 1 ? '⭐' : (hr === 100 && w.wins >= 3 ? '🏆' : '·');
+      const stats = (w.wins != null && w.wins > 0)
+        ? `${hr ?? '?'}% HR, ${w.avg_peak ?? '?'}x avg (${w.wins}W/${w.losses}L)`
+        : `no history`;
+      msg += `${star} <code>${w.addr.slice(0,8)}…${w.addr.slice(-4)}</code> · ${w.sol_balance ?? '?'} SOL · ${stats}\n`;
+    }
+    await sendTelegramMessage(chatId, msg);
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Error: ${escapeHtml(err.message.slice(0,200))}`);
+  }
+}
+
 // ── /kol admin command — manage KOL-tier wallets ────────────────────────────
 // Lets the operator add/remove wallets from the KOL fast-lane without
 // editing env vars. Admin-only.
@@ -15017,6 +15095,7 @@ app.post('/webhook', async (req, res) => {
       case '/watchlist': isUserVip(fromId) ? await handleWatchlistCommand(chatId)        : await sendUpgradePrompt(chatId, '👁 Active Watchlist'); break;
       case '/regime':    isUserVip(fromId) ? await handleRegimeCommand(chatId)           : await sendUpgradePrompt(chatId, '🌐 Market Regime'); break;
       case '/why':       isUserVip(fromId) ? await handleWhyCommand(chatId, args)        : await sendUpgradePrompt(chatId, '🔍 Why Was This Called?'); break;
+      case '/wallets':   isUserVip(fromId) ? await handleWalletsCommand(chatId, args)    : await sendUpgradePrompt(chatId, '🐋 Wallet Backing'); break;
       case '/top':       isUserVip(fromId) ? await handleTopCommand(chatId)              : await sendUpgradePrompt(chatId, '🏆 Top Recent Calls'); break;
       case '/track':     isUserVip(fromId) ? await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 Track a Wallet'); break;
       case '/untrack':   isUserVip(fromId) ? await handleUntrackWalletCommand(chatId, args, fromId)                                                    : await sendUpgradePrompt(chatId, '🐋 Untrack a Wallet'); break;
@@ -16165,6 +16244,96 @@ app.post('/api/wallets/promote-kol', express.json(), (req, res) => {
     const updated = txn(promoted);
     logEvent('INFO', 'KOL_PROMOTE', `${updated} wallets promoted to KOL tier (${promoter})`);
     res.json({ ok: true, promoted: updated, addresses: promoted });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Wallet attribution for a specific token — answers "which of our tracked
+// wallets are bullish on $XYZ right now?" Used by /wallets <CA> command,
+// dashboard call-detail view, and (optionally) embedded in call cards.
+//
+// Returns tracked wallets that bought this token, joined with their
+// lifetime performance stats so the operator sees "is this a wallet
+// worth following?" at a glance.
+app.get('/api/calls/wallet-backing/:ca', (req, res) => {
+  setCors(res);
+  try {
+    const ca = req.params.ca;
+    if (!ca || ca.length < 32) return res.status(400).json({ ok: false, error: 'valid contract address required' });
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 20)));
+
+    // Pull every tracked wallet that bought this token, with their stats.
+    // Uses wallet_activity (polling-era detections) + wallet_events (webhook).
+    // Falls back to either source so we work pre-and-post the architecture
+    // switch.
+    const sql = `
+      WITH all_buys AS (
+        SELECT wallet_address AS addr, MIN(detected_at) AS first_buy_at
+        FROM wallet_activity WHERE token_mint = ?
+        GROUP BY wallet_address
+        UNION
+        SELECT wallet_address AS addr, MIN(received_at) AS first_buy_at
+        FROM wallet_events WHERE contract_address = ? AND event_type = 'BUY'
+        GROUP BY wallet_address
+      ),
+      consolidated AS (
+        SELECT addr, MIN(first_buy_at) AS first_buy_at
+        FROM all_buys
+        GROUP BY addr
+      ),
+      lifetime_stats AS (
+        SELECT
+          wa.wallet_address AS addr,
+          COUNT(DISTINCT wa.token_mint) AS lifetime_picks,
+          SUM(CASE WHEN c.outcome='WIN'  THEN 1 ELSE 0 END) AS lifetime_wins,
+          SUM(CASE WHEN c.outcome='LOSS' THEN 1 ELSE 0 END) AS lifetime_losses,
+          ROUND(AVG(CASE WHEN c.outcome='WIN' THEN c.peak_multiple END), 2) AS lifetime_avg_peak
+        FROM wallet_activity wa
+        JOIN calls c ON c.contract_address = wa.token_mint
+        WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+        GROUP BY wa.wallet_address
+      )
+      SELECT
+        cb.addr                            AS address,
+        cb.first_buy_at                    AS first_buy_at,
+        COALESCE(tw.category, '?')         AS category,
+        COALESCE(tw.is_kol_tier, 0)        AS is_kol_tier,
+        ROUND(tw.sol_balance, 2)           AS sol_balance,
+        ls.lifetime_picks,
+        ls.lifetime_wins,
+        ls.lifetime_losses,
+        ls.lifetime_avg_peak
+      FROM consolidated cb
+      LEFT JOIN tracked_wallets tw ON tw.address = cb.addr
+      LEFT JOIN lifetime_stats  ls ON ls.addr    = cb.addr
+      ORDER BY ls.lifetime_wins DESC NULLS LAST, ls.lifetime_avg_peak DESC NULLS LAST
+      LIMIT ${limit}
+    `;
+    const wallets = dbInstance.prepare(sql).all(ca, ca).map(r => ({
+      ...r,
+      hit_rate_pct: r.lifetime_wins + r.lifetime_losses > 0
+        ? Math.round(r.lifetime_wins * 100 / (r.lifetime_wins + r.lifetime_losses))
+        : null,
+    }));
+
+    // The call's own metadata (so the response is self-contained)
+    const call = dbInstance.prepare(`
+      SELECT token, contract_address, called_at, market_cap_at_call, outcome, peak_multiple
+      FROM calls WHERE contract_address = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(ca);
+
+    res.json({
+      ok: true,
+      ca,
+      call,
+      wallet_count: wallets.length,
+      whales:       wallets.filter(w => (w.sol_balance ?? 0) >= 100).length,
+      kol_tier:     wallets.filter(w => w.is_kol_tier === 1).length,
+      perfect_hr:   wallets.filter(w => w.hit_rate_pct === 100 && (w.lifetime_wins ?? 0) >= 3).length,
+      wallets,
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
