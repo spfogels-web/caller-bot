@@ -901,6 +901,31 @@ function runMigrations() {
     `ALTER TABLE subscriptions ADD COLUMN trial_started_at TEXT`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_sub_trial_phone ON subscriptions(trial_phone_hash) WHERE trial_phone_hash IS NOT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_sub_trial_active     ON subscriptions(status, expires_at) WHERE status='TRIAL'`,
+
+    // ── Excluded-from-stats flag for calls ─────────────────────────────────
+    // Lets the operator mark Pulse's own calls as excluded from win-rate
+    // calculations without deleting the row. Used by the one-time April 29+
+    // API-outage migration below, and reusable for any future outage period.
+    // Default 0 = included in stats (normal).
+    `ALTER TABLE calls ADD COLUMN excluded_from_stats INTEGER DEFAULT 0`,
+    `ALTER TABLE calls ADD COLUMN excluded_reason     TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_calls_excluded ON calls(excluded_from_stats) WHERE excluded_from_stats = 1`,
+
+    // ── One-time API-outage exclusion ──────────────────────────────────────
+    // 2026-04-29 00:00 EDT = 2026-04-29 04:00 UTC. Birdeye was out of
+    // credits + wallet polling watcher was disabled + RugCheck not yet wired
+    // — calls during that window were operating on degraded data. Operator
+    // decision: exclude from win-rate stats without deleting the rows.
+    // Guarded by a kv_store flag so it only runs once even if migrations
+    // re-execute on every boot.
+    `INSERT OR IGNORE INTO kv_store (key, value) VALUES ('outage_exclusion_2026_04_29_done', '0')`,
+    `UPDATE calls
+       SET excluded_from_stats = 1,
+           excluded_reason     = 'API_OUTAGE_2026-04-29'
+     WHERE excluded_from_stats = 0
+       AND called_at >= '2026-04-29T04:00:00'
+       AND (SELECT value FROM kv_store WHERE key = 'outage_exclusion_2026_04_29_done') = '0'`,
+    `UPDATE kv_store SET value = '1' WHERE key = 'outage_exclusion_2026_04_29_done'`,
   ];
 
   let added = 0;
@@ -1516,11 +1541,13 @@ export function getCallsLeaderboard(timeframe = 'all') {
   if (timeframe === '24h') whereTime = `AND called_at > datetime('now', '-24 hours')`;
   else if (timeframe === '7d') whereTime = `AND called_at > datetime('now', '-7 days')`;
   else if (timeframe === '30d') whereTime = `AND called_at > datetime('now', '-30 days')`;
+  // EX = exclude API-outage flagged calls from leaderboard math
+  const EX = `AND COALESCE(excluded_from_stats, 0) = 0`;
   try {
     const top = db.prepare(`
       SELECT token, contract_address, market_cap_at_call, peak_mcap, peak_multiple, called_at, outcome
       FROM calls
-      WHERE peak_multiple IS NOT NULL AND outcome = 'WIN' ${whereTime}
+      WHERE peak_multiple IS NOT NULL AND outcome = 'WIN' ${whereTime} ${EX}
       ORDER BY peak_multiple DESC LIMIT 10
     `).all();
     const stats = db.prepare(`
@@ -1531,7 +1558,7 @@ export function getCallsLeaderboard(timeframe = 'all') {
         AVG(CASE WHEN outcome='WIN' THEN peak_multiple END) AS avg_win_multiple,
         MAX(peak_multiple) AS best_multiple
       FROM calls
-      WHERE 1=1 ${whereTime}
+      WHERE 1=1 ${whereTime} ${EX}
     `).get();
     return { top, stats };
   } catch { return { top: [], stats: {} }; }
@@ -1793,13 +1820,17 @@ export function recordSeen(contractAddress, wasPosted = false) {
 // ─── Stats & Analytics ────────────────────────────────────────────────────────
 
 export function getStats() {
+  // EX = standard exclusion filter — drops API_OUTAGE-flagged calls from
+  // headline stats. Excluded rows remain in DB for audit but never show
+  // up in win-rate / total-posted / leaderboard math.
+  const EX = `AND COALESCE(excluded_from_stats, 0) = 0`;
   const totalEvaluated = db.prepare(`SELECT COUNT(*) as n FROM candidates`).get().n;
-  const totalPosted    = db.prepare(`SELECT COUNT(*) as n FROM calls`).get().n;
+  const totalPosted    = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE 1=1 ${EX}`).get().n;
   const last24h        = db.prepare(`SELECT COUNT(*) as n FROM candidates WHERE evaluated_at >= datetime('now', '-24 hours')`).get().n;
-  const last24hPosted  = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE posted_at >= datetime('now', '-24 hours')`).get().n;
-  const pendingCalls   = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome = 'PENDING'`).get().n;
-  const winCount       = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome = 'WIN'`).get().n;
-  const lossCount      = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome = 'LOSS'`).get().n;
+  const last24hPosted  = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE posted_at >= datetime('now', '-24 hours') ${EX}`).get().n;
+  const pendingCalls   = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome = 'PENDING' ${EX}`).get().n;
+  const winCount       = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome = 'WIN' ${EX}`).get().n;
+  const lossCount      = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome = 'LOSS' ${EX}`).get().n;
 
   const ncToday = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE bot_source = 'NEW_COINS'  AND posted_at >= datetime('now', 'start of day')`).get().n;
   const trToday = db.prepare(`SELECT COUNT(*) as n FROM calls WHERE bot_source = 'TRENDING'   AND posted_at >= datetime('now', 'start of day')`).get().n;
@@ -1931,6 +1962,7 @@ export function getHallOfFame({ limit = 20 } = {}) {
       LEFT JOIN candidates ca ON c.candidate_id = ca.id
      WHERE c.peak_multiple IS NOT NULL
        AND c.outcome = 'WIN'
+       AND COALESCE(c.excluded_from_stats, 0) = 0
      ORDER BY c.peak_multiple DESC, c.posted_at DESC
      LIMIT ?
   `).all(limit);

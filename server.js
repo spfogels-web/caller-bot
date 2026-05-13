@@ -342,13 +342,13 @@ async function startOpenAIFineTune(jsonlData) {
 function buildAILearningBar() {
   try {
     const total = (() => {
-      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n; } catch { return 0; }
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE COALESCE(excluded_from_stats,0)=0`).get().n; } catch { return 0; }
     })();
     const resolved = (() => {
-      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL')`).get().n; } catch { return 0; }
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND COALESCE(excluded_from_stats,0)=0`).get().n; } catch { return 0; }
     })();
     const wins = (() => {
-      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'`).get().n; } catch { return 0; }
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN' AND COALESCE(excluded_from_stats,0)=0`).get().n; } catch { return 0; }
     })();
     const winRate = resolved > 0 ? Math.round(wins/resolved*100)+'%' : 'no outcomes yet';
     // AI is always on — no threshold needed
@@ -2983,13 +2983,13 @@ async function handleTopCommand(chatId) {
   try {
     const wins = dbInstance.prepare(`
       SELECT token, score_at_call, market_cap_at_call, pct_change_1h, pct_change_6h, pct_change_24h, called_at
-      FROM calls WHERE outcome = 'WIN'
+      FROM calls WHERE outcome = 'WIN' AND COALESCE(excluded_from_stats,0)=0
       ORDER BY called_at DESC LIMIT 10
     `).all();
 
-    const allCalls = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls`).get().n;
+    const allCalls = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE COALESCE(excluded_from_stats,0)=0`).get().n;
     const winCount = wins.length;
-    const lossCount = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'`).get().n;
+    const lossCount = dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS' AND COALESCE(excluded_from_stats,0)=0`).get().n;
     const winRate = (winCount+lossCount) > 0 ? Math.round(winCount/(winCount+lossCount)*100)+'%' : '—';
 
     // Gem pattern analysis
@@ -3404,7 +3404,7 @@ function buildStatsMessage() {
     const q = getQueueStats();
 
     const resolved = (() => {
-      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL')`).get().n; } catch { return 0; }
+      try { return dbInstance.prepare(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND COALESCE(excluded_from_stats,0)=0`).get().n; } catch { return 0; }
     })();
     const FT_THRESHOLD = 20;
     const ftProgress   = Math.min(resolved, FT_THRESHOLD);
@@ -12341,8 +12341,8 @@ app.get('/api/stats/rolling', (req, res) => {
         // Stage 7 — archived
         archived:       safeCount(`SELECT COUNT(*) as n FROM audit_archive WHERE created_at > datetime('now', ?)`, sqlWindow),
         // Outcomes
-        wins:           safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN' AND called_at > datetime('now', ?)`, sqlWindow),
-        losses:         safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS' AND called_at > datetime('now', ?)`, sqlWindow),
+        wins:           safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'  AND called_at > datetime('now', ?) AND COALESCE(excluded_from_stats,0)=0`, sqlWindow),
+        losses:         safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS' AND called_at > datetime('now', ?) AND COALESCE(excluded_from_stats,0)=0`, sqlWindow),
         // Wallet enrichment
         walletsEnriched: safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE updated_at > datetime('now', ?)`, sqlWindow),
         // Gem-window candidates ($7.5K - $40K)
@@ -12360,9 +12360,9 @@ app.get('/api/stats/rolling', (req, res) => {
       trackedWallets:    safeCount(`SELECT COUNT(*) as n FROM tracked_wallets`),
       whales:            safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE category='WINNER' AND is_blacklist=0`),
       smartMoney:        safeCount(`SELECT COUNT(*) as n FROM tracked_wallets WHERE category='SMART_MONEY' AND is_blacklist=0`),
-      callsResolved:     safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL')`),
-      callsWins:         safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'`),
-      callsLosses:       safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS'`),
+      callsResolved:     safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome IN ('WIN','LOSS','NEUTRAL') AND COALESCE(excluded_from_stats,0)=0`),
+      callsWins:         safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='WIN'  AND COALESCE(excluded_from_stats,0)=0`),
+      callsLosses:       safeCount(`SELECT COUNT(*) as n FROM calls WHERE outcome='LOSS' AND COALESCE(excluded_from_stats,0)=0`),
     };
 
     res.json({ ok: true, windows: out, totals, generatedAt: new Date().toISOString() });
