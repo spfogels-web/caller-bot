@@ -3515,24 +3515,25 @@ async function handleStartCommand(chatId, telegramId)     {
   if (offerTrial) {
     const { buildTrialPhoneRequestKeyboard } = await import('./subscription-engine.js');
     await sendTelegramMessage(chatId,
-      `👋 <b>Welcome to Pulse Caller</b>\n\n` +
-      `Elite Solana micro-cap gem hunter — calls at $8K-$25K MC with a 75% target win rate.\n\n` +
-      `🎁 <b>You qualify for a 48-hour VIP trial</b>\n\n` +
-      `Full access:\n` +
-      `• ⚡ Live calls AT ENTRY (the VIP feed)\n` +
-      `• 🧪 Deep AI analysis on any token\n` +
-      `• 🔍 "Why was this called?" reasoning\n` +
-      `• 🏆 Top calls + bot stats + watchlist\n\n` +
-      `Tap the button below to share your phone and claim your trial. One trial per phone — no abuse.`,
+      `<b>Welcome to Pulse Caller</b>\n` +
+      `Your edge in Solana memecoins.\n\n` +
+      `🎁 <b>You qualify for a 48-hour VIP trial</b> — full access to live calls AT ENTRY, deep AI analysis, and the wallet alpha feed.\n\n` +
+      `Tap below to claim. One trial per phone.`,
       { reply_markup: buildTrialPhoneRequestKeyboard() }
     );
     return;
   }
 
-  await sendTelegramMessage(chatId,
-    `👋 <b>Welcome back to Pulse Caller</b>\n\n` +
-    `Tap any button below to get started:`,
-    { reply_markup: buildMainMenuKeyboard() }
+  await sendTelegramMessage(chatId, buildWelcomeCard(), { reply_markup: buildMainMenuKeyboard() });
+}
+
+// Branded welcome card — matches the menu hub design across /start and /menu.
+function buildWelcomeCard() {
+  return (
+    `<b>Welcome to Pulse Caller</b>\n` +
+    `<i>Your edge in Solana memecoins.</i>\n\n` +
+    `Tap a menu below to get started — or type /help.\n\n` +
+    `<code>▲ MAIN MENU · 9 OPTIONS · ONE TAP DEEP</code>`
   );
 }
 async function handleHelpCommand(chatId)      { await sendTelegramMessage(chatId, buildHelpMessage(), { reply_markup: buildMainMenuKeyboard() }); }
@@ -3549,8 +3550,8 @@ async function handleMenuCommand(chatId, telegramId)      {
     } catch {}
   }
   const intro = isNewUser
-    ? `📱 <b>Pulse Caller Menu</b>\n\n🎁 <b>You qualify for a 48h VIP trial</b> — tap /start to claim it.\n\nOr pick from the buttons below:`
-    : `📱 <b>Pulse Caller Menu</b>\n\nTap any option below:`;
+    ? buildWelcomeCard() + `\n\n🎁 <b>Tap /start to claim your free 48h VIP trial.</b>`
+    : buildWelcomeCard();
   await sendTelegramMessage(chatId, intro, { reply_markup: buildMainMenuKeyboard() });
 }
 async function handleStatsCommand(chatId)     { await sendTelegramMessage(chatId, buildStatsMessage()); }
@@ -3871,34 +3872,91 @@ function buildMainMenuKeyboard() {
   return {
     inline_keyboard: [
       [
-        { text: '💎 Subscribe VIP',  callback_data: 'menu:subscribe' },
-        { text: '✅ My VIP Status',  callback_data: 'menu:vip' },
+        { text: '🧪 Analyze Token',     callback_data: 'menu:analyze_prompt' },
+        { text: '🔥 Live Calls',        callback_data: 'menu:livecalls_open' },
       ],
       [
-        { text: '🏆 Top Calls',      callback_data: 'menu:top' },
-        { text: '📞 Recent Calls',   callback_data: 'menu:calls' },
+        { text: '🏆 Leaderboards',      callback_data: 'menu:lb_open' },
+        { text: '💼 My Portfolio',      callback_data: 'menu:portfolio_open' },
       ],
       [
-        { text: '📊 Leaderboards',   callback_data: 'menu:lb_open' },
+        { text: '🚨 Alerts',            callback_data: 'menu:alerts_open' },
+        { text: '🐋 Wallet Tracking',   callback_data: 'menu:wallets_open' },
       ],
       [
-        { text: '💼 My Portfolio',   callback_data: 'menu:portfolio_open' },
-        { text: '👤 My Profile',     callback_data: 'menu:profile' },
+        { text: '🌐 Market Intel',      callback_data: 'menu:intel_open' },
+        { text: '💎 Upgrade to Pro',    callback_data: 'menu:upgrade_open' },
       ],
       [
-        { text: '🔔 Alerts',         callback_data: 'menu:alerts_open' },
-        { text: '👁 Watchlist',      callback_data: 'menu:watchlist' },
+        { text: '❓ Help',              callback_data: 'menu:help' },
+      ],
+    ],
+  };
+}
+
+// ── Live Calls submenu (premium tier) ─────────────────────────────────────
+// Top recent calls, full call feed, "why was this called?", active watchlist.
+function buildLiveCallsSubmenu() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🏆 Top Recent Wins',   callback_data: 'menu:top' },
+        { text: '📞 Last 5 Calls',      callback_data: 'menu:calls' },
       ],
       [
-        { text: '🔍 Why Was It Called?', callback_data: 'menu:why_prompt' },
+        { text: '🔍 Why Called?',       callback_data: 'menu:why_prompt' },
+        { text: '👁 Active Watchlist',  callback_data: 'menu:watchlist' },
+      ],
+      [{ text: '⬅ Back to Menu', callback_data: 'menu:main' }],
+    ],
+  };
+}
+
+// ── Wallet Tracking submenu (premium tier) ────────────────────────────────
+// Track, untrack, list my wallets — wallet alpha tools.
+function buildWalletTrackingSubmenu() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '➕ Track a Wallet',     callback_data: 'menu:track_prompt' },
+        { text: '📋 My Tracked Wallets', callback_data: 'menu:mywallets' },
       ],
       [
-        { text: '🧪 Analyze Token',  callback_data: 'menu:analyze_prompt' },
-        { text: '📈 Bot Stats',      callback_data: 'menu:stats' },
+        { text: '➖ Untrack a Wallet',   callback_data: 'menu:untrack_prompt' },
+      ],
+      [{ text: '⬅ Back to Menu', callback_data: 'menu:main' }],
+    ],
+  };
+}
+
+// ── Market Intel submenu (premium tier) ───────────────────────────────────
+// Bot performance stats, current market regime, hall of fame.
+function buildMarketIntelSubmenu() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '📊 Bot Stats',         callback_data: 'menu:stats' },
+        { text: '🌐 Market Regime',     callback_data: 'menu:regime' },
       ],
       [
-        { text: '❓ Help',           callback_data: 'menu:help' },
+        { text: '🔬 Deep Scan a Coin',  callback_data: 'menu:scan_prompt' },
       ],
+      [{ text: '⬅ Back to Menu', callback_data: 'menu:main' }],
+    ],
+  };
+}
+
+// ── Upgrade to Pro submenu — VIP membership flow ─────────────────────────
+function buildUpgradeSubmenu() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '💎 Subscribe Now',     callback_data: 'menu:subscribe' },
+      ],
+      [
+        { text: '✅ My Subscription',   callback_data: 'menu:vip' },
+      ],
+      [{ text: '⬅ Back to Menu', callback_data: 'menu:main' }],
     ],
   };
 }
@@ -14337,25 +14395,76 @@ app.post('/webhook', async (req, res) => {
 
           // Branch on action — most run an existing command handler
           if (action === 'main') {
-            await editMenuTo(
-              `📱 <b>Pulse Caller Menu</b>\n\nTap any option below:`,
-              buildMainMenuKeyboard(),
-            );
+            await editMenuTo(buildWelcomeCard(), buildMainMenuKeyboard());
           } else if (action === 'lb_open') {
             await editMenuTo(
-              `📊 <b>Leaderboards</b>\n\nPick a window:`,
+              `🏆 <b>Leaderboards</b>\n<i>See who's calling the best plays.</i>\n\nPick a window — Group LB is community calls, Pulse LB is the bot's track record.`,
               buildLeaderboardSubmenu(),
             );
           } else if (action === 'portfolio_open') {
             await editMenuTo(
-              `💼 <b>Your Portfolio</b>\n\nTrack coins you bought, with live P&amp;L:`,
+              `💼 <b>My Portfolio</b>\n<i>Track coins you bought, with live P&amp;L.</i>`,
               buildPortfolioSubmenu(),
             );
           } else if (action === 'alerts_open') {
             await editMenuTo(
-              `🔔 <b>Price Alerts</b>\n\nGet DMed when a coin hits your target:`,
+              `🚨 <b>Alerts</b>\n<i>Get DMed when a coin hits your target.</i>`,
               buildAlertsSubmenu(),
             );
+          } else if (action === 'livecalls_open') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔥 Live Calls'); return; }
+            await editMenuTo(
+              `🔥 <b>Live Calls</b>\n<i>The bot's recent plays + reasoning.</i>`,
+              buildLiveCallsSubmenu(),
+            );
+          } else if (action === 'wallets_open') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Wallet Tracking'); return; }
+            await editMenuTo(
+              `🐋 <b>Wallet Tracking</b>\n<i>Add wallets to Pulse's smart-money DB. The more good wallets, the better the calls.</i>`,
+              buildWalletTrackingSubmenu(),
+            );
+          } else if (action === 'intel_open') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🌐 Market Intel'); return; }
+            await editMenuTo(
+              `🌐 <b>Market Intel</b>\n<i>Bot performance, regime, and deep-scan tools.</i>`,
+              buildMarketIntelSubmenu(),
+            );
+          } else if (action === 'upgrade_open') {
+            await editMenuTo(
+              `💎 <b>Upgrade to Pro</b>\n<i>Get the calls AT ENTRY, not after 2× confirmation.</i>\n\n` +
+              `• ⚡ Live calls the moment they fire\n` +
+              `• 🧪 Deep AI analysis on any token\n` +
+              `• 🔍 "Why was this called?" reasoning\n` +
+              `• 🐋 Wallet tracking + watchlist\n` +
+              `• 📊 Full bot stats + market regime\n\n` +
+              `<b>$89 / 30 days · Solana Pay</b>`,
+              buildUpgradeSubmenu(),
+            );
+          } else if (action === 'regime') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🌐 Market Regime'); return; }
+            await handleRegimeCommand(chatId);
+          } else if (action === 'scan_prompt') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔬 Deep Scan'); return; }
+            await replyNew(
+              `🔬 <b>Deep Scan</b>\n\nReply with: <code>/scan &lt;CA or $TICKER&gt;</code>`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'track_prompt') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Track a Wallet'); return; }
+            await replyNew(
+              `🐋 <b>Track a wallet</b>\n\nReply with: <code>/track &lt;wallet address&gt;</code>\n\n` +
+              `That wallet's buys feed Pulse's smart-money signals. More good wallets = better calls.`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'untrack_prompt') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Untrack a Wallet'); return; }
+            await replyNew(
+              `🐋 <b>Untrack a wallet</b>\n\nReply with: <code>/untrack &lt;wallet address&gt;</code>`,
+              buildBackToMenuKeyboard(),
+            );
+          } else if (action === 'mywallets') {
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 My Tracked Wallets'); return; }
+            await handleTrackWalletCommand(chatId, 'list', tgUserId, tgUsername || cbq.from?.first_name);
           } else if (action === 'subscribe') {
             const { handleSubscribeRequest } = await import('./subscription-engine.js');
             const res = await handleSubscribeRequest({ telegramId: tgUserId, username: tgUsername, chatId });
