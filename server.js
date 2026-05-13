@@ -7331,7 +7331,12 @@ function readEnvFlexible(target) {
 }
 const DASHBOARD_USER     = (readEnvFlexible('DASHBOARD_USER')     || 'admin').trim();
 const DASHBOARD_PASSWORD = (readEnvFlexible('DASHBOARD_PASSWORD') || '').trim();
-const AUTH_BYPASS = new Set(['/webhook', '/webhook/helius']);
+// Helius pushes to /api/helius/webhook (not /webhook/helius). The Telegram
+// bot posts to /webhook. Both need to bypass dashboard Basic Auth — external
+// services can't send Basic Auth credentials. THIS BUG SILENCED THE WEBHOOK
+// FOR 14 DAYS — Helius events were being 401'd by the dashboard middleware
+// before reaching the actual webhook handler.
+const AUTH_BYPASS = new Set(['/webhook', '/api/helius/webhook']);
 
 function safeStrEq(a, b) {
   const ab = Buffer.from(a, 'utf8');
