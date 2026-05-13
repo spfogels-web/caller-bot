@@ -279,59 +279,96 @@ async function enrichWithBirdeye(ca) {
   return result;
 }
 
-// Birdeye with one retry for very new tokens
-async function enrichWithBirdeyeWithRetry(ca, pairAgeHours) {
-  let result = await enrichWithBirdeye(ca);
+// ─── Enrichment fallback chain (cost-optimized 2026-05-13) ───────────────
+// Old order: Birdeye → DexScreener → RugCheck (Birdeye burned $99/mo even
+//            though free tier covered 95% of needs)
+// New order: DexScreener → RugCheck → Birdeye (Birdeye only fires when
+//            free sources don't fill the required fields)
+//
+// This cuts Birdeye usage by ~95-99% — most candidates never hit Birdeye
+// at all because DexScreener has the market data and RugCheck has the
+// security data. Birdeye only kicks in as a gap-filler for:
+//   1. Brand-new tokens DexScreener hasn't indexed yet
+//   2. Security data when RugCheck rate-limits
+//   3. Holder count (which neither free source provides)
+//
+// Set BIRDEYE_TIER_GATE_QSCORE in env to skip Birdeye for low-conviction
+// candidates entirely (e.g. =40 means only candidates scoring 40+ get
+// the Birdeye fallback fired).
+async function enrichWithBirdeyeWithRetry(ca, pairAgeHours, candidate = null) {
+  // Result accumulator — DexScreener fills it first, RugCheck fills security
+  // gaps, Birdeye only fires last resort.
+  let result = { birdeyeOk: false };
 
-  // If Birdeye failed and token is under 30min, wait 2s and try once more —
-  // Birdeye sometimes needs a moment to index brand new tokens
-  if (!result.birdeyeOk && pairAgeHours != null && pairAgeHours < 0.5) {
-    console.log('[enricher:birdeye] Retrying for new token in 2s...');
-    await new Promise(r => setTimeout(r, 2000));
-    result = await enrichWithBirdeye(ca);
+  // 1️⃣ DexScreener — FREE market data (always tried first)
+  const dex = await enrichWithDexScreener(ca);
+  if (dex.dexscreenerOk) {
+    Object.assign(result, dex);
+    result.birdeyeOk = true;  // pipeline gates on this — keep truthy
+    result._marketDataSource = 'dexscreener';
   }
 
-  // ── DexScreener fallback (free, no key) — MARKET DATA ────────────────
-  // Kicks in when Birdeye returns nothing — no key, out of credits, 401,
-  // or token not yet indexed. Provides market data only (price, mcap, liq,
-  // volume, %-change, symbol/name).
-  if (!result.birdeyeOk) {
-    const dex = await enrichWithDexScreener(ca);
-    if (dex.dexscreenerOk) {
-      Object.assign(result, dex);
-      result.birdeyeOk = true;             // pipeline gates on this — keep it true
-      result._marketDataSource = 'dexscreener';
+  // 2️⃣ RugCheck — FREE security data (top10, dev%, mint/freeze, LP)
+  const rug = await enrichWithRugCheck(ca);
+  if (rug.rugcheckOk) {
+    for (const key of ['top10HolderPct', 'devWalletPct', 'freezeAuthority',
+                        'mintAuthority', 'lpBurnedPct', 'lpLockedPct',
+                        'lpUnlockAtSec', 'lpLocked', 'lpSecurityStatus',
+                        'rugcheckScore', 'rugcheckRisks', 'rugcheckCreator']) {
+      if (result[key] == null || result[key] === 'UNKNOWN') {
+        result[key] = rug[key];
+      }
     }
-  } else {
-    result._marketDataSource = 'birdeye';
+    result._securityDataSource = 'rugcheck';
   }
 
-  // ── RugCheck fallback (free, no key) — SECURITY DATA ─────────────────
-  // Fills the security-data gap when Birdeye is dead. Provides top10
-  // holder %, dev wallet %, freeze/mint authority, and LP burn/lock —
-  // the fields the scorer needs to actually catch rugs. Only fires when
-  // those fields are still missing after Birdeye + DexScreener.
+  // 3️⃣ Birdeye — PAID last-resort, only fires when free sources missed
+  //    critical data. Score-gated via BIRDEYE_TIER_GATE_QSCORE so we don't
+  //    spend credits on low-conviction candidates.
+  const marketMissing = result.priceUsd == null || result.marketCap == null;
   const securityMissing = result.top10HolderPct == null
-                       || result.devWalletPct   == null
                        || result.lpSecurityStatus == null
                        || result.lpSecurityStatus === 'UNKNOWN';
-  if (securityMissing) {
-    const rug = await enrichWithRugCheck(ca);
-    if (rug.rugcheckOk) {
-      // Only set fields the upstream sources didn't already provide —
-      // never overwrite a Birdeye value with a RugCheck one.
-      for (const key of ['top10HolderPct', 'devWalletPct', 'freezeAuthority',
+  const holdersMissing = result.holders == null;
+
+  const tierGate = Number(process.env.BIRDEYE_TIER_GATE_QSCORE || 0);
+  const candidateScore = Number(candidate?.quickScore ?? candidate?.compositeScore ?? 50);
+  const tierGatePassed = tierGate <= 0 || candidateScore >= tierGate;
+
+  const shouldHitBirdeye = (marketMissing || securityMissing || holdersMissing)
+                         && getBirdeyeKey()
+                         && tierGatePassed;
+
+  if (shouldHitBirdeye) {
+    let bird = await enrichWithBirdeye(ca);
+    // One retry for brand-new tokens (Birdeye sometimes needs a moment to index)
+    if (!bird.birdeyeOk && pairAgeHours != null && pairAgeHours < 0.5) {
+      console.log('[enricher:birdeye] Retrying for new token in 2s...');
+      await new Promise(r => setTimeout(r, 2000));
+      bird = await enrichWithBirdeye(ca);
+    }
+    if (bird.birdeyeOk) {
+      // Overlay Birdeye's data only on fields still missing — don't waste
+      // it overwriting DexScreener's freshly-fetched market data.
+      for (const key of ['holders', 'holderGrowth24h', 'priceChange6h',
+                          'top10HolderPct', 'devWalletPct', 'freezeAuthority',
                           'mintAuthority', 'lpBurnedPct', 'lpLockedPct',
-                          'lpUnlockAtSec', 'lpLocked', 'lpSecurityStatus',
-                          'rugcheckScore', 'rugcheckRisks', 'rugcheckCreator']) {
+                          'lpUnlockAtSec', 'lpLocked', 'lpSecurityStatus']) {
         if (result[key] == null || result[key] === 'UNKNOWN') {
-          result[key] = rug[key];
+          result[key] = bird[key];
         }
       }
-      result._securityDataSource = 'rugcheck';
+      // Birdeye is the priciest source — track separately so the operator
+      // can see how often it's actually being hit
+      if (!result._marketDataSource)   result._marketDataSource   = 'birdeye-fallback';
+      if (!result._securityDataSource) result._securityDataSource = 'birdeye-fallback';
+      result._birdeyeUsed = true;
     }
-  } else {
-    result._securityDataSource = 'birdeye';
+  } else if (!shouldHitBirdeye && (marketMissing || securityMissing || holdersMissing)) {
+    // Couldn't fill the gaps but Birdeye is gated off (no key, or score
+    // below tier gate). Pipeline still runs on partial data — fields
+    // stay null and the scorer tolerates that.
+    result._birdeyeSkipped = !tierGatePassed ? 'tier-gate' : 'no-key';
   }
 
   return result;
@@ -1229,7 +1266,7 @@ export async function enrichCandidate(candidate) {
     : Promise.resolve({ lunarCrushOk: false });
 
   const [birdeyeData, heliusData, bubblemapData, lunarData] = await Promise.all([
-    enrichWithBirdeyeWithRetry(ca, candidate.pairAgeHours ?? ageHours),
+    enrichWithBirdeyeWithRetry(ca, candidate.pairAgeHours ?? ageHours, candidate),
     enrichWithHelius(ca, pairAddress, candidate),
     bubblemapPromise,
     lunarPromise,
