@@ -2767,6 +2767,7 @@ function buildHelpMessage() {
   return (
     `<b>🐺 PULSE CALLER — Help Menu</b>\n\n` +
     `Tap /menu for the button interface.\n\n` +
+    `🎁 <b>NEW USERS:</b> tap /start to claim your 48-hour VIP trial (one per phone, full access).\n\n` +
     `<b>🆓 FREE TIER</b> — works for everyone\n` +
     `<code>/lb [24h|7d|30d|all]</code> — Group leaderboard\n` +
     `<code>/pulselb [24h|7d|30d|all]</code> — Pulse's own top calls\n` +
@@ -3515,11 +3516,22 @@ async function handleStartCommand(chatId, telegramId)     {
   );
 }
 async function handleHelpCommand(chatId)      { await sendTelegramMessage(chatId, buildHelpMessage(), { reply_markup: buildMainMenuKeyboard() }); }
-async function handleMenuCommand(chatId)      {
-  await sendTelegramMessage(chatId,
-    `📱 <b>Pulse Caller Menu</b>\n\nTap any option below:`,
-    { reply_markup: buildMainMenuKeyboard() }
-  );
+async function handleMenuCommand(chatId, telegramId)      {
+  // Check if user has any subscription history. If not, show trial offer
+  // alongside the menu so they discover the 48h trial here too.
+  let isNewUser = false;
+  if (telegramId) {
+    try {
+      const existing = dbInstance.prepare(
+        `SELECT 1 FROM subscriptions WHERE telegram_id = ? LIMIT 1`
+      ).get(String(telegramId));
+      isNewUser = !existing;
+    } catch {}
+  }
+  const intro = isNewUser
+    ? `📱 <b>Pulse Caller Menu</b>\n\n🎁 <b>You qualify for a 48h VIP trial</b> — tap /start to claim it.\n\nOr pick from the buttons below:`
+    : `📱 <b>Pulse Caller Menu</b>\n\nTap any option below:`;
+  await sendTelegramMessage(chatId, intro, { reply_markup: buildMainMenuKeyboard() });
 }
 async function handleStatsCommand(chatId)     { await sendTelegramMessage(chatId, buildStatsMessage()); }
 async function handleCallsCommand(chatId)     { await sendTelegramMessage(chatId, buildRecentCallsMessage()); }
@@ -14255,10 +14267,17 @@ app.post('/webhook', async (req, res) => {
           const chatId     = msgRef.chat.id;
           const action     = arg;
 
+          // Preserve the topic/thread the user clicked in — required for
+          // supergroups with forum topics (e.g. #General, #Trench Calls).
+          // Without this, replies leak to the General topic regardless of
+          // where the button was tapped, making it LOOK like the button
+          // didn't work.
+          const threadId = msgRef.message_thread_id ?? null;
+
           // Submenu navigation — edit the current message's keyboard
           const editMenuTo = async (text, keyboard) => {
             try {
-              await fetch(`${TELEGRAM_API}/editMessageText`, {
+              const r = await fetch(`${TELEGRAM_API}/editMessageText`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   chat_id: chatId, message_id: msgRef.message_id,
@@ -14267,23 +14286,33 @@ app.post('/webhook', async (req, res) => {
                 }),
                 signal: AbortSignal.timeout(8_000),
               });
-            } catch {}
+              if (!r.ok) {
+                const body = await r.text().catch(() => '');
+                console.warn(`[menu] editMenuTo failed: ${r.status} ${body.slice(0,200)}`);
+              }
+            } catch (err) { console.warn(`[menu] editMenuTo err: ${err.message}`); }
           };
 
-          // Helper: send a fresh message in response to the button tap
+          // Helper: send a fresh message in response to the button tap.
+          // Posts to the same topic/thread the button was tapped in.
           const replyNew = async (text, keyboard) => {
             const body = {
               chat_id: chatId, text, parse_mode: 'HTML',
               disable_web_page_preview: true,
             };
+            if (threadId) body.message_thread_id = threadId;
             if (keyboard) body.reply_markup = keyboard;
             try {
-              await fetch(`${TELEGRAM_API}/sendMessage`, {
+              const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
                 signal: AbortSignal.timeout(8_000),
               });
-            } catch {}
+              if (!r.ok) {
+                const body2 = await r.text().catch(() => '');
+                console.warn(`[menu] replyNew failed: ${r.status} ${body2.slice(0,200)}`);
+              }
+            } catch (err) { console.warn(`[menu] replyNew err: ${err.message}`); }
           };
 
           // Branch on action — most run an existing command handler
@@ -14654,7 +14683,7 @@ app.post('/webhook', async (req, res) => {
   try {
     switch (command) {
       case '/start':     await handleStartCommand(chatId, fromId);      break;
-      case '/menu':      await handleMenuCommand(chatId);               break;
+      case '/menu':      await handleMenuCommand(chatId, fromId);       break;
       case '/help':      await handleHelpCommand(chatId);               break;
       // ── PREMIUM (VIP-only) ──
       case '/analyze':   isUserVip(fromId) ? await handleAnalyzeCommand(chatId, args)   : await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis'); break;
