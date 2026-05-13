@@ -926,6 +926,28 @@ function runMigrations() {
        AND called_at >= '2026-04-29T04:00:00'
        AND (SELECT value FROM kv_store WHERE key = 'outage_exclusion_2026_04_29_done') = '0'`,
     `UPDATE kv_store SET value = '1' WHERE key = 'outage_exclusion_2026_04_29_done'`,
+
+    // ── Mirror the exclusion onto audit_archive ────────────────────────────
+    // audit_archive is a separate table that powers the dashboard's Calls
+    // tab (via /api/archive). Without flagging it too, the headline tiles
+    // (Total Calls, Last 100 / 50 / 25 / 10, Win Rate, etc.) keep showing
+    // the outage-period calls because the dashboard computes stats from
+    // the archive rows client-side.
+    `ALTER TABLE audit_archive ADD COLUMN excluded_from_stats INTEGER DEFAULT 0`,
+    `ALTER TABLE audit_archive ADD COLUMN excluded_reason     TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_archive_excluded ON audit_archive(excluded_from_stats) WHERE excluded_from_stats = 1`,
+    `INSERT OR IGNORE INTO kv_store (key, value) VALUES ('outage_archive_exclusion_2026_04_29_done', '0')`,
+    // Flag by matching contract_address — every call in `calls` with the
+    // outage flag also flags its archive row(s). Idempotent via kv_store.
+    `UPDATE audit_archive
+       SET excluded_from_stats = 1,
+           excluded_reason     = 'API_OUTAGE_2026-04-29'
+     WHERE excluded_from_stats = 0
+       AND contract_address IN (
+         SELECT DISTINCT contract_address FROM calls WHERE excluded_from_stats = 1
+       )
+       AND (SELECT value FROM kv_store WHERE key = 'outage_archive_exclusion_2026_04_29_done') = '0'`,
+    `UPDATE kv_store SET value = '1' WHERE key = 'outage_archive_exclusion_2026_04_29_done'`,
   ];
 
   let added = 0;

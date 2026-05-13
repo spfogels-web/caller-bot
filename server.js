@@ -17270,7 +17270,10 @@ function loadWalletsFromDB() {
 app.get('/api/archive', (req, res) => {
   setCors(res);
   try {
-    const { decision, limit = 1000, offset = 0, search, minScore } = req.query;
+    const { decision, limit = 1000, offset = 0, search, minScore, includeExcluded } = req.query;
+    // By default, hide rows flagged as excluded (API_OUTAGE periods). Pass
+    // ?includeExcluded=1 to see the full unfiltered archive (audit only).
+    const showExcluded = ['1', 'true', 'yes'].includes(String(includeExcluded).toLowerCase());
     let q = `SELECT id, contract_address, token, token_name, final_decision, composite_score,
                market_cap, liquidity, volume_1h, volume_24h, pair_age_hours, stage,
                buy_ratio_1h, buys_1h, sells_1h, volume_velocity, bundle_risk, sniper_count,
@@ -17278,17 +17281,26 @@ app.get('/api/archive', (req, res) => {
                claude_verdict, claude_risk, claude_setup_type, openai_decision, openai_conviction,
                narrative_tags, structure_grade, trap_severity, bonding_curve_pct,
                twitter, website, telegram, holder_count, sub_scores, called_at_et, created_at,
-               outcome, peak_multiple, peak_mcap, peak_at, outcome_locked_at
+               outcome, peak_multiple, peak_mcap, peak_at, outcome_locked_at,
+               COALESCE(excluded_from_stats, 0) AS excluded_from_stats, excluded_reason
              FROM audit_archive WHERE 1=1`;
     const params = [];
+    if (!showExcluded) q += ` AND COALESCE(excluded_from_stats, 0) = 0`;
     if (decision) { q += ` AND final_decision=?`; params.push(decision); }
     if (search)   { q += ` AND (token LIKE ? OR contract_address LIKE ?)`; params.push('%'+search+'%','%'+search+'%'); }
     if (minScore) { q += ` AND composite_score >= ?`; params.push(Number(minScore)); }
     q += ` ORDER BY id DESC LIMIT ? OFFSET ?`;
     params.push(parseInt(limit), parseInt(offset));
     const rows  = dbInstance.prepare(q).all(...params);
-    const total = dbInstance.prepare(`SELECT COUNT(*) as n FROM audit_archive`).get().n;
-    const byDec = dbInstance.prepare(`SELECT final_decision, COUNT(*) as n FROM audit_archive GROUP BY final_decision`).all();
+    // Totals respect the same exclusion filter so the headline "X total" is honest
+    const totalQuery = showExcluded
+      ? `SELECT COUNT(*) as n FROM audit_archive`
+      : `SELECT COUNT(*) as n FROM audit_archive WHERE COALESCE(excluded_from_stats, 0) = 0`;
+    const byDecQuery = showExcluded
+      ? `SELECT final_decision, COUNT(*) as n FROM audit_archive GROUP BY final_decision`
+      : `SELECT final_decision, COUNT(*) as n FROM audit_archive WHERE COALESCE(excluded_from_stats, 0) = 0 GROUP BY final_decision`;
+    const total = dbInstance.prepare(totalQuery).get().n;
+    const byDec = dbInstance.prepare(byDecQuery).all();
     res.json({ ok: true, rows, total, byDecision: Object.fromEntries(byDec.map(r=>[r.final_decision,r.n])) });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
