@@ -15720,6 +15720,124 @@ const _walletWatcherDiagHandler = async (req, res) => {
   }
 };
 app.get('/api/diagnostics/wallet-watcher',  _walletWatcherDiagHandler);
+
+// Wallet leaderboard — ranks tracked wallets by their contribution to Pulse's
+// wins. Joins wallet_activity (every detected wallet buy) with calls
+// (Pulse's own calls + outcomes) to compute per-wallet hit rates within
+// any date range. Use this to:
+//   - See who's driving alpha → promote to higher tier
+//   - Identify counter-indicators (high losses, low wins) → blacklist
+//   - Attribute specific wins to specific wallets (e.g. April 26-27 winners)
+//
+// Query params:
+//   ?since=YYYY-MM-DD  start date (default: 7 days ago)
+//   ?until=YYYY-MM-DD  end date EXCLUSIVE (default: now)
+//   ?minWins=N         only include wallets with >= N wins in period (default 1)
+//   ?limit=N           cap rows returned (default 30)
+const _walletLeaderboardHandler = (req, res) => {
+  setCors(res);
+  try {
+    const since = req.query.since && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
+      ? req.query.since : null;
+    const until = req.query.until && /^\d{4}-\d{2}-\d{2}$/.test(req.query.until)
+      ? req.query.until : null;
+    const minWins = Math.max(1, Number(req.query.minWins ?? 1));
+    const limit   = Math.min(100, Math.max(5, Number(req.query.limit ?? 30)));
+
+    const dateClauseCalls = [
+      since ? `AND c.called_at >= '${since}'` : '',
+      until ? `AND c.called_at <  '${until}'` : '',
+    ].join(' ');
+
+    // Join wallet_activity → calls so we see which wallets bought coins we
+    // called within the window. wallet_activity contains every detected
+    // tracked-wallet buy from the polling watcher (April 28 and earlier).
+    // For post-webhook data, wallet_events covers the same purpose.
+    const sql = `
+      WITH wallet_picks AS (
+        SELECT
+          wa.wallet_address                                  AS address,
+          wa.token_mint                                      AS contract_address,
+          c.token                                            AS token,
+          c.outcome                                          AS outcome,
+          c.peak_multiple                                    AS peak_multiple,
+          c.called_at                                        AS called_at
+        FROM wallet_activity wa
+        JOIN calls c ON c.contract_address = wa.token_mint
+        WHERE c.outcome IN ('WIN','LOSS','NEUTRAL','PENDING')
+          ${dateClauseCalls}
+        GROUP BY wa.wallet_address, wa.token_mint
+      )
+      SELECT
+        wp.address,
+        COALESCE(tw.category, '?')          AS category,
+        ROUND(tw.sol_balance, 2)            AS sol_balance,
+        tw.our_win_count                    AS lifetime_wins,
+        ROUND(tw.our_avg_win_multiple, 2)   AS lifetime_avg_peak,
+        COUNT(DISTINCT wp.contract_address) AS picks_in_period,
+        SUM(CASE WHEN wp.outcome='WIN'  THEN 1 ELSE 0 END) AS wins_in_period,
+        SUM(CASE WHEN wp.outcome='LOSS' THEN 1 ELSE 0 END) AS losses_in_period,
+        ROUND(AVG(CASE WHEN wp.outcome='WIN' THEN wp.peak_multiple END), 2) AS avg_win_peak,
+        ROUND(MAX(wp.peak_multiple), 2)     AS best_peak_in_period
+      FROM wallet_picks wp
+      LEFT JOIN tracked_wallets tw ON tw.address = wp.address
+      GROUP BY wp.address
+      HAVING wins_in_period >= ${minWins}
+      ORDER BY wins_in_period DESC, avg_win_peak DESC NULLS LAST
+      LIMIT ${limit}
+    `;
+
+    const rows = dbInstance.prepare(sql).all().map(r => ({
+      ...r,
+      hit_rate_pct: (r.wins_in_period + r.losses_in_period) > 0
+        ? Math.round(r.wins_in_period * 100 / (r.wins_in_period + r.losses_in_period))
+        : null,
+    }));
+
+    // Top 25 wins in the period with the wallets that bought them (so the
+    // operator can see "the wallets that bought $SCAM at $22K")
+    const topWinsWithBuyers = dbInstance.prepare(`
+      SELECT
+        c.token,
+        c.contract_address,
+        ROUND(c.market_cap_at_call, 0) AS mcap_at_call,
+        ROUND(c.peak_multiple, 2)      AS peak_multiple,
+        c.called_at,
+        (
+          SELECT GROUP_CONCAT(wa.wallet_address, ',')
+          FROM (
+            SELECT DISTINCT wallet_address
+            FROM wallet_activity
+            WHERE token_mint = c.contract_address
+          ) wa
+        ) AS buyer_addresses
+      FROM calls c
+      WHERE c.outcome = 'WIN'
+        AND c.peak_multiple >= 2
+        ${dateClauseCalls}
+      ORDER BY c.peak_multiple DESC
+      LIMIT 25
+    `).all().map(r => ({
+      ...r,
+      buyer_addresses: r.buyer_addresses ? r.buyer_addresses.split(',').slice(0, 10) : [],
+      buyer_count: r.buyer_addresses ? r.buyer_addresses.split(',').length : 0,
+    }));
+
+    // Summary
+    const summary = {
+      since:           since || '7d ago',
+      until:           until || 'now',
+      wallets_returned: rows.length,
+      total_wins_in_period_attributed: rows.reduce((s, r) => s + (r.wins_in_period || 0), 0),
+    };
+
+    res.json({ ok: true, summary, top_wallets: rows, top_wins_with_buyers: topWinsWithBuyers });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.get('/api/diagnostics/wallet-leaderboard',  _walletLeaderboardHandler);
+app.post('/api/diagnostics/wallet-leaderboard', _walletLeaderboardHandler);
 app.post('/api/diagnostics/wallet-watcher', _walletWatcherDiagHandler);
 
 // Leaderboard banner diagnostic — operator reported the /lb banner stopped
