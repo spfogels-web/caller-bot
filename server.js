@@ -17364,12 +17364,21 @@ app.get('/api/exit-monitor/stats', (req, res) => {
 app.post('/api/helius/webhook', express.json({ limit: '10mb' }), (req, res) => {
   setCors(res);
 
+  // DEBUG LOGGING — emits a line for EVERY incoming hit so we can see
+  // whether Helius is actually reaching us. Includes the auth header
+  // preview (first 12 chars only) so we can spot mismatches without
+  // leaking the secret to logs.
+  const authPreview = (req.headers.authorization || req.headers['x-auth-token'] || '').toString().slice(0, 12);
+  const bodyLen = Array.isArray(req.body) ? req.body.length : 0;
+  const expectedPreview = (process.env.HELIUS_WEBHOOK_SECRET || '').slice(0, 12);
+  console.log(`[helius-wh] 📥 hit: auth="${authPreview}..." expected="${expectedPreview}..." body_len=${bodyLen} user-agent="${(req.headers['user-agent'] || '').slice(0,40)}"`);
+
   // Optional auth check
   if (process.env.HELIUS_WEBHOOK_SECRET) {
     const expected = process.env.HELIUS_WEBHOOK_SECRET;
     const got = req.headers.authorization || req.headers['x-auth-token'] || '';
     if (got !== expected && got !== `Bearer ${expected}`) {
-      console.warn('[helius-wh] Auth header mismatch — rejecting');
+      console.warn(`[helius-wh] 🛑 Auth header mismatch — rejecting. got_len=${got.length} expected_len=${expected.length}`);
       return res.status(401).json({ ok: false, error: 'Auth header missing or wrong' });
     }
   }
