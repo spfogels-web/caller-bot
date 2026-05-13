@@ -243,11 +243,24 @@ async function tick() {
   // KOL wallets are processed FIRST every tick. A single KOL buy always
   // emits an alert (bypass cluster threshold + cooldown — these public
   // alpha wallets each have 60%+ micro-cap hit rates).
-  const kolList = getKolWallets().map(addr => ({
+  //
+  // Two sources of KOL identity:
+  //   1. KOL_WALLETS env var (hardcoded by operator)
+  //   2. tracked_wallets.is_kol_tier = 1 (auto-promoted by perf, OR set via
+  //      /kol admin command OR the wallet-leaderboard promote endpoint)
+  const envKols = getKolWallets();
+  let dbKols = [];
+  try {
+    const rows = _db.prepare(
+      `SELECT address FROM tracked_wallets WHERE is_kol_tier = 1`
+    ).all();
+    dbKols = rows.map(r => r.address);
+  } catch {}
+  const kolAddrsSet = new Set([...envKols, ...dbKols]);
+  const kolList = Array.from(kolAddrsSet).map(addr => ({
     address: addr, category: 'WINNER', score: 999, isKol: true,
   }));
-  const kolAddrs = new Set(kolList.map(w => w.address));
-  const watchFiltered = _watchedWallets.filter(w => !kolAddrs.has(w.address));
+  const watchFiltered = _watchedWallets.filter(w => !kolAddrsSet.has(w.address));
   const allWallets = [...kolList, ...watchFiltered];
 
   if (!allWallets.length) {

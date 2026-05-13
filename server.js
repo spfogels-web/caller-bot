@@ -2868,6 +2868,159 @@ async function handleWhyCommand(chatId, input) {
   }
 }
 
+// ── /kol admin command — manage KOL-tier wallets ────────────────────────────
+// Lets the operator add/remove wallets from the KOL fast-lane without
+// editing env vars. Admin-only.
+//   /kol list                          → show current KOL wallets
+//   /kol add <address>                 → promote one wallet
+//   /kol remove <address>              → demote one wallet
+//   /kol auto                          → auto-promote all eligible candidates
+//   /kol candidates                    → preview candidates (no promotion)
+async function handleKolCommand(chatId, args, fromUserId) {
+  if (String(fromUserId) !== String(ADMIN_TELEGRAM_ID)) {
+    await sendTelegramMessage(chatId, '🔐 <code>/kol</code> is admin-only.');
+    return;
+  }
+  const parts = (args || '').trim().split(/\s+/).filter(Boolean);
+  const sub   = (parts[0] || 'list').toLowerCase();
+  const arg   = parts.slice(1).join(' ').trim();
+
+  try {
+    if (sub === 'list') {
+      const rows = dbInstance.prepare(`
+        SELECT address, category, sol_balance, is_kol_tier, kol_promoted_at, kol_promoted_by, our_win_count
+        FROM tracked_wallets WHERE is_kol_tier = 1
+        ORDER BY kol_promoted_at DESC LIMIT 30
+      `).all();
+      if (!rows.length) {
+        await sendTelegramMessage(chatId,
+          `🐋 <b>KOL Wallets</b>\n\n` +
+          `No DB-flagged KOL wallets yet. Run <code>/kol auto</code> to promote eligible ones, or <code>/kol add &lt;address&gt;</code>.`);
+        return;
+      }
+      const lines = rows.map((r, i) =>
+        `${i+1}. <code>${r.address.slice(0,8)}…${r.address.slice(-6)}</code>\n` +
+        `   ${r.sol_balance ?? '?'} SOL · ${r.kol_promoted_by ?? '?'} · ${r.kol_promoted_at?.split('T')[0] ?? '?'}`
+      ).join('\n');
+      await sendTelegramMessage(chatId,
+        `🐋 <b>KOL Wallets — ${rows.length} active</b>\n\n${lines}\n\n` +
+        `<i>Plus hardcoded env-var KOLs (Cupsey, Unipcs, Ansem + any in KOL_WALLETS).</i>`);
+      return;
+    }
+
+    if (sub === 'candidates') {
+      const sql = `
+        WITH wp AS (
+          SELECT wa.wallet_address AS addr, wa.token_mint AS ca, c.outcome, c.peak_multiple
+          FROM wallet_activity wa
+          JOIN calls c ON c.contract_address = wa.token_mint
+          WHERE c.outcome IN ('WIN','LOSS','NEUTRAL') AND c.called_at > datetime('now','-30 days')
+          GROUP BY wa.wallet_address, wa.token_mint
+        )
+        SELECT wp.addr,
+               SUM(CASE WHEN wp.outcome='WIN' THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN wp.outcome='LOSS' THEN 1 ELSE 0 END) AS losses,
+               ROUND(AVG(CASE WHEN wp.outcome='WIN' THEN wp.peak_multiple END), 2) AS avg_peak,
+               COALESCE(tw.is_kol_tier, 0) AS already
+        FROM wp LEFT JOIN tracked_wallets tw ON tw.address = wp.addr
+        GROUP BY wp.addr
+        HAVING wins >= 5
+           AND (wins * 100.0 / NULLIF(wins + losses, 0)) >= 80
+           AND avg_peak >= 3
+        ORDER BY wins DESC LIMIT 20
+      `;
+      const cands = dbInstance.prepare(sql).all();
+      if (!cands.length) {
+        await sendTelegramMessage(chatId, '🐋 No eligible candidates right now (criteria: ≥5 wins, ≥80% HR, ≥3x avg peak in 30d).');
+        return;
+      }
+      const newCount = cands.filter(c => c.already === 0).length;
+      const lines = cands.map((c, i) =>
+        `${i+1}. <code>${c.addr.slice(0,8)}…${c.addr.slice(-6)}</code> · ${c.wins}W/${c.losses}L · ${c.avg_peak}x avg ${c.already ? '✅' : '🆕'}`
+      ).join('\n');
+      await sendTelegramMessage(chatId,
+        `🐋 <b>KOL Candidates — ${cands.length} eligible, ${newCount} new</b>\n\n${lines}\n\n` +
+        `Run <code>/kol auto</code> to promote all ${newCount} new ones.`);
+      return;
+    }
+
+    if (sub === 'auto') {
+      const sql = `
+        WITH wp AS (
+          SELECT wa.wallet_address AS addr, wa.token_mint AS ca, c.outcome, c.peak_multiple
+          FROM wallet_activity wa
+          JOIN calls c ON c.contract_address = wa.token_mint
+          WHERE c.outcome IN ('WIN','LOSS','NEUTRAL') AND c.called_at > datetime('now','-30 days')
+          GROUP BY wa.wallet_address, wa.token_mint
+        )
+        SELECT wp.addr
+        FROM wp LEFT JOIN tracked_wallets tw ON tw.address = wp.addr
+        GROUP BY wp.addr
+        HAVING SUM(CASE WHEN wp.outcome='WIN' THEN 1 ELSE 0 END) >= 5
+           AND (SUM(CASE WHEN wp.outcome='WIN' THEN 1 ELSE 0 END) * 100.0 /
+                NULLIF(SUM(CASE WHEN wp.outcome IN ('WIN','LOSS') THEN 1 ELSE 0 END), 0)) >= 80
+           AND AVG(CASE WHEN wp.outcome='WIN' THEN wp.peak_multiple END) >= 3
+           AND COALESCE(tw.is_kol_tier, 0) = 0
+      `;
+      const eligible = dbInstance.prepare(sql).all().map(r => r.addr);
+      if (!eligible.length) {
+        await sendTelegramMessage(chatId, '🐋 No new candidates meet auto-promote criteria right now.');
+        return;
+      }
+      const stmt = dbInstance.prepare(`
+        UPDATE tracked_wallets
+        SET is_kol_tier = 1, kol_promoted_at = datetime('now'), kol_promoted_by = 'auto'
+        WHERE address = ?
+      `);
+      let n = 0;
+      for (const a of eligible) { if (stmt.run(a).changes > 0) n++; }
+      logEvent('INFO', 'KOL_AUTO_PROMOTE', `${n} wallets auto-promoted via /kol auto`);
+      await sendTelegramMessage(chatId, `✅ Auto-promoted <b>${n}</b> wallets to KOL tier.\n\nThey'll trigger instant AUTO_POSTs on any buy starting next watcher tick.`);
+      return;
+    }
+
+    if (sub === 'add') {
+      if (!arg || arg.length < 32) { await sendTelegramMessage(chatId, '⚠️ Usage: <code>/kol add &lt;wallet address&gt;</code>'); return; }
+      // Create row if missing, then flag KOL tier
+      dbInstance.prepare(`
+        INSERT OR IGNORE INTO tracked_wallets (address, category, source, added_by, last_seen, updated_at)
+        VALUES (?, 'WINNER', 'admin', 'kol-cmd', datetime('now'), datetime('now'))
+      `).run(arg);
+      dbInstance.prepare(`
+        UPDATE tracked_wallets
+        SET is_kol_tier = 1, kol_promoted_at = datetime('now'), kol_promoted_by = 'admin'
+        WHERE address = ?
+      `).run(arg);
+      logEvent('INFO', 'KOL_ADD', `Admin added ${arg} to KOL tier`);
+      await sendTelegramMessage(chatId, `✅ <code>${arg.slice(0,8)}…${arg.slice(-6)}</code> added to KOL tier.\n\nAny buy from this wallet now triggers an instant AUTO_POST.`);
+      return;
+    }
+
+    if (sub === 'remove' || sub === 'rm' || sub === 'del') {
+      if (!arg || arg.length < 32) { await sendTelegramMessage(chatId, '⚠️ Usage: <code>/kol remove &lt;wallet address&gt;</code>'); return; }
+      const r = dbInstance.prepare(`
+        UPDATE tracked_wallets SET is_kol_tier = 0, kol_promoted_at = NULL, kol_promoted_by = NULL
+        WHERE address = ?
+      `).run(arg);
+      if (r.changes === 0) { await sendTelegramMessage(chatId, '⚠️ Wallet not found or already not KOL.'); return; }
+      logEvent('INFO', 'KOL_REMOVE', `Admin removed ${arg} from KOL tier`);
+      await sendTelegramMessage(chatId, `🐋 Removed <code>${arg.slice(0,8)}…${arg.slice(-6)}</code> from KOL tier.`);
+      return;
+    }
+
+    await sendTelegramMessage(chatId,
+      `🐋 <b>/kol — KOL tier management</b>\n\n` +
+      `<code>/kol list</code>          show current DB-flagged KOL wallets\n` +
+      `<code>/kol candidates</code>    preview eligible auto-promote candidates\n` +
+      `<code>/kol auto</code>          promote all eligible candidates\n` +
+      `<code>/kol add &lt;addr&gt;</code>     manually add one wallet\n` +
+      `<code>/kol remove &lt;addr&gt;</code>  demote one wallet\n\n` +
+      `<i>Auto-promote criteria: ≥5 wins, ≥80% hit rate, ≥3x avg peak (last 30d).</i>`);
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Error: ${escapeHtml(err.message.slice(0, 200))}`);
+  }
+}
+
 // ── VIP tier gating ─────────────────────────────────────────────────────────
 // Premium commands check this before running. ACTIVE subscription = full
 // access; PENDING / EXPIRED / no row = free tier with upgrade prompt.
@@ -14838,6 +14991,7 @@ app.post('/webhook', async (req, res) => {
       case '/mywallets': isUserVip(fromId) ? await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 My Tracked Wallets'); break;
       // ── ADMIN ──
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
+      case '/kol':       await handleKolCommand(chatId, args, fromId); break;
       // ── FREE TIER ──
       case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/profile':     await handleProfileCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
@@ -15838,6 +15992,172 @@ const _walletLeaderboardHandler = (req, res) => {
 };
 app.get('/api/diagnostics/wallet-leaderboard',  _walletLeaderboardHandler);
 app.post('/api/diagnostics/wallet-leaderboard', _walletLeaderboardHandler);
+
+// ── KOL candidate discovery + promotion ─────────────────────────────────
+// Returns top-performing wallets that should be auto-promoted to KOL
+// tier. Operator can review the list, then trigger promotion via the
+// promote endpoint or /kol admin command.
+const _kolCandidatesHandler = (req, res) => {
+  setCors(res);
+  try {
+    // Default thresholds — overridable via query params
+    const minWins    = Math.max(1, Number(req.query.minWins    ?? 5));
+    const minHitRate = Math.max(0, Math.min(100, Number(req.query.minHitRate ?? 80)));
+    const minAvgPeak = Math.max(0, Number(req.query.minAvgPeak ?? 3));
+    const sinceDays  = Math.max(1, Number(req.query.sinceDays  ?? 30));
+
+    // Find wallets meeting the criteria — joins wallet_activity (every
+    // tracked-wallet buy) with calls (Pulse's outcomes). A wallet is a
+    // candidate if its picks in the period hit minWins + minHitRate + minAvgPeak.
+    const sql = `
+      WITH wallet_picks AS (
+        SELECT
+          wa.wallet_address                                  AS address,
+          wa.token_mint                                      AS contract_address,
+          c.outcome                                          AS outcome,
+          c.peak_multiple                                    AS peak_multiple
+        FROM wallet_activity wa
+        JOIN calls c ON c.contract_address = wa.token_mint
+        WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+          AND c.called_at > datetime('now', '-${sinceDays} days')
+        GROUP BY wa.wallet_address, wa.token_mint
+      )
+      SELECT
+        wp.address,
+        COALESCE(tw.category, '?')          AS category,
+        COALESCE(tw.is_kol_tier, 0)         AS is_kol_tier,
+        ROUND(tw.sol_balance, 2)            AS sol_balance,
+        COUNT(DISTINCT wp.contract_address) AS picks,
+        SUM(CASE WHEN wp.outcome='WIN'  THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN wp.outcome='LOSS' THEN 1 ELSE 0 END) AS losses,
+        ROUND(AVG(CASE WHEN wp.outcome='WIN' THEN wp.peak_multiple END), 2) AS avg_win_peak,
+        ROUND(MAX(wp.peak_multiple), 2)     AS best_peak
+      FROM wallet_picks wp
+      LEFT JOIN tracked_wallets tw ON tw.address = wp.address
+      GROUP BY wp.address
+      HAVING wins >= ${minWins}
+         AND (wins * 100.0 / NULLIF(wins + losses, 0)) >= ${minHitRate}
+         AND avg_win_peak >= ${minAvgPeak}
+      ORDER BY wins DESC, avg_win_peak DESC
+    `;
+    const candidates = dbInstance.prepare(sql).all().map(r => ({
+      ...r,
+      hit_rate_pct: r.wins + r.losses > 0 ? Math.round(r.wins * 100 / (r.wins + r.losses)) : null,
+    }));
+
+    res.json({
+      ok: true,
+      criteria: { minWins, minHitRate, minAvgPeak, sinceDays },
+      candidate_count: candidates.length,
+      already_kol_tier: candidates.filter(c => c.is_kol_tier === 1).length,
+      newly_eligible:   candidates.filter(c => c.is_kol_tier !== 1).length,
+      candidates,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.get('/api/diagnostics/kol-candidates',  _kolCandidatesHandler);
+app.post('/api/diagnostics/kol-candidates', _kolCandidatesHandler);
+
+// Promote wallets to KOL tier — either auto (all currently-eligible
+// candidates) or manual (specific addresses in the body). Admin-only.
+//
+// Auto-promotion:
+//   POST /api/wallets/promote-kol  { "auto": true }
+//   POST /api/wallets/promote-kol  { "auto": true, "minWins": 3, "minHitRate": 70, "minAvgPeak": 2 }
+//
+// Manual:
+//   POST /api/wallets/promote-kol  { "addresses": ["addr1", "addr2"] }
+//
+// Demote:
+//   POST /api/wallets/demote-kol   { "addresses": ["addr1"] }
+app.post('/api/wallets/promote-kol', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const body = req.body ?? {};
+    const minWins    = Number(body.minWins    ?? 5);
+    const minHitRate = Number(body.minHitRate ?? 80);
+    const minAvgPeak = Number(body.minAvgPeak ?? 3);
+    const sinceDays  = Number(body.sinceDays  ?? 30);
+
+    let promoted = [];
+    if (body.auto === true || body.auto === 'true') {
+      // Find eligible wallets and promote all
+      const sql = `
+        WITH wallet_picks AS (
+          SELECT
+            wa.wallet_address AS address,
+            wa.token_mint     AS contract_address,
+            c.outcome         AS outcome,
+            c.peak_multiple   AS peak_multiple
+          FROM wallet_activity wa
+          JOIN calls c ON c.contract_address = wa.token_mint
+          WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+            AND c.called_at > datetime('now', '-${sinceDays} days')
+          GROUP BY wa.wallet_address, wa.token_mint
+        )
+        SELECT wp.address
+        FROM wallet_picks wp
+        LEFT JOIN tracked_wallets tw ON tw.address = wp.address
+        GROUP BY wp.address
+        HAVING SUM(CASE WHEN wp.outcome='WIN' THEN 1 ELSE 0 END) >= ${minWins}
+           AND (SUM(CASE WHEN wp.outcome='WIN' THEN 1 ELSE 0 END) * 100.0 /
+                NULLIF(SUM(CASE WHEN wp.outcome IN ('WIN','LOSS') THEN 1 ELSE 0 END), 0)) >= ${minHitRate}
+           AND AVG(CASE WHEN wp.outcome='WIN' THEN wp.peak_multiple END) >= ${minAvgPeak}
+           AND COALESCE(tw.is_kol_tier, 0) = 0
+      `;
+      promoted = dbInstance.prepare(sql).all().map(r => r.address);
+    } else if (Array.isArray(body.addresses)) {
+      promoted = body.addresses.filter(a => typeof a === 'string' && a.length >= 32);
+    }
+
+    if (promoted.length === 0) {
+      return res.json({ ok: true, promoted: 0, message: 'No eligible wallets to promote.' });
+    }
+
+    const promoter = body.auto ? 'auto' : 'admin';
+    const stmt = dbInstance.prepare(`
+      UPDATE tracked_wallets
+      SET is_kol_tier = 1, kol_promoted_at = datetime('now'), kol_promoted_by = ?
+      WHERE address = ?
+    `);
+    const txn = dbInstance.transaction((addrs) => {
+      let n = 0;
+      for (const a of addrs) {
+        const r = stmt.run(promoter, a);
+        if (r.changes > 0) n++;
+      }
+      return n;
+    });
+    const updated = txn(promoted);
+    logEvent('INFO', 'KOL_PROMOTE', `${updated} wallets promoted to KOL tier (${promoter})`);
+    res.json({ ok: true, promoted: updated, addresses: promoted });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/wallets/demote-kol', express.json(), (req, res) => {
+  setCors(res);
+  try {
+    const addrs = (req.body?.addresses ?? []).filter(a => typeof a === 'string');
+    if (!addrs.length) return res.json({ ok: false, error: 'addresses[] required in body' });
+    const stmt = dbInstance.prepare(`
+      UPDATE tracked_wallets SET is_kol_tier = 0, kol_promoted_at = NULL, kol_promoted_by = NULL
+      WHERE address = ?
+    `);
+    let n = 0;
+    for (const a of addrs) {
+      const r = stmt.run(a);
+      if (r.changes > 0) n++;
+    }
+    logEvent('INFO', 'KOL_DEMOTE', `${n} wallets demoted from KOL tier`);
+    res.json({ ok: true, demoted: n });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 app.post('/api/diagnostics/wallet-watcher', _walletWatcherDiagHandler);
 
 // Leaderboard banner diagnostic — operator reported the /lb banner stopped

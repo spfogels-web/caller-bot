@@ -927,6 +927,21 @@ function runMigrations() {
        AND (SELECT value FROM kv_store WHERE key = 'outage_exclusion_2026_04_29_done') = '0'`,
     `UPDATE kv_store SET value = '1' WHERE key = 'outage_exclusion_2026_04_29_done'`,
 
+    // ── KOL tier (auto + manual promotion) ─────────────────────────────────
+    // Wallets that consistently outperform get flagged is_kol_tier = 1.
+    // The smart-money watcher treats them like the hardcoded KOL_WALLETS
+    // env var entries — any buy from them = instant AUTO_POST, no cluster
+    // threshold required.
+    // Auto-promotion rule (runs daily via cron):
+    //   wallet has wins_in_30d >= 5 AND hit_rate >= 80% AND avg_win_peak >= 3x
+    // Manual promotion via /kol Telegram admin command or POST to
+    // /api/wallets/promote-kol.
+    // kol_promoted_by stores 'auto' | 'admin' | 'env-var KOL_WALLETS'
+    `ALTER TABLE tracked_wallets ADD COLUMN is_kol_tier      INTEGER DEFAULT 0`,
+    `ALTER TABLE tracked_wallets ADD COLUMN kol_promoted_at  TEXT`,
+    `ALTER TABLE tracked_wallets ADD COLUMN kol_promoted_by  TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_tw_kol_tier ON tracked_wallets(is_kol_tier) WHERE is_kol_tier = 1`,
+
     // ── Mirror the exclusion onto audit_archive ────────────────────────────
     // audit_archive is a separate table that powers the dashboard's Calls
     // tab (via /api/archive). Without flagging it too, the headline tiles
