@@ -176,6 +176,38 @@ function getWebhookEligibleAddresses(dbInstance) {
   return rows.map(r => r.address).filter(Boolean);
 }
 
+// Broader address list — used by /api/helius/webhook/sync-all to push the
+// full tracked-wallet pool to Helius. Helius bills 1 credit per delivered
+// event regardless of subscription list size (up to their 100K cap), so
+// pushing all qualified wallets costs nothing extra and 10× the coverage.
+//
+// Filter: minimum 5 SOL (operator policy — drops dust), not blacklisted,
+// includes WINNER + KOL + ALPHA + SMART_MONEY + MOMENTUM. Excludes
+// HARVESTED_TRADER, NEUTRAL, CLUSTER, RUG, SNIPER, FARM (low signal /
+// negative tiers). Cap at 90K to stay under Helius's 100K hard limit.
+function getAllWebhookAddresses(dbInstance) {
+  const minSol = Number(process.env.WEBHOOK_ALL_MIN_SOL) || 5;
+  const max    = Number(process.env.WEBHOOK_ALL_MAX)     || 90000;
+  const rows = dbInstance.prepare(`
+    SELECT address FROM tracked_wallets
+    WHERE is_blacklist = 0
+      AND (sol_balance IS NULL OR sol_balance >= ?)
+      AND category IN ('WINNER','KOL','ALPHA','SMART_MONEY','MOMENTUM')
+    ORDER BY
+      CASE category
+        WHEN 'KOL'         THEN 0
+        WHEN 'WINNER'      THEN 1
+        WHEN 'ALPHA'       THEN 2
+        WHEN 'SMART_MONEY' THEN 3
+        ELSE                    4
+      END,
+      our_win_count DESC,
+      sol_balance DESC NULLS LAST
+    LIMIT ?
+  `).all(minSol, max);
+  return rows.map(r => r.address).filter(Boolean);
+}
+
 const TELEGRAM_API   = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL   = 'claude-sonnet-4-20250514';
@@ -17311,6 +17343,72 @@ const _heliusWebhookSetupHandler = async (req, res) => {
 };
 app.post('/api/helius/webhook/setup', _heliusWebhookSetupHandler);
 app.get('/api/helius/webhook/setup',  _heliusWebhookSetupHandler);  // browser-bar trigger
+
+// Sync-ALL helper: pushes the FULL tracked-wallet pool (WINNER + KOL +
+// ALPHA + SMART_MONEY + MOMENTUM tiers, filtered to ≥5 SOL, up to 90K
+// addresses) to the Helius webhook. Use this BEFORE disabling polling
+// to ensure broad coverage — webhook bills 1 credit per delivered event
+// regardless of subscription list size, so wider list = same cost.
+//
+// Run AFTER /api/helius/webhook/create has set HELIUS_WEBHOOK_ID in env.
+// Re-run safely whenever you want to refresh the address list (e.g. after
+// harvesters add new winners).
+//
+// Override caps via env:
+//   WEBHOOK_ALL_MIN_SOL  (default 5)  — drop dust wallets below this
+//   WEBHOOK_ALL_MAX      (default 90000) — Helius hard cap is 100K
+const _heliusWebhookSyncAllHandler = async (req, res) => {
+  setCors(res);
+  const webhookId = process.env.HELIUS_WEBHOOK_ID || (req.body || {}).webhookId;
+  const apiKey = getEnhancedApiKey();
+  if (!webhookId) return res.status(400).json({ ok: false, error: 'HELIUS_WEBHOOK_ID env var required' });
+  if (!apiKey)    return res.status(400).json({ ok: false, error: 'HELIUS_ENHANCED_API_KEY (or HELIUS_API_KEY) missing' });
+
+  try {
+    const addresses = getAllWebhookAddresses(dbInstance);
+    console.log(`[helius-wh] SYNC-ALL → pushing ${addresses.length} wallets (full pool) to webhook ${webhookId.slice(0,8)}...`);
+
+    // Sanity: cap at Helius's 100K limit
+    if (addresses.length > 100_000) {
+      return res.status(400).json({
+        ok: false,
+        error: `Wallet pool (${addresses.length}) exceeds Helius 100K limit. Raise WEBHOOK_ALL_MIN_SOL to filter more, or lower WEBHOOK_ALL_MAX.`,
+      });
+    }
+
+    const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
+    if (result.ok) {
+      console.log(`[helius-wh] SYNC-ALL ✓ ${result.registered} addresses registered, ${result.skipped} skipped as invalid`);
+      logEvent('INFO', 'HELIUS_WEBHOOK_SYNC_ALL', `Pushed ${result.registered} wallets to webhook (full pool)`);
+
+      // Show the per-tier breakdown so the operator sees what got registered
+      const breakdown = dbInstance.prepare(`
+        SELECT category, COUNT(*) AS n
+        FROM tracked_wallets
+        WHERE is_blacklist = 0
+          AND (sol_balance IS NULL OR sol_balance >= ?)
+          AND category IN ('WINNER','KOL','ALPHA','SMART_MONEY','MOMENTUM')
+        GROUP BY category
+        ORDER BY n DESC
+      `).all(Number(process.env.WEBHOOK_ALL_MIN_SOL) || 5);
+
+      return res.json({
+        ok:               result.ok,
+        action:           'sync_all',
+        webhookId,
+        registered:       result.registered,
+        skipped:          result.skipped,
+        pool_breakdown:   Object.fromEntries(breakdown.map(r => [r.category, r.n])),
+        message:          'Full wallet pool pushed to Helius webhook. Polling can now be safely disabled.',
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.post('/api/helius/webhook/sync-all', _heliusWebhookSyncAllHandler);
+app.get('/api/helius/webhook/sync-all',  _heliusWebhookSyncAllHandler);
 
 // Stats: see what the webhook has been ingesting
 app.get('/api/helius/webhook/stats', (req, res) => {
