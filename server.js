@@ -18958,25 +18958,88 @@ app.listen(PORT, async () => {
       console.log('[helius-wh-sync] skipped — HELIUS_WEBHOOK_ID or Enhanced API key not set');
       return;
     }
+    // Operator can fully disable auto-sync by setting this env var.
+    // Useful if you want sync-smart (manual) as the only control point.
+    if (['1','true','yes','on'].includes(String(process.env.HELIUS_AUTOSYNC_DISABLED || '').toLowerCase())) {
+      console.log('[helius-wh-sync] skipped — HELIUS_AUTOSYNC_DISABLED=1');
+      return;
+    }
     try {
-      // Slimmed list — top winners only. Helius bills 1 credit per webhook
-      // delivery so this is intentionally tight to fit within plan budgets.
-      // See getWebhookEligibleAddresses for the exact ranking + thresholds.
-      const addresses = getWebhookEligibleAddresses(dbInstance);
-      console.log(`[helius-wh-sync] pushing ${addresses.length} top-tier wallets to webhook ${webhookId.slice(0,8)}...`);
+      // ── PRODUCTION SAFETY (2026-05-13) ──────────────────────────────────
+      // Old auto-sync pushed up to 500 wallets per /getWebhookEligibleAddresses/.
+      // That blew through Helius credits because most of those wallets were
+      // HFT bots like Cupsey doing 1500 trades/day. Now uses the SMART filter
+      // (same logic as /api/helius/webhook/sync-smart) — only wallets that
+      // proved themselves with ≥3 wins, ≥60% hit rate, ≥5x avg peak.
+      //
+      // Result: auto-sync now pushes ~10-50 high-precision wallets daily
+      // instead of 500 mixed-quality ones. Credit burn stays low.
+      const sinceDays    = Number(process.env.WEBHOOK_AUTOSYNC_DAYS    ?? 30);
+      const minHitRate   = Number(process.env.WEBHOOK_AUTOSYNC_HIT     ?? 60);
+      const minWins      = Number(process.env.WEBHOOK_AUTOSYNC_WINS    ?? 3);
+      const minAvgPeak   = Number(process.env.WEBHOOK_AUTOSYNC_AVG     ?? 5);
+      const maxPicksPerDay = Number(process.env.WEBHOOK_AUTOSYNC_PPD   ?? 50);
+      const BOT_BLACKLIST = new Set([
+        'suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK',  // Cupsey (HFT bot)
+      ]);
+
+      const sql = `
+        WITH wallet_picks AS (
+          SELECT wa.wallet_address AS address, wa.token_mint AS contract_address,
+                 c.outcome AS outcome, c.peak_multiple AS peak_multiple
+          FROM wallet_activity wa
+          JOIN calls c ON c.contract_address = wa.token_mint
+          WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+            AND c.called_at > datetime('now', '-${sinceDays} days')
+          GROUP BY wa.wallet_address, wa.token_mint
+        )
+        SELECT wp.address,
+               SUM(CASE WHEN wp.outcome='WIN'  THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN wp.outcome='LOSS' THEN 1 ELSE 0 END) AS losses,
+               AVG(CASE WHEN wp.outcome='WIN' THEN wp.peak_multiple END) AS avg_peak,
+               COUNT(DISTINCT wp.contract_address) AS picks
+        FROM wallet_picks wp
+        LEFT JOIN tracked_wallets tw ON tw.address = wp.address
+        WHERE COALESCE(tw.is_blacklist, 0) = 0
+        GROUP BY wp.address
+        HAVING wins >= ${minWins}
+           AND (wins * 100.0 / NULLIF(wins + losses, 0)) >= ${minHitRate}
+           AND avg_peak >= ${minAvgPeak}
+           AND (picks * 1.0 / ${sinceDays}) <= ${maxPicksPerDay}
+      `;
+      const qualified = dbInstance.prepare(sql).all()
+        .map(r => r.address)
+        .filter(a => !BOT_BLACKLIST.has(a));
+
+      // Add KOL_WALLETS env var + DB-flagged is_kol_tier wallets
+      const envKols = (process.env.KOL_WALLETS || '')
+        .split(',').map(s => s.trim()).filter(Boolean)
+        .filter(a => !BOT_BLACKLIST.has(a));
+      const dbKols = dbInstance.prepare(
+        `SELECT address FROM tracked_wallets WHERE is_kol_tier = 1 AND COALESCE(is_blacklist, 0) = 0`
+      ).all().map(r => r.address).filter(a => !BOT_BLACKLIST.has(a));
+
+      const addresses = Array.from(new Set([...qualified, ...envKols, ...dbKols]));
+
+      if (addresses.length === 0) {
+        console.log('[helius-wh-sync] no qualifying wallets — skipping auto-sync (filter may be too strict; check WEBHOOK_AUTOSYNC_* env vars)');
+        return;
+      }
+
+      console.log(`[helius-wh-sync] pushing ${addresses.length} curated wallets to webhook ${webhookId.slice(0,8)}... (${qualified.length} perf-qualified, ${envKols.length} env-KOLs, ${dbKols.length} db-KOLs, Cupsey blacklisted)`);
       const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
       if (result.ok) {
         console.log(`[helius-wh-sync] ✓ ${result.registered} addresses synced (${result.skipped} skipped as invalid)`);
-        logEvent('INFO', 'HELIUS_WH_AUTOSYNC', `Synced ${result.registered} addresses`);
+        logEvent('INFO', 'HELIUS_WH_AUTOSYNC', `Synced ${result.registered} curated wallets (smart filter)`);
       } else {
         console.warn('[helius-wh-sync] failed:', result.error);
       }
     } catch (err) { console.warn('[helius-wh-sync] err:', err.message); }
   };
-  // First run 2 min after boot (so the slimmed address list propagates fast
-  // after a deploy), then every 24h. Operator can fire /api/helius/webhook/setup
-  // manually any time to force an immediate sync.
-  setTimeout(() => { _autoSyncWebhook().catch(() => {}); }, 2 * 60_000);
+  // First run 5 min after boot (gives sync-smart breathing room if you want
+  // to manually push first), then every 24h. Operator can fire
+  // /api/helius/webhook/sync-smart any time for an immediate manual sync.
+  setTimeout(() => { _autoSyncWebhook().catch(() => {}); }, 5 * 60_000);
   setInterval(_autoSyncWebhook, 24 * 60 * 60_000);
 
   // SWARM HOOK — when ≥3 tracked wallets buy the same CA in 10 min, this
