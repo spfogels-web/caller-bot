@@ -2919,6 +2919,15 @@ async function handleSubscribeCommand(chatId, telegramId, username) {
 
 async function handleVipStatusCommand(chatId, telegramId) {
   try {
+    // Admin always passes — show a clear admin status instead of querying
+    // subscriptions (which would return PENDING test rows, etc.).
+    if (String(telegramId) === String(ADMIN_TELEGRAM_ID)) {
+      await sendTelegramMessage(chatId,
+        `✅ <b>ADMIN — Full Access</b>\n\n` +
+        `You're the bot operator. All premium commands work without a subscription.\n\n` +
+        `<i>To test the user flow, /vip from a different account.</i>`);
+      return;
+    }
     const row = dbInstance.prepare(`
       SELECT status, amount_usd, paid_at, expires_at
       FROM subscriptions
@@ -2943,6 +2952,17 @@ async function handleVipStatusCommand(chatId, telegramId) {
         `<b>Last payment:</b> $${row.amount_usd} on ${row.paid_at?.split('T')[0] ?? '?'}\n\n` +
         `Renew anytime — your time stacks, no gap in access.`,
         { reply_markup: buildActiveStatusKeyboard() });
+    } else if (row.status === 'TRIAL') {
+      const { buildSubscribeCtaKeyboard } = await import('./subscription-engine.js');
+      const hoursLeft = Math.max(0, (new Date(row.expires_at).getTime() - Date.now()) / 3_600_000);
+      const remaining = hoursLeft >= 24
+        ? `${Math.round(hoursLeft / 24 * 10) / 10} day(s) left`
+        : `${Math.round(hoursLeft)} hours left`;
+      await sendTelegramMessage(chatId,
+        `🎁 <b>48-Hour Trial Active</b>\n\n` +
+        `Trial expires in <b>${remaining}</b>\n\n` +
+        `Subscribe now to keep your VIP access — no gap when the trial ends.`,
+        { reply_markup: buildSubscribeCtaKeyboard() });
     } else if (row.status === 'PENDING') {
       await sendTelegramMessage(chatId,
         `⏳ <b>Payment pending</b>\n\nTap /subscribe to see your payment card again.`);
