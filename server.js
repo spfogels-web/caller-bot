@@ -3451,8 +3451,9 @@ function buildRecentCallsMessage() {
       const outcome = c.outcome ?? 'PENDING';
       const emoji   = outcome === 'WIN' ? '🏆' : outcome === 'LOSS' ? '💀' : outcome === 'NEUTRAL' ? '➖' : '⏳';
       const entryMcap = c.market_cap_at_call ? fmt(c.market_cap_at_call, '$') : '?';
+      // Score intentionally omitted — operator decision (keeps focus on outcome, not the internal scoring number).
       return (
-        `${i+1}. ${emoji} <b>$${escapeHtml(c.token??'?')}</b> — Score: ${c.score_at_call??'?'}\n` +
+        `${i+1}. ${emoji} <b>$${escapeHtml(c.token??'?')}</b>\n` +
         `   Entry MCap: ${entryMcap}  1h: ${fmtPct(c.pct_change_1h)}  6h: ${fmtPct(c.pct_change_6h)}  24h: ${fmtPct(c.pct_change_24h)}\n` +
         `   <code>${escapeHtml(c.contract_address)}</code>`
       );
