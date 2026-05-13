@@ -26,11 +26,16 @@
  */
 'use strict';
 
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 
 const DEFAULT_RECIPIENT_WALLET = 'BznUBLUjXh3jQH1AaVaPgQ48KwWUiD4LyxtfnGSexs7h';
 const DEFAULT_PRICE_USD        = 89;
 const DEFAULT_DAYS             = 30;
+const TRIAL_DURATION_HOURS     = 48;
+// Hash salt for phone numbers. Set TRIAL_PHONE_SALT env var to override.
+// Using a fixed fallback means hashes are consistent across restarts,
+// but for max security set a long random value in Railway env.
+const PHONE_HASH_SALT = process.env.TRIAL_PHONE_SALT || 'pulse-caller-trial-2026';
 
 const PAYMENT_POLL_INTERVAL_MS   = 30_000;       // 30s — fast enough that paying users see access within a minute
 const EXPIRY_CHECK_INTERVAL_MS   = 60 * 60_000;  // hourly
@@ -256,6 +261,170 @@ export function buildSubscribeCtaKeyboard() {
       ],
     ],
   };
+}
+
+// Reply keyboard (not inline) — used to request the user's phone number
+// for trial activation. Telegram displays a "Share Phone" button that
+// triggers the native phone-share confirmation flow.
+export function buildTrialPhoneRequestKeyboard() {
+  return {
+    keyboard: [[
+      { text: '📱 Share Phone & Start Trial', request_contact: true },
+    ]],
+    one_time_keyboard: true,
+    resize_keyboard:   true,
+  };
+}
+
+// ─── 48h Free Trial (phone-gated) ────────────────────────────────────────
+
+function hashPhone(phoneRaw) {
+  if (!phoneRaw) return null;
+  const digits = String(phoneRaw).replace(/\D+/g, '');
+  if (!digits) return null;
+  return createHash('sha256')
+    .update(digits + ':' + PHONE_HASH_SALT)
+    .digest('hex');
+}
+
+/**
+ * Activate a 48h trial for a user who just shared their phone number.
+ * Phone-hash uniqueness is enforced at the DB level so a duplicate phone
+ * (same number, different Telegram account) hits the UNIQUE constraint
+ * and gets a "trial already used" response.
+ *
+ * Returns {ok, status, message, keyboard?} for the bot to reply with.
+ */
+export async function activateTrial({ telegramId, username, chatId, phoneRaw }) {
+  if (!_db || !telegramId)         return { ok: false, message: '⚠️ Trial engine not ready.' };
+  if (!phoneRaw)                   return { ok: false, message: '⚠️ No phone number received. Try /start again.' };
+
+  const phoneHash = hashPhone(phoneRaw);
+  if (!phoneHash) return { ok: false, message: '⚠️ Invalid phone number format.' };
+
+  // Already used this phone for a trial? Show subscribe CTA.
+  const existing = _db.prepare(
+    `SELECT id, telegram_id, status, expires_at FROM subscriptions WHERE trial_phone_hash = ? LIMIT 1`
+  ).get(phoneHash);
+  if (existing) {
+    const sameUser = String(existing.telegram_id) === String(telegramId);
+    return {
+      ok:      true,
+      status:  'TRIAL_ALREADY_USED',
+      message:
+        `🚫 <b>Trial already used</b>\n\n` +
+        (sameUser
+          ? `You've already claimed your free trial on this number.\n\n`
+          : `This phone number was already used to claim a trial.\n\n`) +
+        `Subscribe for full VIP access — $89 / 30 days.`,
+      keyboard: buildSubscribeCtaKeyboard(),
+    };
+  }
+
+  // Active paid subscription? No trial needed.
+  const activeSub = _db.prepare(`
+    SELECT * FROM subscriptions
+    WHERE telegram_id = ? AND status = 'ACTIVE'
+      AND (expires_at IS NULL OR expires_at > datetime('now'))
+    LIMIT 1
+  `).get(String(telegramId));
+  if (activeSub) {
+    return {
+      ok:      true,
+      status:  'ALREADY_VIP',
+      message: `✅ You already have an ACTIVE VIP subscription — no trial needed!\n\nExpires ${activeSub.expires_at.split('T')[0]}.`,
+    };
+  }
+
+  // Grant the trial — create a TRIAL subscription row + generate VIP invite
+  const expiresAt = new Date(Date.now() + TRIAL_DURATION_HOURS * 3600 * 1000).toISOString();
+  const trialRef  = 'trial-' + randomBytes(6).toString('base64url').slice(0, 8).toLowerCase();
+
+  let inviteLink = null;
+  let inviteError = null;
+  const vipChatId = _vipChatIds[0];
+  if (vipChatId) {
+    try {
+      inviteLink = await createTelegramInviteLink(vipChatId, expiresAt);
+    } catch (err) { inviteError = err.message; }
+  } else {
+    inviteError = 'No TELEGRAM_GROUP_CHAT_ID configured';
+  }
+
+  try {
+    _db.prepare(`
+      INSERT INTO subscriptions
+        (telegram_id, username, chat_id, payment_ref, amount_usd, amount_sol, sol_price_usd,
+         status, expires_at, invite_link, invite_sent_at, trial_phone_hash, trial_started_at, notes)
+      VALUES (?, ?, ?, ?, 0, 0, 0,
+              'TRIAL', ?, ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END,
+              ?, datetime('now'), ?)
+    `).run(
+      String(telegramId),
+      username ?? null,
+      chatId != null ? String(chatId) : null,
+      trialRef,
+      expiresAt,
+      inviteLink,
+      inviteLink,
+      phoneHash,
+      inviteError ? `trial invite error: ${inviteError}` : null,
+    );
+  } catch (err) {
+    // UNIQUE constraint violation on trial_phone_hash race — treat as
+    // "already used" rather than an error.
+    if (String(err.message).includes('UNIQUE')) {
+      return {
+        ok:       true,
+        status:   'TRIAL_ALREADY_USED',
+        message:  `🚫 <b>Trial already used</b>\n\nThis phone number was already used to claim a trial.\n\nSubscribe for full VIP access — $89 / 30 days.`,
+        keyboard: buildSubscribeCtaKeyboard(),
+      };
+    }
+    return { ok: false, message: `⚠️ Failed to start trial: ${err.message}` };
+  }
+
+  // Welcome DM with invite link
+  const welcome =
+    `🎁 <b>Your 48-hour VIP trial is LIVE</b>\n\n` +
+    `For the next 48 hours you have full access to:\n` +
+    `• ⚡ Live calls AT ENTRY (the VIP feed)\n` +
+    `• 🧪 Deep AI analysis on any token\n` +
+    `• 🔍 "Why was this called?" reasoning\n` +
+    `• 🏆 Top calls + bot stats\n` +
+    `• 👁 Active watchlist + wallet tracking\n\n` +
+    (inviteLink
+      ? `<b>Tap to join the VIP channel:</b>\n<a href="${inviteLink}">${inviteLink}</a>\n\n`
+      : `(There was a hiccup generating your invite link automatically — DM the operator.)\n\n`) +
+    `<b>Trial ends:</b> ${expiresAt.split('T')[0]} (${TRIAL_DURATION_HOURS}h from now)\n\n` +
+    `Want to keep VIP access after the trial? Tap /subscribe anytime — $89 for 30 days.`;
+
+  return {
+    ok:       true,
+    status:   'TRIAL_ACTIVATED',
+    message:  welcome,
+    keyboard: { inline_keyboard: [[{ text: '💎 Subscribe Anytime', callback_data: 'sub:start' }]] },
+  };
+}
+
+/**
+ * Check if a user has trial access (vs paid subscription).
+ * Returns {hasTrial, expiresAt, hoursLeft} or null if no trial.
+ */
+export function getTrialStatus(telegramId) {
+  if (!_db || !telegramId) return null;
+  try {
+    const row = _db.prepare(`
+      SELECT expires_at FROM subscriptions
+      WHERE telegram_id = ? AND status = 'TRIAL'
+        AND expires_at > datetime('now')
+      LIMIT 1
+    `).get(String(telegramId));
+    if (!row) return null;
+    const expiresAt = new Date(row.expires_at);
+    const hoursLeft = Math.max(0, (expiresAt.getTime() - Date.now()) / 3_600_000);
+    return { hasTrial: true, expiresAt: row.expires_at, hoursLeft };
+  } catch { return null; }
 }
 
 /**
@@ -620,6 +789,80 @@ async function expiryTick() {
       await sendTelegramDM(sub.telegram_id,
         `Your Pulse Caller VIP subscription has expired and you've been removed from the VIP channel.\n\n` +
         `Re-subscribe anytime via /subscribe — invite is instant once payment confirms.`);
+    } catch {}
+  }
+
+  // ── TRIAL EXPIRY HANDLING ────────────────────────────────────────────
+  // Trials have a tighter cycle than paid subs (48h vs 30d) and need
+  // their own reminders to drive conversion before the clock runs out.
+
+  // 24h reminder
+  const trial24h = _db.prepare(`
+    SELECT * FROM subscriptions
+    WHERE status = 'TRIAL'
+      AND reminder_3d_at IS NULL
+      AND expires_at IS NOT NULL
+      AND datetime(expires_at, '-24 hours') < datetime('now')
+      AND expires_at > datetime('now')
+  `).all();
+  for (const sub of trial24h) {
+    try {
+      await sendTelegramDM(sub.telegram_id,
+        `⏰ <b>24 hours left of your VIP trial</b>\n\n` +
+        `You're halfway through. Keep that live-call edge — subscribe for $89 / 30 days and your access never lapses.\n\n` +
+        `Tap /subscribe to lock it in.`);
+      _db.prepare(`UPDATE subscriptions SET reminder_3d_at = datetime('now') WHERE id = ?`).run(sub.id);
+      _stats.expiryRemindersSent++;
+    } catch {}
+  }
+
+  // 1h final-warning reminder
+  const trial1h = _db.prepare(`
+    SELECT * FROM subscriptions
+    WHERE status = 'TRIAL'
+      AND reminder_1d_at IS NULL
+      AND expires_at IS NOT NULL
+      AND datetime(expires_at, '-1 hour') < datetime('now')
+      AND expires_at > datetime('now')
+  `).all();
+  for (const sub of trial1h) {
+    try {
+      await sendTelegramDM(sub.telegram_id,
+        `⚠️ <b>Trial ends in 1 hour</b>\n\n` +
+        `After this, you'll be moved back to the free tier and removed from the VIP channel.\n\n` +
+        `Tap /subscribe now to keep your access — invite link stays the same, no gap.`);
+      _db.prepare(`UPDATE subscriptions SET reminder_1d_at = datetime('now') WHERE id = ?`).run(sub.id);
+      _stats.expiryRemindersSent++;
+    } catch {}
+  }
+
+  // Trial expired — kick from VIP, mark TRIAL_EXPIRED. No grace period for
+  // trials (paid subs get 24h grace; trials are firm — encourages quick
+  // conversion).
+  const trialExpired = _db.prepare(`
+    SELECT * FROM subscriptions
+    WHERE status = 'TRIAL'
+      AND expires_at IS NOT NULL
+      AND expires_at < datetime('now')
+  `).all();
+  for (const sub of trialExpired) {
+    const vipChatId = _vipChatIds[0];
+    if (vipChatId) {
+      await kickUserFromVipChannel(sub.telegram_id, vipChatId);
+    }
+    _db.prepare(`
+      UPDATE subscriptions
+      SET status = 'TRIAL_EXPIRED', removed_at = datetime('now')
+      WHERE id = ?
+    `).run(sub.id);
+    _stats.usersRemoved++;
+
+    try {
+      await sendTelegramDM(sub.telegram_id,
+        `⏰ <b>Your 48h VIP trial has ended</b>\n\n` +
+        `You've been moved back to the free tier. You'll still see milestone updates on big winners — but the calls hit VIP at entry, hours before they reach the free channel.\n\n` +
+        `Tap /subscribe to keep live access — $89 for 30 days.`,
+      );
     } catch {}
   }
 }

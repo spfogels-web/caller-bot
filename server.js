@@ -2867,12 +2867,13 @@ function isUserVip(telegramId) {
   if (!telegramId) return false;
   if (String(telegramId) === String(ADMIN_TELEGRAM_ID)) return true;
   try {
+    // ACTIVE paid subscription OR active 48h TRIAL both unlock VIP access
     const row = dbInstance.prepare(`
-      SELECT 1 FROM subscriptions
+      SELECT status FROM subscriptions
       WHERE telegram_id = ?
-        AND status = 'ACTIVE'
+        AND status IN ('ACTIVE', 'TRIAL')
         AND (expires_at IS NULL OR expires_at > datetime('now'))
-      LIMIT 1
+      ORDER BY id DESC LIMIT 1
     `).get(String(telegramId));
     return !!row;
   } catch { return false; }
@@ -3474,10 +3475,42 @@ function buildRegimeMessage() {
 
 // ─── Command Handlers ─────────────────────────────────────────────────────────
 
-async function handleStartCommand(chatId)     {
+async function handleStartCommand(chatId, telegramId)     {
+  // If user is already a VIP (paid or trial) or has used their trial,
+  // skip the trial offer and go straight to the menu.
+  let offerTrial = false;
+  if (telegramId) {
+    try {
+      const existing = dbInstance.prepare(`
+        SELECT status, trial_phone_hash FROM subscriptions
+        WHERE telegram_id = ? ORDER BY id DESC LIMIT 1
+      `).get(String(telegramId));
+      // Offer trial only if they have NO subscription row at all.
+      // (TRIAL_EXPIRED users don't get another free shot — they pay or stay free.)
+      if (!existing) offerTrial = true;
+    } catch {}
+  }
+
+  if (offerTrial) {
+    const { buildTrialPhoneRequestKeyboard } = await import('./subscription-engine.js');
+    await sendTelegramMessage(chatId,
+      `👋 <b>Welcome to Pulse Caller</b>\n\n` +
+      `Elite Solana micro-cap gem hunter — calls at $8K-$25K MC with a 75% target win rate.\n\n` +
+      `🎁 <b>You qualify for a 48-hour VIP trial</b>\n\n` +
+      `Full access:\n` +
+      `• ⚡ Live calls AT ENTRY (the VIP feed)\n` +
+      `• 🧪 Deep AI analysis on any token\n` +
+      `• 🔍 "Why was this called?" reasoning\n` +
+      `• 🏆 Top calls + bot stats + watchlist\n\n` +
+      `Tap the button below to share your phone and claim your trial. One trial per phone — no abuse.`,
+      { reply_markup: buildTrialPhoneRequestKeyboard() }
+    );
+    return;
+  }
+
   await sendTelegramMessage(chatId,
-    `👋 <b>Welcome to Pulse Caller</b>\n\n` +
-    `Elite Solana micro-cap gem hunter. Tap any button below to get started — no need to remember command syntax.`,
+    `👋 <b>Welcome back to Pulse Caller</b>\n\n` +
+    `Tap any button below to get started:`,
     { reply_markup: buildMainMenuKeyboard() }
   );
 }
@@ -14586,10 +14619,41 @@ app.post('/webhook', async (req, res) => {
     }
   } catch (err) { console.warn('[user-lb] listener err:', err.message); }
 
+  // ── Contact share → trial activation ───────────────────────────────────
+  // Fires when a user taps "📱 Share Phone & Start Trial" from /start.
+  // Telegram delivers a message with a .contact field containing phone_number.
+  // Phone is hashed (SHA-256 + salt) and checked for uniqueness; one trial
+  // per phone, ever. Same phone with different Telegram account = no trial.
+  if (message.contact && fromId) {
+    const sharedByOwner = String(message.contact.user_id) === String(fromId);
+    if (!sharedByOwner) {
+      await sendTelegramMessage(chatId,
+        `⚠️ Please share <b>your own</b> phone number — not someone else's contact.`);
+      return res.sendStatus(200);
+    }
+    try {
+      const { activateTrial } = await import('./subscription-engine.js');
+      const result = await activateTrial({
+        telegramId: fromId,
+        username:   message.from?.username,
+        chatId,
+        phoneRaw:   message.contact.phone_number,
+      });
+      const opts = result.keyboard ? { reply_markup: result.keyboard } : {};
+      // Remove the request_contact reply keyboard so it doesn't linger
+      opts.reply_markup = opts.reply_markup || { remove_keyboard: true };
+      await sendTelegramMessage(chatId, result.message, opts);
+    } catch (err) {
+      console.warn('[trial-activate] err:', err.message);
+      await sendTelegramMessage(chatId, `⚠️ Trial activation failed: ${escapeHtml(err.message)}`);
+    }
+    return res.sendStatus(200);
+  }
+
   const { command, args } = parseCommand(message.text);
   try {
     switch (command) {
-      case '/start':     await handleStartCommand(chatId);              break;
+      case '/start':     await handleStartCommand(chatId, fromId);      break;
       case '/menu':      await handleMenuCommand(chatId);               break;
       case '/help':      await handleHelpCommand(chatId);               break;
       // ── PREMIUM (VIP-only) ──

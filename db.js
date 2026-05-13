@@ -891,6 +891,16 @@ function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_sub_expires_at  ON subscriptions(expires_at) WHERE status='ACTIVE'`,
     `CREATE INDEX IF NOT EXISTS idx_sub_payment_ref ON subscriptions(payment_ref)`,
     `CREATE INDEX IF NOT EXISTS idx_sub_pending     ON subscriptions(status, created_at DESC) WHERE status='PENDING'`,
+    // ── 48h free trial — phone-hash gated to prevent multi-account abuse ──
+    // A user gets ONE 48h trial per phone number, ever. The hash is SHA-256
+    // of the normalized phone (digits only) + a server-side salt so the raw
+    // phone number is never stored. UNIQUE constraint on the hash means
+    // anyone creating a second Telegram account on the same phone gets
+    // "trial already used" instead of a fresh trial.
+    `ALTER TABLE subscriptions ADD COLUMN trial_phone_hash TEXT`,
+    `ALTER TABLE subscriptions ADD COLUMN trial_started_at TEXT`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_sub_trial_phone ON subscriptions(trial_phone_hash) WHERE trial_phone_hash IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_sub_trial_active     ON subscriptions(status, expires_at) WHERE status='TRIAL'`,
   ];
 
   let added = 0;
