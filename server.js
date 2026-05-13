@@ -17410,6 +17410,135 @@ const _heliusWebhookSyncAllHandler = async (req, res) => {
 app.post('/api/helius/webhook/sync-all', _heliusWebhookSyncAllHandler);
 app.get('/api/helius/webhook/sync-all',  _heliusWebhookSyncAllHandler);
 
+// SMART sync — performance-filtered wallet list for the Helius webhook.
+// Cupsey-style HFT bots spray hundreds of trades/day at ~38% hit rate —
+// they BURN credits without producing alpha. This endpoint filters them
+// out automatically. Only wallets that look like real selective traders
+// get subscribed.
+//
+// Filter logic (anti-HFT-bot):
+//   - hit_rate >= 60%   (real traders pick, bots spray)
+//   - wins >= 3         (proven track record)
+//   - avg_win_peak >= 5x (bots exit early at 1.5-2x, humans hold winners)
+//   - picks_per_day <= 50 (no HFT spray bots — humans don't fire 50+ trades/day)
+// Plus: hardcoded KOL_WALLETS + Magic 4 (Cupsey explicitly excluded since
+// his 38% HR + 1500 trades/day failed all filters anyway).
+const _heliusWebhookSyncSmartHandler = async (req, res) => {
+  setCors(res);
+  const webhookId = process.env.HELIUS_WEBHOOK_ID || (req.body || {}).webhookId;
+  const apiKey = getEnhancedApiKey();
+  if (!webhookId) return res.status(400).json({ ok: false, error: 'HELIUS_WEBHOOK_ID env var required' });
+  if (!apiKey)    return res.status(400).json({ ok: false, error: 'HELIUS_ENHANCED_API_KEY (or HELIUS_API_KEY) missing' });
+
+  try {
+    // Override filter thresholds via query/body
+    const sinceDays    = Number(req.query.sinceDays    ?? req.body?.sinceDays    ?? 30);
+    const minHitRate   = Number(req.query.minHitRate   ?? req.body?.minHitRate   ?? 60);
+    const minWins      = Number(req.query.minWins      ?? req.body?.minWins      ?? 3);
+    const minAvgPeak   = Number(req.query.minAvgPeak   ?? req.body?.minAvgPeak   ?? 5);
+    const maxPicksPerDay = Number(req.query.maxPicksPerDay ?? req.body?.maxPicksPerDay ?? 50);
+
+    // Explicit bot blacklist — wallets we KNOW are HFT spray bots.
+    // Cupsey is the canonical example: 1500 trades/day, 38% HR.
+    const BOT_BLACKLIST = new Set([
+      'suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK',  // Cupsey
+    ]);
+
+    // Score-quality wallets from wallet_activity → calls join
+    const sql = `
+      WITH wallet_picks AS (
+        SELECT
+          wa.wallet_address AS address,
+          wa.token_mint     AS contract_address,
+          c.outcome         AS outcome,
+          c.peak_multiple   AS peak_multiple
+        FROM wallet_activity wa
+        JOIN calls c ON c.contract_address = wa.token_mint
+        WHERE c.outcome IN ('WIN','LOSS','NEUTRAL')
+          AND c.called_at > datetime('now', '-${sinceDays} days')
+        GROUP BY wa.wallet_address, wa.token_mint
+      )
+      SELECT
+        wp.address,
+        COALESCE(tw.category, '?')          AS category,
+        ROUND(tw.sol_balance, 2)            AS sol_balance,
+        COUNT(DISTINCT wp.contract_address) AS picks,
+        SUM(CASE WHEN wp.outcome='WIN'  THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN wp.outcome='LOSS' THEN 1 ELSE 0 END) AS losses,
+        ROUND(AVG(CASE WHEN wp.outcome='WIN' THEN wp.peak_multiple END), 2) AS avg_win_peak
+      FROM wallet_picks wp
+      LEFT JOIN tracked_wallets tw ON tw.address = wp.address
+      WHERE COALESCE(tw.is_blacklist, 0) = 0
+      GROUP BY wp.address
+      HAVING wins >= ${minWins}
+         AND (wins * 100.0 / NULLIF(wins + losses, 0)) >= ${minHitRate}
+         AND avg_win_peak >= ${minAvgPeak}
+         AND (picks * 1.0 / ${sinceDays}) <= ${maxPicksPerDay}
+      ORDER BY wins DESC, avg_win_peak DESC
+    `;
+    const qualifiedRows = dbInstance.prepare(sql).all();
+    // Drop hardcoded HFT bots even if they slip past the heuristic
+    const qualified = qualifiedRows
+      .filter(r => !BOT_BLACKLIST.has(r.address))
+      .map(r => ({ ...r, hit_rate_pct: Math.round(r.wins * 100 / (r.wins + r.losses)) }));
+
+    // Add KOL_WALLETS env var entries (operator-curated, override filter)
+    const envKols = (process.env.KOL_WALLETS || '')
+      .split(',').map(s => s.trim()).filter(Boolean)
+      .filter(a => !BOT_BLACKLIST.has(a));
+
+    // Add is_kol_tier=1 wallets from DB (auto-promoted by performance)
+    const dbKols = dbInstance.prepare(
+      `SELECT address FROM tracked_wallets WHERE is_kol_tier = 1 AND COALESCE(is_blacklist, 0) = 0`
+    ).all().map(r => r.address).filter(a => !BOT_BLACKLIST.has(a));
+
+    // Merge — qualified picks + KOLs, dedup
+    const addrSet = new Set([
+      ...qualified.map(r => r.address),
+      ...envKols,
+      ...dbKols,
+    ]);
+    const addresses = Array.from(addrSet);
+
+    console.log(`[helius-wh] SYNC-SMART → pushing ${addresses.length} curated wallets to webhook ${webhookId.slice(0,8)}... (${qualified.length} qualified by performance, ${envKols.length} env-KOLs, ${dbKols.length} db-KOLs)`);
+
+    if (addresses.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No wallets qualified under current filter. Try lowering minHitRate or minWins, or add wallets to KOL_WALLETS env / is_kol_tier flag.',
+        filter: { sinceDays, minHitRate, minWins, minAvgPeak, maxPicksPerDay },
+      });
+    }
+
+    const result = await syncTrackedAddressesToHelius(webhookId, apiKey, addresses);
+    if (result.ok) {
+      logEvent('INFO', 'HELIUS_WEBHOOK_SYNC_SMART', `Pushed ${result.registered} curated wallets (Cupsey excluded, bot heuristic applied)`);
+    }
+
+    res.json({
+      ok:               result.ok,
+      action:           'sync_smart',
+      webhookId,
+      registered:       result.registered,
+      skipped:          result.skipped,
+      filter_applied:   { sinceDays, minHitRate, minWins, minAvgPeak, maxPicksPerDay },
+      bot_blacklist:    Array.from(BOT_BLACKLIST),
+      breakdown: {
+        performance_qualified: qualified.length,
+        env_var_kols:          envKols.length,
+        db_kol_tier:           dbKols.length,
+        total_unique:          addresses.length,
+      },
+      top_qualified: qualified.slice(0, 10),
+      message: 'Curated wallet list pushed. Cupsey + HFT-style bots filtered out automatically.',
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+};
+app.post('/api/helius/webhook/sync-smart', _heliusWebhookSyncSmartHandler);
+app.get('/api/helius/webhook/sync-smart',  _heliusWebhookSyncSmartHandler);
+
 // Stats: see what the webhook has been ingesting
 app.get('/api/helius/webhook/stats', (req, res) => {
   setCors(res);
