@@ -399,12 +399,13 @@ const MODES = {
     name: 'NEW_COINS', emoji: '🚀', color: '#00ff88',
     minScore: 40,
     minMarketCap: 1_000,
-    // Operator policy 2026-04-30:
-    //   $8K-$25K   sweet spot (priority bonus)
+    // Operator policy 2026-05-13:
+    //   $10K-$25K  sweet spot (priority bonus, raised floor 8K→10K)
     //   $25K-$75K  allowed but no bonus (pre-bond focus, post-mig with floor)
     //   >$75K      AUTO-REJECT regardless of score
+    //   <$10K      AUTO-REJECT — sub-$10K calls had too many rugs
     maxMarketCap:    75_000,
-    sweetSpotMin:     8_000,
+    sweetSpotMin:    10_000,
     sweetSpotMax:    25_000,
     secondaryMcapMax: 75_000,
     minLiquidity: 5_000,
@@ -418,7 +419,7 @@ const MODES = {
     thresholdAdjust: -8,
     weightMomentum: true,
     ignoreSellPressure: true,
-    description: 'Micro-cap gem hunter. Sweet spot $8K-$25K · secondary $25K-$75K · hard block above $75K.',
+    description: 'Micro-cap gem hunter. Sweet spot $10K-$25K · secondary $25K-$75K · hard block above $75K.',
   },
   TRENDING: {
     name: 'TRENDING', emoji: '📈', color: '#ffd700',
@@ -809,7 +810,7 @@ try {
   // Format: [key, current, min, max, max_step_per_change, cooldown_hours]
   const tuneParams = [
     // Legacy params (kept for backward compat with existing autotune flows)
-    ['sweetSpotMin',          '8000',  '5000',   '15000',  '1000',  6],
+    ['sweetSpotMin',          '10000', '8000',   '15000',  '1000',  6],
     ['sweetSpotMax',          '25000', '15000',  '40000',  '2500',  6],
     ['maxMarketCapOverride',  '75000', '50000',  '75000',  '5000',  6],
     ['minScoreOverride',      '38',    '28',     '60',     '3',     6],
@@ -1459,7 +1460,7 @@ const SCORING_CONFIG_DEFAULTS = {
   // 80 noSignalCap, all guards disabled) was set for max volume during
   // testing. Production needs the opposite: high-conviction only.
   minScoreToPost:         45,   // Raised 35 → 45. Hard floor — no AUTO_POST below this.
-  sweetSpotBonus:          6,   // 2026-04-30 operator policy: $8K-$25K is the best entry band for big runners.
+  sweetSpotBonus:          6,   // 2026-04-30 operator policy: $10K-$25K is the best entry band for big runners.
   secondaryBonus:          0,   // $25K-$75K allowed but no positive bias; user wants pre-bond focus.
   preLaunchBonus:          6,   // dev funded by CEX within 6h
   crossChainBonus:         4,   // matching ETH/Base token mooning
@@ -1569,7 +1570,7 @@ try {
     const MIGRATE_FORCE = {
       winPeakMultiple:    1.3,  // fallback WIN threshold
       neutralDrawdownPct: 10,
-      sweetSpotBonus:     6,    // $8K-$25K high-conviction band
+      sweetSpotBonus:     6,    // $10K-$25K high-conviction band
       secondaryBonus:     0,    // $25K-$75K allowed but no positive bias
       targetMultiplier:   5.0,  // user-only tuning target
       // ── PRODUCTION LAUNCH 2026-05-12 — re-enable disabled guards ─────
@@ -2837,7 +2838,7 @@ function buildHelpMessage() {
     `<b>💳 MEMBERSHIP</b>\n` +
     `<code>/subscribe</code> — Get VIP access (Solana Pay)\n` +
     `<code>/vip</code> or <code>/status</code> — Check your subscription\n\n` +
-    `<i>Hunting $8K-$25K sweet-spot gems with 75% target win rate.</i>`
+    `<i>Hunting $10K-$25K sweet-spot gems with 75% target win rate.</i>`
   );
 }
 
@@ -4722,12 +4723,13 @@ async function processCandidate(candidate, isRescan = false) {
   if (!ca) return;
   if (isBlocklisted(ca)) { console.log(`[auto-caller] BLOCKLIST skip — ${ca.slice(0,8)}`); return; }
 
-  // ── HARD MCap ceiling/floor — operator policy 2026-04-30 ───────────────
-  // Sweet spot $8K-$25K = best entry for big runners. $75K = hard ceiling
-  // (above this, the run we want is mostly behind us). $8K floor = below
-  // here is too pre-launch / too thin to enter cleanly. Cap is overridable
-  // via AI_CONFIG_OVERRIDES.maxMarketCapOverride.
-  const MCAP_HARD_FLOOR = 8_000;
+  // ── HARD MCap ceiling/floor — operator policy 2026-05-13 ───────────────
+  // Sweet spot $10K-$25K = best entry for big runners. $75K = hard ceiling
+  // (above this, the run we want is mostly behind us). $10K floor = below
+  // here is too pre-launch / too thin / too rugbait to enter cleanly. Cap
+  // is overridable via AI_CONFIG_OVERRIDES.maxMarketCapOverride.
+  // (Floor raised from $8K → $10K on 2026-05-13 per operator policy.)
+  const MCAP_HARD_FLOOR = 10_000;
   if ((candidate.marketCap ?? 0) > 0 && (candidate.marketCap ?? 0) < MCAP_HARD_FLOOR) {
     console.log(`[auto-caller] 🚫 $${candidate.token ?? ca.slice(0,6)} rejected — mcap $${Math.round((candidate.marketCap??0)/1000)}K below $${MCAP_HARD_FLOOR/1000}K floor`);
     return;
@@ -4880,13 +4882,13 @@ async function processCandidate(candidate, isRescan = false) {
     }
 
     // ── MCap tier bonuses ─────────────────────────────────────────────────
-    // 2026-04-30 operator policy:
-    //   $8K-$25K   sweet spot: +sweetSpotBonus (best entry for big runners)
+    // 2026-05-13 operator policy (floor raised 8K→10K):
+    //   $10K-$25K  sweet spot: +sweetSpotBonus (best entry for big runners)
     //   $25K-$75K  secondary: +secondaryBonus (allowed, default 0 — no positive bias)
-    //   <$8K       PRE_SWEETSPOT (below hard floor — already rejected upstream)
+    //   <$10K      PRE_SWEETSPOT (below hard floor — already rejected upstream)
     //   >$75K      blocked upstream by MCAP_HARD_CAP
     const mcap = enrichedCandidate.marketCap ?? 0;
-    const ssMin = TUNING_CONFIG?.thresholds?.sweetSpotMin ?? 8_000;
+    const ssMin = TUNING_CONFIG?.thresholds?.sweetSpotMin ?? 10_000;
     const ssMax = TUNING_CONFIG?.thresholds?.sweetSpotMax ?? 25_000;
     let mcapTier = null;
     if (mcap >= ssMin && mcap <= ssMax) {
@@ -8161,7 +8163,7 @@ app.get('/api/ai/memory', (req, res) => {
       gemPatterns,
       configOverrides: overrides,
       recentContext: context,
-      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??8_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??25_000 },
+      sweetSpot: { min: AI_CONFIG_OVERRIDES.sweetSpotMin??10_000, max: AI_CONFIG_OVERRIDES.sweetSpotMax??25_000 },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -8689,7 +8691,7 @@ try { dbInstance.exec(`
 // Tunable config — loaded from kv_store on boot, defaults from scorer
 const TUNING_DEFAULTS = {
   discovery: { volumeVelocity:35, buyPressure:25, walletQuality:20, holderDistribution:12, liquidityHealth:8 },
-  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:75000, sweetSpotMin:8000, sweetSpotMax:25000 },
+  thresholds: { autoPostScore:38, eliteThreshold:45, cleanThreshold:50, averageThreshold:60, mixedThreshold:70, mcapHardCap:75000, sweetSpotMin:10000, sweetSpotMax:25000 },
   penalties: { latePump1hThreshold:300, latePump1hPenalty:0, latePump1hSevereThreshold:500, latePump1hSeverePenalty:0, latePump24hThreshold:500, latePump24hPenalty:0, latePumpAgeExemptHours:0.5, winThresholdPct:20, lossThresholdPct:-30 },
 };
 let TUNING_CONFIG = JSON.parse(JSON.stringify(TUNING_DEFAULTS));
