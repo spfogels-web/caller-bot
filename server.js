@@ -1227,6 +1227,7 @@ function fnl(stage) {
 const MISSED_REFRESH_MS = 30 * 60_000;
 
 async function refreshMissedOpportunities() {
+  if (!_botActive) return;
   try {
     const cands = dbInstance.prepare(`
       SELECT contract_address, token, market_cap, evaluated_at, final_decision
@@ -18757,11 +18758,13 @@ app.listen(PORT, async () => {
   }, 15 * 60 * 1000);
 
   setTimeout(async () => {
+    if (!_botActive) { console.log('[tracker] Bot OFF — skipping initial run'); return; }
     await runPerformanceTracker({
       db: dbInstance, updateCallPerformance, getPendingCalls,
       updateDeployerOutcome, rebuildWinnerProfiles, sendAdminAlert,
     });
     setInterval(async () => {
+      if (!_botActive) { console.log('[tracker] Bot OFF — skipping'); return; }
       try {
         await runPerformanceTracker({
           db: dbInstance, updateCallPerformance, getPendingCalls,
