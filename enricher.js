@@ -39,7 +39,7 @@ const getHeliusApi = () =>
 // Free Solana public RPC — use for basic calls to save Helius credits
 const SOLANA_PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
 
-const getBirdeyeKey    = () => process.env.BIRDEYE_API_KEY ?? '';
+const getBirdeyeKey    = () => process.env.BIRDEYE_DISABLED === '1' ? '' : (process.env.BIRDEYE_API_KEY ?? '');
 const getHeliusKey    = () => process.env.HELIUS_API_KEY  ?? '';
 const getLunarCrushKey = () => process.env.LUNARCRUSH_API_KEY ?? '';
 

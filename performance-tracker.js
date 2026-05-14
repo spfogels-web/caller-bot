@@ -39,16 +39,47 @@ const SOLANA_RPC   = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
 // ─── Price Fetching ───────────────────────────────────────────────────────────
 
 /**
- * Fetch current price via Birdeye (preferred — has priceChange fields).
- * Falls back to DexScreener (free, no key) so outcomes still resolve
- * even when BIRDEYE_API_KEY is not configured.
+ * Fetch current price — DexScreener first (free), Birdeye as last-resort fallback.
+ * Set BIRDEYE_DISABLED=1 to skip Birdeye entirely system-wide.
  * Returns { priceUsd, marketCap, priceChange1h, priceChange6h, priceChange24h } or null.
  */
 async function fetchCurrentPrice(contractAddress) {
   if (!contractAddress) return null;
 
-  // ── Primary: Birdeye ──────────────────────────────────────────────────────
-  if (BIRDEYE_KEY) {
+  const birdeyeDisabled = process.env.BIRDEYE_DISABLED === '1';
+
+  // ── Primary: DexScreener (free, no key needed) ────────────────────────────
+  try {
+    const res = await fetch(
+      `https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(contractAddress)}`,
+      { signal: AbortSignal.timeout(10_000) }
+    );
+    if (res.ok) {
+      const j    = await res.json();
+      const pairs = (j?.pairs || []).filter(p => (p.chainId || p.chain) === 'solana');
+      if (pairs.length) {
+        const best = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        const price = parseFloat(best.priceUsd || '0');
+        if (price) {
+          return {
+            priceUsd:      price,
+            marketCap:     best.marketCap ?? best.fdv ?? null,
+            priceChange1h: best.priceChange?.h1  ?? null,
+            priceChange6h: best.priceChange?.h6  ?? null,
+            priceChange24h:best.priceChange?.h24 ?? null,
+            volume24h:     best.volume?.h24      ?? null,
+            holders:       null,
+            source:        'dexscreener',
+          };
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[tracker] DexScreener fetch failed for ${contractAddress}: ${err.message}`);
+  }
+
+  // ── Fallback: Birdeye (paid — only when DexScreener returned nothing) ─────
+  if (BIRDEYE_KEY && !birdeyeDisabled) {
     try {
       const res = await fetch(
         `https://public-api.birdeye.so/defi/token_overview?address=${contractAddress}`,
@@ -78,34 +109,7 @@ async function fetchCurrentPrice(contractAddress) {
     }
   }
 
-  // ── Fallback: DexScreener (free, no key needed) ───────────────────────────
-  try {
-    const res = await fetch(
-      `https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(contractAddress)}`,
-      { signal: AbortSignal.timeout(10_000) }
-    );
-    if (!res.ok) return null;
-    const j    = await res.json();
-    const pairs = (j?.pairs || []).filter(p => (p.chainId || p.chain) === 'solana');
-    if (!pairs.length) return null;
-    // Pick most liquid pair
-    const best = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
-    const price = parseFloat(best.priceUsd || '0');
-    if (!price) return null;
-    return {
-      priceUsd:      price,
-      marketCap:     best.marketCap ?? best.fdv ?? null,
-      priceChange1h: best.priceChange?.h1  ?? null,
-      priceChange6h: best.priceChange?.h6  ?? null,
-      priceChange24h:best.priceChange?.h24 ?? null,
-      volume24h:     best.volume?.h24      ?? null,
-      holders:       null,
-      source:        'dexscreener',
-    };
-  } catch (err) {
-    console.warn(`[tracker] DexScreener fetch failed for ${contractAddress}: ${err.message}`);
-    return null;
-  }
+  return null;
 }
 
 /**

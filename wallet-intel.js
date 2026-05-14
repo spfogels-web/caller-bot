@@ -21,7 +21,8 @@ const HELIUS_RPC_URL = process.env.HELIUS_API_KEY
   ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`
   : null;
 
-const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY ?? null;
+const BIRDEYE_API_KEY    = process.env.BIRDEYE_API_KEY ?? null;
+const BIRDEYE_DISABLED   = () => process.env.BIRDEYE_DISABLED === '1';
 
 // ─── Fetch top N token holder addresses via Helius RPC ───────────────────────
 // Uses getTokenLargestAccounts — fastest way to get top holders on Solana
@@ -118,7 +119,7 @@ async function fetchDeployerWallet(contractAddress) {
 // ─── Fetch momentum from Birdeye ─────────────────────────────────────────────
 
 async function fetchBirdeyeMomentum(contractAddress) {
-  if (!BIRDEYE_API_KEY || !contractAddress) return null;
+  if (!BIRDEYE_API_KEY || !contractAddress || BIRDEYE_DISABLED()) return null;
   try {
     const res = await fetch(
       `https://public-api.birdeye.so/defi/token_overview?address=${contractAddress}`,

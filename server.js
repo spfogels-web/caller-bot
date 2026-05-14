@@ -2441,9 +2441,9 @@ async function resolveCoinImage(candidate) {
     } catch (err) { console.warn(`${tag} ✗ Helius DAS err: ${err.message}`); }
   }
 
-  // Source 3 — Birdeye Premium logo
+  // Source 3 — Birdeye Premium logo (skip when BIRDEYE_DISABLED=1)
   const birdKey = process.env.BIRDEYE_API_KEY;
-  if (birdKey) {
+  if (birdKey && process.env.BIRDEYE_DISABLED !== '1') {
     try {
       const r = await fetch(
         `https://public-api.birdeye.so/defi/token_overview?address=${encodeURIComponent(ca)}`,
@@ -14359,21 +14359,25 @@ async function runApiHealthCheck() {
     _apiHealthState.helius = false; checks.helius = false;
   }
 
-  // Birdeye
-  try {
-    const key = process.env.BIRDEYE_API_KEY || process.env.BIRDEYE_API_KEY_1;
-    if (key) {
-      const r = await fetch('https://public-api.birdeye.so/defi/token_overview?address=So11111111111111111111111111111111111111112', {
-        headers: { 'X-API-KEY': key }, signal: AbortSignal.timeout(8000),
-      });
-      checks.birdeye = r.ok;
-      if (!r.ok && _apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — HTTP ${r.status}. Market data + enrichment affected.`);
-      if (r.ok && !_apiHealthState.birdeye) alerts.push(`✅ <b>Birdeye API RECOVERED</b>`);
-      _apiHealthState.birdeye = r.ok;
+  // Birdeye — skip entirely when BIRDEYE_DISABLED=1 to prevent credit burns
+  if (process.env.BIRDEYE_DISABLED !== '1') {
+    try {
+      const key = process.env.BIRDEYE_API_KEY || process.env.BIRDEYE_API_KEY_1;
+      if (key) {
+        const r = await fetch('https://public-api.birdeye.so/defi/token_overview?address=So11111111111111111111111111111111111111112', {
+          headers: { 'X-API-KEY': key }, signal: AbortSignal.timeout(8000),
+        });
+        checks.birdeye = r.ok;
+        if (!r.ok && _apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — HTTP ${r.status}. Market data + enrichment affected.`);
+        if (r.ok && !_apiHealthState.birdeye) alerts.push(`✅ <b>Birdeye API RECOVERED</b>`);
+        _apiHealthState.birdeye = r.ok;
+      }
+    } catch (e) {
+      if (_apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — ${e.message}. No market data.`);
+      _apiHealthState.birdeye = false; checks.birdeye = false;
     }
-  } catch (e) {
-    if (_apiHealthState.birdeye) alerts.push(`❌ <b>Birdeye API DOWN</b> — ${e.message}. No market data.`);
-    _apiHealthState.birdeye = false; checks.birdeye = false;
+  } else {
+    checks.birdeye = true; // disabled — don't report as down
   }
 
   // DexScreener
@@ -16484,7 +16488,7 @@ const _callCardDiagHandler = async (req, res) => {
   }
 
   const birdKey = process.env.BIRDEYE_API_KEY;
-  if (birdKey) {
+  if (birdKey && process.env.BIRDEYE_DISABLED !== '1') {
     try {
       const r = await fetch(
         `https://public-api.birdeye.so/defi/token_overview?address=${encodeURIComponent(ca)}`,

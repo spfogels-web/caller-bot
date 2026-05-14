@@ -548,7 +548,7 @@ export async function buildCACard(db, ca, heliusKey, escapeHtml, postedBy = null
   } catch { /* skip — coin may not be on pump.fun */ }
   // Fallback — Birdeye Premium logoURI (operator pays for Premium, this
   // unlocks reliable CDN-cached logos for most SPL tokens).
-  if (!imageUrl && process.env.BIRDEYE_API_KEY) {
+  if (!imageUrl && process.env.BIRDEYE_API_KEY && process.env.BIRDEYE_DISABLED !== '1') {
     try {
       const r = await fetch(
         `https://public-api.birdeye.so/defi/token_overview?address=${encodeURIComponent(ca)}`,
