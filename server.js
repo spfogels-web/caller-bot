@@ -1416,6 +1416,19 @@ try {
       );
     `);
   } catch (err) { console.warn('[registered-groups] schema init:', err.message); }
+  // Bot users — every unique user who sends /start (our "download" count).
+  try {
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS bot_users (
+        telegram_id  TEXT PRIMARY KEY,
+        username     TEXT,
+        first_name   TEXT,
+        first_seen   TEXT DEFAULT (datetime('now')),
+        last_seen    TEXT DEFAULT (datetime('now')),
+        source       TEXT DEFAULT 'dm'
+      );
+    `);
+  } catch (err) { console.warn('[bot-users] schema init:', err.message); }
 
   // ── One-time backfill: synthesize reasons for any pre-existing NULL/empty
   // audit rows so the AI Tuning Audit panel never displays "No reason
@@ -3009,6 +3022,40 @@ async function handleWalletsCommand(chatId, args) {
 //   /kol list                          → show current KOL wallets
 //   /kol add <address>                 → promote one wallet
 //   /kol remove <address>              → demote one wallet
+async function handleUsersCommand(chatId, fromUserId) {
+  if (String(fromUserId) !== String(ADMIN_TELEGRAM_ID)) {
+    await sendTelegramMessage(chatId, '🔐 Admin only.'); return;
+  }
+  try {
+    const totalUsers  = dbInstance.prepare(`SELECT COUNT(*) AS n FROM bot_users`).get()?.n ?? 0;
+    const dmUsers     = dbInstance.prepare(`SELECT COUNT(*) AS n FROM bot_users WHERE source='dm'`).get()?.n ?? 0;
+    const groupUsers  = dbInstance.prepare(`SELECT COUNT(*) AS n FROM bot_users WHERE source='group'`).get()?.n ?? 0;
+    const today       = dbInstance.prepare(`SELECT COUNT(*) AS n FROM bot_users WHERE first_seen >= date('now')`).get()?.n ?? 0;
+    const thisWeek    = dbInstance.prepare(`SELECT COUNT(*) AS n FROM bot_users WHERE first_seen >= date('now','-7 days')`).get()?.n ?? 0;
+    const activeToday = dbInstance.prepare(`SELECT COUNT(*) AS n FROM bot_users WHERE last_seen >= date('now')`).get()?.n ?? 0;
+    const groups      = dbInstance.prepare(`SELECT COUNT(*) AS n FROM registered_groups WHERE active=1`).get()?.n ?? 0;
+    const trials      = dbInstance.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE status='TRIAL' AND expires_at > datetime('now')`).get()?.n ?? 0;
+    const trialsTotal = dbInstance.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE status IN ('TRIAL','TRIAL_EXPIRED')`).get()?.n ?? 0;
+    const paid        = dbInstance.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE status='ACTIVE' AND expires_at > datetime('now')`).get()?.n ?? 0;
+    const paidTotal   = dbInstance.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE status='ACTIVE'`).get()?.n ?? 0;
+
+    await sendTelegramMessage(chatId,
+      `👥 <b>Bot Growth</b>\n\n` +
+      `📲 <b>Total Users</b>: <b>${totalUsers.toLocaleString()}</b>\n` +
+      `┣ DM: ${dmUsers.toLocaleString()} · Group: ${groupUsers.toLocaleString()}\n` +
+      `┣ New today: <b>${today}</b> · This week: <b>${thisWeek}</b>\n` +
+      `┗ Active today: <b>${activeToday}</b>\n\n` +
+      `🏘 <b>Groups</b>: <b>${groups}</b> active\n\n` +
+      `📊 <b>Funnel</b>\n` +
+      `┣ Trials active: <b>${trials}</b> (${trialsTotal} total)\n` +
+      `┣ Paid active: <b>${paid}</b> (${paidTotal} all-time)\n` +
+      `┗ Conversion: <b>${totalUsers > 0 ? ((paid / totalUsers) * 100).toFixed(1) : 0}%</b> paid`
+    );
+  } catch (err) {
+    await sendTelegramMessage(chatId, `⚠️ Error: ${escapeHtml(err.message)}`);
+  }
+}
+
 //   /kol auto                          → auto-promote all eligible candidates
 //   /kol candidates                    → preview candidates (no promotion)
 async function handleKolCommand(chatId, args, fromUserId) {
@@ -3851,6 +3898,20 @@ function buildRegimeMessage() {
 }
 
 // ─── Command Handlers ─────────────────────────────────────────────────────────
+
+function recordBotUser(telegramId, username, firstName, source = 'dm') {
+  if (!telegramId) return;
+  try {
+    dbInstance.prepare(`
+      INSERT INTO bot_users (telegram_id, username, first_name, source)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(telegram_id) DO UPDATE SET
+        username  = excluded.username,
+        first_name= excluded.first_name,
+        last_seen = datetime('now')
+    `).run(String(telegramId), username ?? null, firstName ?? null, source);
+  } catch {}
+}
 
 async function handleStartCommand(chatId, telegramId)     {
   // If user is already a VIP (paid or trial) or has used their trial,
@@ -15146,6 +15207,12 @@ app.post('/webhook', async (req, res) => {
   const fromId    = message.from?.id;
   if (!chatId) return;
 
+  // Record every unique user (our "download" count)
+  if (fromId && !message.from?.is_bot) {
+    const src = message.chat?.type === 'group' || message.chat?.type === 'supergroup' ? 'group' : 'dm';
+    recordBotUser(fromId, message.from?.username, message.from?.first_name, src);
+  }
+
   // ── Group-leaderboard CA listener + Phanes-replacement card reply ──────
   // Every NON-BOT text message gets scanned for Solana CAs. For each CA:
   //   1. Record (user, CA, mcap-now) for /grouplb ranking
@@ -15308,6 +15375,7 @@ app.post('/webhook', async (req, res) => {
       // ── ADMIN ──
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
       case '/kol':       await handleKolCommand(chatId, args, fromId); break;
+      case '/users':     await handleUsersCommand(chatId, fromId); break;
       // ── FREE TIER ──
       case '/portfolio':   await handlePortfolioCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
       case '/profile':     await handleProfileCommand(chatId, args, fromId, message.from?.username || message.from?.first_name); break;
