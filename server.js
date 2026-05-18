@@ -3154,23 +3154,47 @@ function isUserVip(telegramId) {
   } catch { return false; }
 }
 
-async function sendUpgradePrompt(chatId, featureName) {
+async function sendUpgradePrompt(chatId, featureName, telegramId = null) {
   try {
-    const { buildSubscribeCtaKeyboard } = await import('./subscription-engine.js');
-    await sendTelegramMessage(chatId,
-      `💎 <b>Premium Feature</b>\n\n` +
-      `<b>${featureName}</b> is a VIP-only tool.\n\n` +
-      `Subscribe to unlock:\n` +
+    const { buildSubscribeCtaKeyboard, buildTrialPhoneRequestKeyboard } = await import('./subscription-engine.js');
+
+    // Check if this user qualifies for the free trial (no subscription row at all)
+    let qualifiesForTrial = false;
+    if (telegramId) {
+      try {
+        const existing = dbInstance.prepare(
+          `SELECT status FROM subscriptions WHERE telegram_id = ? ORDER BY id DESC LIMIT 1`
+        ).get(String(telegramId));
+        qualifiesForTrial = !existing;
+      } catch {}
+    }
+
+    const perks =
       `• 🧪 Deep AI analysis on any token\n` +
       `• 🔍 "Why was this called?" reasoning\n` +
       `• 🏆 Best recent calls feed\n` +
       `• 📊 Live bot stats + market regime\n` +
       `• 👁 Active watchlist + wallet tracking\n` +
-      `• ⚡ Calls at entry (not 2× delayed)\n\n` +
-      `<b>$89 for 30 days. Pay in SOL.</b>`,
-      { reply_markup: buildSubscribeCtaKeyboard() });
+      `• ⚡ Calls at entry (not 2× delayed)`;
+
+    if (qualifiesForTrial) {
+      await sendTelegramMessage(chatId,
+        `💎 <b>Premium Feature</b>\n\n` +
+        `<b>${featureName}</b> is a VIP-only tool.\n\n` +
+        `${perks}\n\n` +
+        `🎁 <b>Try it free for 48 hours</b> — tap below to claim. One trial per phone.\n\n` +
+        `<i>Or subscribe: $89 for 30 days, pay in SOL.</i>`,
+        { reply_markup: buildTrialPhoneRequestKeyboard() });
+    } else {
+      await sendTelegramMessage(chatId,
+        `💎 <b>Premium Feature</b>\n\n` +
+        `<b>${featureName}</b> is a VIP-only tool.\n\n` +
+        `${perks}\n\n` +
+        `<b>$89 for 30 days. Pay in SOL.</b>`,
+        { reply_markup: buildSubscribeCtaKeyboard() });
+    }
   } catch (err) {
-    await sendTelegramMessage(chatId, `💎 Premium feature — run /subscribe to unlock.`);
+    await sendTelegramMessage(chatId, `💎 Premium feature — tap /start to claim your free 48h trial or run /subscribe.`);
   }
 }
 
@@ -14731,19 +14755,19 @@ app.post('/webhook', async (req, res) => {
               buildAlertsSubmenu(),
             );
           } else if (action === 'livecalls_open') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔥 Live Calls'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔥 Live Calls', tgUserId); return; }
             await editMenuTo(
               `🔥 <b>Live Calls</b>\n<i>The bot's recent plays + reasoning.</i>`,
               buildLiveCallsSubmenu(),
             );
           } else if (action === 'wallets_open') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Wallet Tracking'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Wallet Tracking', tgUserId); return; }
             await editMenuTo(
               `🐋 <b>Wallet Tracking</b>\n<i>Add wallets to Pulse's smart-money DB. The more good wallets, the better the calls.</i>`,
               buildWalletTrackingSubmenu(),
             );
           } else if (action === 'intel_open') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🌐 Market Intel'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🌐 Market Intel', tgUserId); return; }
             await editMenuTo(
               `🌐 <b>Market Intel</b>\n<i>Bot performance, regime, and deep-scan tools.</i>`,
               buildMarketIntelSubmenu(),
@@ -14760,29 +14784,29 @@ app.post('/webhook', async (req, res) => {
               buildUpgradeSubmenu(),
             );
           } else if (action === 'regime') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🌐 Market Regime'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🌐 Market Regime', tgUserId); return; }
             await handleRegimeCommand(chatId);
           } else if (action === 'scan_prompt') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔬 Deep Scan'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔬 Deep Scan', tgUserId); return; }
             await replyNew(
               `🔬 <b>Deep Scan</b>\n\nReply with: <code>/scan &lt;CA or $TICKER&gt;</code>`,
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'track_prompt') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Track a Wallet'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Track a Wallet', tgUserId); return; }
             await replyNew(
               `🐋 <b>Track a wallet</b>\n\nReply with: <code>/track &lt;wallet address&gt;</code>\n\n` +
               `That wallet's buys feed Pulse's smart-money signals. More good wallets = better calls.`,
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'untrack_prompt') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Untrack a Wallet'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 Untrack a Wallet', tgUserId); return; }
             await replyNew(
               `🐋 <b>Untrack a wallet</b>\n\nReply with: <code>/untrack &lt;wallet address&gt;</code>`,
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'mywallets') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 My Tracked Wallets'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🐋 My Tracked Wallets', tgUserId); return; }
             await handleTrackWalletCommand(chatId, 'list', tgUserId, tgUsername || cbq.from?.first_name);
           } else if (action === 'subscribe') {
             const { handleSubscribeRequest } = await import('./subscription-engine.js');
@@ -14791,10 +14815,10 @@ app.post('/webhook', async (req, res) => {
           } else if (action === 'vip') {
             await handleVipStatusCommand(chatId, tgUserId);
           } else if (action === 'top') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🏆 Top Recent Calls'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🏆 Top Recent Calls', tgUserId); return; }
             await handleTopCommand(chatId);
           } else if (action === 'calls') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '📞 Recent Group Calls'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '📞 Recent Group Calls', tgUserId); return; }
             await handleCallsCommand(chatId);
           } else if (action === 'profile') {
             await handleProfileCommand(chatId, '', tgUserId, tgUsername || cbq.from?.first_name);
@@ -14827,24 +14851,24 @@ app.post('/webhook', async (req, res) => {
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'watchlist') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '👁 Active Watchlist'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '👁 Active Watchlist', tgUserId); return; }
             await handleWatchlistCommand(chatId);
           } else if (action === 'why_prompt') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔍 Why Was This Called?'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔍 Why Was This Called?', tgUserId); return; }
             await replyNew(
               `🔍 <b>Why was a coin called or skipped?</b>\n\nReply with: <code>/why &lt;CA or $TICKER&gt;</code>\n\n` +
               `Example: <code>/why $SCAM</code>`,
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'analyze_prompt') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis', tgUserId); return; }
             await replyNew(
               `🧪 <b>Deep AI analysis</b>\n\nReply with: <code>/analyze &lt;CA or $TICKER&gt;</code>\n\n` +
               `Runs 4 sub-scorers + wallet intel — takes ~20 seconds.`,
               buildBackToMenuKeyboard(),
             );
           } else if (action === 'stats') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '📊 Bot Performance Stats'); return; }
+            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '📊 Bot Performance Stats', tgUserId); return; }
             await handleStatsCommand(chatId);
           } else if (action === 'help') {
             await replyNew(buildHelpMessage(), buildBackToMenuKeyboard());
@@ -14941,6 +14965,44 @@ app.post('/webhook', async (req, res) => {
             signal: AbortSignal.timeout(8_000),
           });
         } catch (err) { console.warn('[pnl-card] err:', err.message); }
+        return;
+      }
+
+      // sub:<action>:<ref> — payment flow callbacks (check / cancel / renew)
+      if (prefix === 'sub') {
+        try {
+          const { checkSubscriptionStatus, cancelPendingSubscription, handleSubscribeRequest } = await import('./subscription-engine.js');
+          const chatId = msgRef.chat.id;
+          const tgUserId = cbq.from?.id;
+          const tgUsername = cbq.from?.username;
+          const parts = cbData.split(':'); // sub:action:ref
+          const subAction = parts[1];
+          const ref = parts[2] || null;
+          if (subAction === 'check' && ref) {
+            const r = await checkSubscriptionStatus(ref);
+            await fetch(`${TELEGRAM_API}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text: r.message, parse_mode: 'HTML',
+                ...(r.keyboard ? { reply_markup: r.keyboard } : {}) }),
+              signal: AbortSignal.timeout(8_000),
+            });
+          } else if (subAction === 'cancel' && ref) {
+            const r = cancelPendingSubscription(ref);
+            await fetch(`${TELEGRAM_API}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text: r?.message || '✅ Payment cancelled.', parse_mode: 'HTML' }),
+              signal: AbortSignal.timeout(8_000),
+            });
+          } else if (subAction === 'renew' || subAction === 'start' || subAction === 'stats') {
+            const r = await handleSubscribeRequest({ telegramId: tgUserId, username: tgUsername, chatId });
+            await fetch(`${TELEGRAM_API}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text: r.message, parse_mode: 'HTML',
+                ...(r.keyboard ? { reply_markup: r.keyboard } : {}) }),
+              signal: AbortSignal.timeout(8_000),
+            });
+          }
+        } catch (err) { console.warn('[sub-callback] err:', err.message); }
         return;
       }
 
@@ -15134,18 +15196,18 @@ app.post('/webhook', async (req, res) => {
       case '/menu':      await handleMenuCommand(chatId, fromId);       break;
       case '/help':      await handleHelpCommand(chatId);               break;
       // ── PREMIUM (VIP-only) ──
-      case '/analyze':   isUserVip(fromId) ? await handleAnalyzeCommand(chatId, args)   : await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis'); break;
-      case '/scan':      isUserVip(fromId) ? await handleScanCommand(chatId, args)      : await sendUpgradePrompt(chatId, '🔬 Quick Onchain Scan'); break;
-      case '/stats':     isUserVip(fromId) ? await handleStatsCommand(chatId)            : await sendUpgradePrompt(chatId, '📊 Bot Performance Stats'); break;
-      case '/calls':     isUserVip(fromId) ? await handleCallsCommand(chatId)            : await sendUpgradePrompt(chatId, '📞 Recent Group Calls'); break;
-      case '/watchlist': isUserVip(fromId) ? await handleWatchlistCommand(chatId)        : await sendUpgradePrompt(chatId, '👁 Active Watchlist'); break;
-      case '/regime':    isUserVip(fromId) ? await handleRegimeCommand(chatId)           : await sendUpgradePrompt(chatId, '🌐 Market Regime'); break;
-      case '/why':       isUserVip(fromId) ? await handleWhyCommand(chatId, args)        : await sendUpgradePrompt(chatId, '🔍 Why Was This Called?'); break;
-      case '/wallets':   isUserVip(fromId) ? await handleWalletsCommand(chatId, args)    : await sendUpgradePrompt(chatId, '🐋 Wallet Backing'); break;
-      case '/top':       isUserVip(fromId) ? await handleTopCommand(chatId)              : await sendUpgradePrompt(chatId, '🏆 Top Recent Calls'); break;
-      case '/track':     isUserVip(fromId) ? await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 Track a Wallet'); break;
-      case '/untrack':   isUserVip(fromId) ? await handleUntrackWalletCommand(chatId, args, fromId)                                                    : await sendUpgradePrompt(chatId, '🐋 Untrack a Wallet'); break;
-      case '/mywallets': isUserVip(fromId) ? await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 My Tracked Wallets'); break;
+      case '/analyze':   isUserVip(fromId) ? await handleAnalyzeCommand(chatId, args)   : await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis', fromId); break;
+      case '/scan':      isUserVip(fromId) ? await handleScanCommand(chatId, args)      : await sendUpgradePrompt(chatId, '🔬 Quick Onchain Scan', fromId); break;
+      case '/stats':     isUserVip(fromId) ? await handleStatsCommand(chatId)            : await sendUpgradePrompt(chatId, '📊 Bot Performance Stats', fromId); break;
+      case '/calls':     isUserVip(fromId) ? await handleCallsCommand(chatId)            : await sendUpgradePrompt(chatId, '📞 Recent Group Calls', fromId); break;
+      case '/watchlist': isUserVip(fromId) ? await handleWatchlistCommand(chatId)        : await sendUpgradePrompt(chatId, '👁 Active Watchlist', fromId); break;
+      case '/regime':    isUserVip(fromId) ? await handleRegimeCommand(chatId)           : await sendUpgradePrompt(chatId, '🌐 Market Regime', fromId); break;
+      case '/why':       isUserVip(fromId) ? await handleWhyCommand(chatId, args)        : await sendUpgradePrompt(chatId, '🔍 Why Was This Called?', fromId); break;
+      case '/wallets':   isUserVip(fromId) ? await handleWalletsCommand(chatId, args)    : await sendUpgradePrompt(chatId, '🐋 Wallet Backing', fromId); break;
+      case '/top':       isUserVip(fromId) ? await handleTopCommand(chatId)              : await sendUpgradePrompt(chatId, '🏆 Top Recent Calls', fromId); break;
+      case '/track':     isUserVip(fromId) ? await handleTrackWalletCommand(chatId, args, fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 Track a Wallet', fromId); break;
+      case '/untrack':   isUserVip(fromId) ? await handleUntrackWalletCommand(chatId, args, fromId)                                                    : await sendUpgradePrompt(chatId, '🐋 Untrack a Wallet', fromId); break;
+      case '/mywallets': isUserVip(fromId) ? await handleTrackWalletCommand(chatId, 'list', fromId, message.from?.username || message.from?.first_name) : await sendUpgradePrompt(chatId, '🐋 My Tracked Wallets', fromId); break;
       // ── ADMIN ──
       case '/config':    await handleConfigCommand(chatId, args, fromId); break;
       case '/kol':       await handleKolCommand(chatId, args, fromId); break;

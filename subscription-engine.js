@@ -257,7 +257,7 @@ export function buildSubscribeCtaKeyboard() {
   return {
     inline_keyboard: [
       [
-        { text: '💎 Subscribe Now', callback_data: 'sub:start' },
+        { text: '💎 Subscribe Now', callback_data: 'menu:subscribe' },
       ],
     ],
   };
@@ -403,7 +403,7 @@ export async function activateTrial({ telegramId, username, chatId, phoneRaw }) 
     ok:       true,
     status:   'TRIAL_ACTIVATED',
     message:  welcome,
-    keyboard: { inline_keyboard: [[{ text: '💎 Subscribe Anytime', callback_data: 'sub:start' }]] },
+    keyboard: { inline_keyboard: [[{ text: '💎 Subscribe Anytime', callback_data: 'menu:subscribe' }]] },
   };
 }
 
