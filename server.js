@@ -3789,20 +3789,20 @@ async function handleStartCommand(chatId, telegramId)     {
 
   if (offerTrial) {
     const { buildTrialPhoneRequestKeyboard } = await import('./subscription-engine.js');
-    await sendTelegramMessage(chatId,
+    await sendMenuWithBanner(chatId,
       `<b>Welcome to Pulse Caller</b>\n` +
-      `Your edge in Solana memecoins.\n\n` +
+      `<i>Your edge in Solana memecoins.</i>\n\n` +
       `🎁 <b>You qualify for a 48-hour VIP trial</b> — full access to live calls AT ENTRY, deep AI analysis, and the wallet alpha feed.\n\n` +
       `Tap below to claim. One trial per phone.`,
-      { reply_markup: buildTrialPhoneRequestKeyboard() }
+      buildTrialPhoneRequestKeyboard()
     );
     return;
   }
 
-  await sendTelegramMessage(chatId, buildWelcomeCard(), { reply_markup: buildMainMenuKeyboard() });
+  await sendMenuWithBanner(chatId, buildWelcomeCard(), buildMainMenuKeyboard());
 }
 
-// Branded welcome card — matches the menu hub design across /start and /menu.
+// Branded welcome card caption — shown under the banner image.
 function buildWelcomeCard() {
   return (
     `<b>Welcome to Pulse Caller</b>\n` +
@@ -3811,10 +3811,44 @@ function buildWelcomeCard() {
     `<code>▲ MAIN MENU · 9 OPTIONS · ONE TAP DEEP</code>`
   );
 }
+
+// Send the Pulse Caller banner with caption + inline keyboard in one message.
+// Falls back to plain text if no banner is available.
+async function sendMenuWithBanner(chatId, captionText, keyboard) {
+  const photoSrc = _bannerFileId || BANNER_IMAGE_URL;
+  if (photoSrc) {
+    try {
+      const res = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id:      chatId,
+          photo:        photoSrc,
+          caption:      captionText,
+          parse_mode:   'HTML',
+          reply_markup: keyboard,
+        }),
+      });
+      const j = await res.json();
+      if (j.ok) {
+        const photos = j.result?.photo;
+        if (photos?.length && !_bannerFileId) {
+          _bannerFileId = photos[photos.length - 1].file_id;
+          console.log(`[menu-banner] file_id cached from menu send`);
+        }
+        return;
+      }
+      console.warn('[menu-banner] sendPhoto not ok:', j.description);
+    } catch (err) {
+      console.warn('[menu-banner] sendPhoto failed:', err.message);
+    }
+  }
+  // Fallback — no banner configured or send failed
+  await sendTelegramMessage(chatId, captionText, { reply_markup: keyboard });
+}
+
 async function handleHelpCommand(chatId)      { await sendTelegramMessage(chatId, buildHelpMessage(), { reply_markup: buildMainMenuKeyboard() }); }
 async function handleMenuCommand(chatId, telegramId)      {
-  // Check if user has any subscription history. If not, show trial offer
-  // alongside the menu so they discover the 48h trial here too.
   let isNewUser = false;
   if (telegramId) {
     try {
@@ -3824,10 +3858,10 @@ async function handleMenuCommand(chatId, telegramId)      {
       isNewUser = !existing;
     } catch {}
   }
-  const intro = isNewUser
+  const caption = isNewUser
     ? buildWelcomeCard() + `\n\n🎁 <b>Tap /start to claim your free 48h VIP trial.</b>`
     : buildWelcomeCard();
-  await sendTelegramMessage(chatId, intro, { reply_markup: buildMainMenuKeyboard() });
+  await sendMenuWithBanner(chatId, caption, buildMainMenuKeyboard());
 }
 async function handleStatsCommand(chatId)     { await sendTelegramMessage(chatId, buildStatsMessage()); }
 async function handleCallsCommand(chatId)     { await sendTelegramMessage(chatId, buildRecentCallsMessage()); }
