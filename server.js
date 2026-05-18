@@ -3142,12 +3142,27 @@ function isUserVip(telegramId) {
   if (!telegramId) return false;
   if (String(telegramId) === String(ADMIN_TELEGRAM_ID)) return true;
   try {
-    // ACTIVE paid subscription OR active 48h TRIAL both unlock VIP access
+    // ACTIVE paid subscription only — trial users get /calls + /lb only
     const row = dbInstance.prepare(`
       SELECT status FROM subscriptions
       WHERE telegram_id = ?
-        AND status IN ('ACTIVE', 'TRIAL')
+        AND status = 'ACTIVE'
         AND (expires_at IS NULL OR expires_at > datetime('now'))
+      ORDER BY id DESC LIMIT 1
+    `).get(String(telegramId));
+    return !!row;
+  } catch { return false; }
+}
+
+function isUserTrial(telegramId) {
+  if (!telegramId) return false;
+  if (String(telegramId) === String(ADMIN_TELEGRAM_ID)) return true;
+  try {
+    const row = dbInstance.prepare(`
+      SELECT status FROM subscriptions
+      WHERE telegram_id = ?
+        AND status = 'TRIAL'
+        AND expires_at > datetime('now')
       ORDER BY id DESC LIMIT 1
     `).get(String(telegramId));
     return !!row;
@@ -3177,7 +3192,26 @@ async function sendUpgradePrompt(chatId, featureName, telegramId = null) {
       `• 👁 Active watchlist + wallet tracking\n` +
       `• ⚡ Calls at entry (not 2× delayed)`;
 
-    if (qualifiesForTrial) {
+    // Check if user is on trial (trial only unlocks calls + lb — not full suite)
+    let isOnTrial = false;
+    if (telegramId && !qualifiesForTrial) {
+      try {
+        const tr = dbInstance.prepare(
+          `SELECT 1 FROM subscriptions WHERE telegram_id = ? AND status = 'TRIAL' AND expires_at > datetime('now') LIMIT 1`
+        ).get(String(telegramId));
+        isOnTrial = !!tr;
+      } catch {}
+    }
+
+    if (isOnTrial) {
+      await sendTelegramMessage(chatId,
+        `💎 <b>Full VIP Required</b>\n\n` +
+        `<b>${featureName}</b> is not included in the free trial.\n\n` +
+        `Your trial gives you: Live Calls + Leaderboards.\n\n` +
+        `${perks}\n\n` +
+        `<b>Upgrade to unlock everything — $89 for 30 days.</b>`,
+        { reply_markup: buildSubscribeCtaKeyboard() });
+    } else if (qualifiesForTrial) {
       await sendTelegramMessage(chatId,
         `💎 <b>Premium Feature</b>\n\n` +
         `<b>${featureName}</b> is a VIP-only tool.\n\n` +
@@ -14755,7 +14789,7 @@ app.post('/webhook', async (req, res) => {
               buildAlertsSubmenu(),
             );
           } else if (action === 'livecalls_open') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🔥 Live Calls', tgUserId); return; }
+            if (!isUserVip(tgUserId) && !isUserTrial(tgUserId)) { await sendUpgradePrompt(chatId, '🔥 Live Calls', tgUserId); return; }
             await editMenuTo(
               `🔥 <b>Live Calls</b>\n<i>The bot's recent plays + reasoning.</i>`,
               buildLiveCallsSubmenu(),
@@ -14818,7 +14852,7 @@ app.post('/webhook', async (req, res) => {
             if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '🏆 Top Recent Calls', tgUserId); return; }
             await handleTopCommand(chatId);
           } else if (action === 'calls') {
-            if (!isUserVip(tgUserId)) { await sendUpgradePrompt(chatId, '📞 Recent Group Calls', tgUserId); return; }
+            if (!isUserVip(tgUserId) && !isUserTrial(tgUserId)) { await sendUpgradePrompt(chatId, '📞 Recent Group Calls', tgUserId); return; }
             await handleCallsCommand(chatId);
           } else if (action === 'profile') {
             await handleProfileCommand(chatId, '', tgUserId, tgUsername || cbq.from?.first_name);
@@ -15199,7 +15233,7 @@ app.post('/webhook', async (req, res) => {
       case '/analyze':   isUserVip(fromId) ? await handleAnalyzeCommand(chatId, args)   : await sendUpgradePrompt(chatId, '🧪 Deep AI Analysis', fromId); break;
       case '/scan':      isUserVip(fromId) ? await handleScanCommand(chatId, args)      : await sendUpgradePrompt(chatId, '🔬 Quick Onchain Scan', fromId); break;
       case '/stats':     isUserVip(fromId) ? await handleStatsCommand(chatId)            : await sendUpgradePrompt(chatId, '📊 Bot Performance Stats', fromId); break;
-      case '/calls':     isUserVip(fromId) ? await handleCallsCommand(chatId)            : await sendUpgradePrompt(chatId, '📞 Recent Group Calls', fromId); break;
+      case '/calls':     (isUserVip(fromId)||isUserTrial(fromId)) ? await handleCallsCommand(chatId) : await sendUpgradePrompt(chatId, '📞 Recent Group Calls', fromId); break;
       case '/watchlist': isUserVip(fromId) ? await handleWatchlistCommand(chatId)        : await sendUpgradePrompt(chatId, '👁 Active Watchlist', fromId); break;
       case '/regime':    isUserVip(fromId) ? await handleRegimeCommand(chatId)           : await sendUpgradePrompt(chatId, '🌐 Market Regime', fromId); break;
       case '/why':       isUserVip(fromId) ? await handleWhyCommand(chatId, args)        : await sendUpgradePrompt(chatId, '🔍 Why Was This Called?', fromId); break;
