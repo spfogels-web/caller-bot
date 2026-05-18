@@ -1405,6 +1405,17 @@ try {
     const { ensureUserLeaderboardSchema } = await import('./user-leaderboard.js');
     ensureUserLeaderboardSchema(dbInstance);
   } catch (err) { console.warn('[user-lb] schema init:', err.message); }
+  // Registered groups — auto-populated when bot is added to a group.
+  try {
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS registered_groups (
+        chat_id    TEXT PRIMARY KEY,
+        title      TEXT,
+        added_at   TEXT DEFAULT (datetime('now')),
+        active     INTEGER DEFAULT 1
+      );
+    `);
+  } catch (err) { console.warn('[registered-groups] schema init:', err.message); }
 
   // ── One-time backfill: synthesize reasons for any pre-existing NULL/empty
   // audit rows so the AI Tuning Audit panel never displays "No reason
@@ -2674,12 +2685,24 @@ async function _sendCallAlertToOneChat(chatId, caption, fullDetailText, coinImag
   }
 }
 
+// Returns all active group chat IDs — env-configured + DB-registered (auto-added groups).
+function getAllGroupChatIds() {
+  const ids = new Set(TELEGRAM_GROUP_CHAT_IDS);
+  try {
+    const rows = dbInstance.prepare(`SELECT chat_id FROM registered_groups WHERE active = 1`).all();
+    for (const r of rows) ids.add(r.chat_id);
+  } catch {}
+  return [...ids].filter(Boolean);
+}
+
 // Outer broadcaster — fans out the call card to every configured group chat.
 // Sequential (not Promise.all) so the first send caches the banner file_id
 // for subsequent sends in the loop. One chat's failure doesn't block others.
 async function sendCallAlertWithImage(caption, fullDetailText = null, coinImageUrl = null) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_CHAT_IDS.length) return;
-  for (const chatId of TELEGRAM_GROUP_CHAT_IDS) {
+  if (!TELEGRAM_BOT_TOKEN) return;
+  const chatIds = getAllGroupChatIds();
+  if (!chatIds.length) return;
+  for (const chatId of chatIds) {
     try {
       await _sendCallAlertToOneChat(chatId, caption, fullDetailText, coinImageUrl);
     } catch (err) {
@@ -14691,6 +14714,46 @@ app.get('/api/health', async (req, res) => {
 
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
+
+  // ── Bot added / removed from group (my_chat_member update) ───────────────
+  const mcm = req.body?.my_chat_member;
+  if (mcm) {
+    const chat    = mcm.chat;
+    const newStatus = mcm.new_chat_member?.status;
+    const chatId  = String(chat?.id || '');
+    const title   = chat?.title || chat?.username || chatId;
+    const isGroup = chat?.type === 'group' || chat?.type === 'supergroup';
+    if (isGroup && chatId) {
+      if (newStatus === 'member' || newStatus === 'administrator') {
+        // Bot was added — register and greet
+        try {
+          dbInstance.prepare(`
+            INSERT INTO registered_groups (chat_id, title, active)
+            VALUES (?, ?, 1)
+            ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, active=1
+          `).run(chatId, title);
+          console.log(`[groups] Bot added to group: ${title} (${chatId})`);
+        } catch (err) { console.warn('[groups] register failed:', err.message); }
+        // Send greeting
+        try {
+          await sendMenuWithBanner(chatId,
+            `<b>Pulse Caller is live in ${escapeHtml(title)}!</b>\n\n` +
+            `I'll post Solana memecoin calls automatically as I find them.\n\n` +
+            `Drop a CA in chat to get a full coin analysis card.\n` +
+            `Type /help to see all commands.`,
+            buildMainMenuKeyboard()
+          );
+        } catch {}
+      } else if (newStatus === 'left' || newStatus === 'kicked') {
+        // Bot was removed — deactivate
+        try {
+          dbInstance.prepare(`UPDATE registered_groups SET active = 0 WHERE chat_id = ?`).run(chatId);
+          console.log(`[groups] Bot removed from group: ${title} (${chatId})`);
+        } catch {}
+      }
+    }
+    return;
+  }
 
   // ── Inline-keyboard callback (e.g. timeframe buttons on /lb, /pulselb) ──
   // callback_data format: "<prefix>:<timeframe>" — e.g. "lb:7d", "pulselb:30d".
